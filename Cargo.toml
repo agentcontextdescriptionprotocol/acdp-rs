@@ -1,0 +1,78 @@
+[package]
+name    = "acdp"
+version = "0.1.0"
+edition = "2021"
+description   = "Rust client library for the Agent Context Description Protocol (ACDP v0.0.1)"
+license       = "MIT OR Apache-2.0"
+readme        = "README.md"
+repository    = "https://github.com/agentcontextdescriptionprotocol/acdp-rs"
+homepage      = "https://github.com/agentcontextdescriptionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp"
+keywords      = ["acdp", "agent", "context", "did", "verifiable"]
+categories    = ["web-programming", "cryptography", "data-structures"]
+rust-version  = "1.75"
+exclude       = [
+    "/.github",
+    "/target",
+    "/examples",
+    "/tests",
+    "/.gitignore",
+    "/deny.toml",
+    "/rustfmt.toml",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+]
+
+[features]
+default = ["client"]
+client  = ["dep:reqwest", "dep:lru"]
+server  = []
+tracing = ["dep:tracing"]
+
+[dependencies]
+# Serialisation
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Cryptography
+sha2          = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64        = "0.22"
+hex           = "0.4"
+zeroize       = { version = "1", features = ["derive"] }
+
+# Identity / time
+chrono      = { version = "0.4", features = ["serde"] }
+uuid        = { version = "1", features = ["v4"] }
+url         = "2"
+urlencoding = "2"
+bs58        = "0.5"      # base58btc for publicKeyMultibase
+
+# Error handling
+thiserror = "1"
+
+# HTTP client (feature-gated)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
+
+# Cache (used by the DID resolver under the client feature)
+lru = { version = "0.12", optional = true }
+
+# Optional structured logging
+tracing = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
+
+[dev-dependencies]
+tokio    = { version = "1", features = ["full"] }
+anyhow   = "1"
+wiremock = "0.6"
+proptest = "1"
+
+[package.metadata.docs.rs]
+all-features        = true
+rustdoc-args        = ["--cfg", "docsrs"]
+targets             = ["x86_64-unknown-linux-gnu"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
