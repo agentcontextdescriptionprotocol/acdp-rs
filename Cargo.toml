@@ -10,7 +10,7 @@ homepage      = "https://github.com/agentcontextdescriptionprotocol/acdp-rs"
 documentation = "https://docs.rs/acdp"
 keywords      = ["acdp", "agent", "context", "did", "verifiable"]
 categories    = ["web-programming", "cryptography", "data-structures"]
-rust-version  = "1.75"
+rust-version  = "1.86"
 exclude       = [
     "/.github",
     "/target",
@@ -25,9 +25,15 @@ exclude       = [
 
 [features]
 default = ["client"]
-client  = ["dep:reqwest", "dep:lru"]
+client  = ["dep:reqwest", "dep:lru", "dep:tokio"]
 server  = []
 tracing = ["dep:tracing"]
+cli     = ["client", "tokio/macros", "tokio/rt-multi-thread"]
+
+[[bin]]
+name              = "acdp"
+path              = "src/bin/acdp.rs"
+required-features = ["cli"]
 
 [dependencies]
 # Serialisation
@@ -37,6 +43,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Cryptography
 sha2          = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+p256          = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 base64        = "0.22"
 hex           = "0.4"
 zeroize       = { version = "1", features = ["derive"] }
@@ -55,7 +62,11 @@ thiserror = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
 
 # Cache (used by the DID resolver under the client feature)
-lru = { version = "0.12", optional = true }
+lru = { version = "0.16", optional = true }
+
+# Async runtime hooks (sleep for retry backoff). Reqwest already pulls
+# in tokio transitively, but being explicit keeps the dep graph honest.
+tokio = { version = "1", features = ["time"], optional = true, default-features = false }
 
 # Optional structured logging
 tracing = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }

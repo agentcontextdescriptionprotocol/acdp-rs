@@ -35,3 +35,33 @@ The following are not considered vulnerabilities in this crate:
   registry's `limits.max_payload_bytes`; not enforced by this crate's parser).
 - Misuse of the `SigningKey` API in a way that leaks the seed before
   zeroization (e.g., storing the seed in a `Vec<u8>` that outlives the key).
+
+## Responsible defaults applied automatically
+
+When you use the public client APIs (`RegistryClient`, `WebResolver`,
+`CrossRegistryResolver`, `Verifier`), these protections apply without any
+opt-in:
+
+| Defense | Source | Where it lives |
+|---|---|---|
+| HTTPS-only for outbound calls | RFC-ACDP-0006 §7.2 | `safe_http::SsrfPolicy` |
+| IP-literal rejection (forces DNS) | §7.1 | `safe_http::SsrfPolicy` |
+| Private/loopback/link-local IPv4 + IPv6 + IMDS blocking | §7.1 | `safe_http::SsrfPolicy` |
+| 5 s connect / 30 s total request timeout | §7.4 | `RegistryClient`, `WebResolver` |
+| 1 MB context body cap, 64 KB capabilities/DID-doc cap | §7.3 | `client::registry::read_body_capped` |
+| Max 3 redirects, same authority only | §7.5 | both clients |
+| Ed25519 mandatory for signature verification | RFC-ACDP-0001 §5.10 | `crypto::verify` |
+| Algorithm-downgrade rejection (signature.algorithm vs declared method type) | RFC-ACDP-0008 §3.9 | `crypto::verify::Verifier::verify_body` |
+| Embedded data ≤ 64 KB decoded | RFC-ACDP-0002 §6.3 | `validation::validate_data_ref` |
+| Embedded `content_hash` verified when present | RFC-ACDP-0003 §2.1 step 3 | `validation::verify_embedded_hash` (also wired into `PublishValidator`) |
+| Cross-registry resolver verifies registry DID document binding | RFC-ACDP-0006 §4.1 step 3 | `client::cross_registry::CrossRegistryResolver::resolve` |
+| Tag / DID / ctx_id pattern checks at validation | schema | `validation` module |
+| Producer-side timestamp truncation to ms | RFC-ACDP-0001 §5.3 | `time::trunc_ms` |
+| Wire-error → typed error mapping | RFC-ACDP-0007 §5 | `AcdpError::from_wire_error` |
+| `Status` open enum (forward compat) | RFC-ACDP-0004 §4.1 | `types::Status` |
+
+DNS rebinding pinning (RFC-ACDP-0006 §7.6) is **not** implemented in this
+release; it requires hyper-level DNS pinning. See
+`plans/defered/README.md`. Operators running a registry that performs
+server-side cross-registry resolution SHOULD layer this defense in front
+of the library until upstream support lands.

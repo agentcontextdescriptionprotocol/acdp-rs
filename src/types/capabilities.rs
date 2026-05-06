@@ -53,6 +53,37 @@ impl CapabilitiesDocument {
     pub fn supports_federation(&self) -> bool {
         self.profiles.iter().any(|p| p == "acdp-registry-federated")
     }
+
+    /// Returns `true` if this registry advertises support for the given
+    /// signature algorithm (case-sensitive match against
+    /// `supported_signature_algorithms`).
+    pub fn supports_algorithm(&self, algorithm: &str) -> bool {
+        self.supported_signature_algorithms
+            .iter()
+            .any(|a| a == algorithm)
+    }
+
+    /// Returns `true` if this registry can resolve the given DID method
+    /// (e.g. `"did:web"`).
+    pub fn supports_did_method(&self, method: &str) -> bool {
+        self.supported_did_methods.iter().any(|m| m == method)
+    }
+
+    /// Idempotency-key TTL as a [`std::time::Duration`], if the registry
+    /// advertises one. Returns `None` when `supports_idempotency_key` is
+    /// `false` or the TTL field is absent.
+    pub fn idempotency_ttl(&self) -> Option<std::time::Duration> {
+        self.limits
+            .idempotency_key_ttl_seconds
+            .map(|s| std::time::Duration::from_secs(u64::from(s)))
+    }
+
+    /// Returns `true` when the registry requires authenticated requests
+    /// even for `visibility: public` reads (i.e. `anonymous_public_reads`
+    /// is `false`).
+    pub fn requires_anonymous_auth(&self) -> bool {
+        !self.anonymous_public_reads
+    }
 }
 
 /// Resource limits declared by the registry.

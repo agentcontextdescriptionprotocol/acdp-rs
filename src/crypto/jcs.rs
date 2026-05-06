@@ -71,8 +71,16 @@ fn write_number(n: &serde_json::Number, out: &mut Vec<u8>) {
             out.push(b'0');
             return;
         }
+        // JSON cannot represent NaN or Infinity. In practice
+        // `serde_json::Number::from_f64` rejects these (returns None),
+        // so this branch is unreachable on input that was deserialized
+        // from JSON. We keep a `null` fallback for defensive parity if
+        // an unsafe-built Number ever reaches us — but emitting `null`
+        // means the canonical bytes silently disagree with the in-memory
+        // value. Producers writing custom numeric paths SHOULD detect
+        // non-finite floats *before* canonicalization rather than rely
+        // on this fallback.
         if f.is_nan() || f.is_infinite() {
-            // JSON cannot represent NaN or Infinity; emit null as a safe fallback
             out.extend_from_slice(b"null");
             return;
         }
