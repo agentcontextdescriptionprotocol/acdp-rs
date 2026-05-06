@@ -297,11 +297,13 @@ fn is_namespaced_context_type(s: &str) -> bool {
 /// Registry-derived lifecycle status.
 ///
 /// The schema (`acdp-common.schema.json#/$defs/status`) defines an open
-/// `^[a-z][a-z0-9_]*$` pattern. v0.0.1 emits `active`, `superseded`,
-/// `expired`; future versions add `retracted` (RFC-ACDP-0009 §2.1) and
-/// possibly others. v0.0.1 consumers MUST tolerate unknown status values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// `^[a-z][a-z0-9_]*$` pattern, length 1..=64. v0.0.1 emits `active`,
+/// `superseded`, `expired`; future versions add `retracted`
+/// (RFC-ACDP-0009 §2.1) and possibly others. Consumers MUST tolerate
+/// unknown values matching the pattern; values that DO NOT match the
+/// pattern (uppercase, whitespace, empty) are rejected on
+/// deserialization as malformed registry state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     /// First-class, current version of its lineage.
     Active,
@@ -311,8 +313,59 @@ pub enum Status {
     Expired,
     /// A status string this version of the library does not recognize.
     /// Per the spec, treat as `active` for read-side decisions until upgrade.
-    #[serde(untagged)]
     Other(String),
+}
+
+impl Status {
+    /// Validate against the schema pattern `^[a-z][a-z0-9_]*$`, length 1..=64.
+    fn pattern_ok(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    /// Wire-form string representation, matching the schema enum.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Status::Active => "active",
+            Status::Superseded => "superseded",
+            Status::Expired => "expired",
+            Status::Other(s) => s,
+        }
+    }
+
+    /// Parse a status string from any source, validating the pattern.
+    pub fn parse(s: &str) -> Result<Self, AcdpError> {
+        match s {
+            "active" => Ok(Status::Active),
+            "superseded" => Ok(Status::Superseded),
+            "expired" => Ok(Status::Expired),
+            other => {
+                if !Self::pattern_ok(other) {
+                    return Err(AcdpError::SchemaViolation(format!(
+                        "status '{other}' does not match the open-enum pattern \
+                         ^[a-z][a-z0-9_]*$ (length 1..=64)"
+                    )));
+                }
+                Ok(Status::Other(other.to_string()))
+            }
+        }
+    }
+}
+
+impl Serialize for Status {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Status {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Status::parse(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Status {
@@ -336,6 +389,18 @@ impl Status {
         match self {
             Status::Other(s) => Some(s),
             _ => None,
+        }
+    }
+
+    /// Forward-compatible degradation: maps unknown statuses to
+    /// [`Status::Active`] for functional decisions, per RFC-ACDP-0004 §4.1
+    /// ("v0.0.1 consumers MUST tolerate unknown status values and SHOULD
+    /// treat them as 'active' until they upgrade"). Callers MUST log the
+    /// original `Other(_)` value so the unknown is observable.
+    pub fn known_or_active(&self) -> Status {
+        match self {
+            Status::Other(_) => Status::Active,
+            s => s.clone(),
         }
     }
 }

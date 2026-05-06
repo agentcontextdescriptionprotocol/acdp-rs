@@ -74,12 +74,42 @@ impl<'a> PublishValidator<'a> {
         req: &PublishRequest,
         raw_body_bytes: usize,
     ) -> Result<ValidatedPublish, AcdpError> {
-        self.validate_structural(req, raw_body_bytes)
+        // Run the full schema-aligned validation (string lengths, array
+        // uniqueness, DataRef oneOf + URI rules, metadata depth/size,
+        // visibility/audience invariants, did:web check, signature length,
+        // identifier patterns, version coherence) on top of the raw
+        // structural / cryptographic steps below. This makes
+        // `validate_post_schema` a complete RFC-ACDP-0003 §2.1
+        // implementation regardless of whether the producer side ran
+        // [`crate::validation::validate_publish_request`] first.
+        crate::validation::validate_publish_request(req)?;
+        self.validate_registry_limits_and_crypto(req, raw_body_bytes)
     }
 
-    /// Original method name; kept for back-compat. See
-    /// [`Self::validate_post_schema`].
+    /// Deprecated alias — now routes through [`Self::validate_post_schema`].
+    ///
+    /// The previous implementation skipped the schema-level validation
+    /// (title length, metadata depth, DataRef integrity, did:web check,
+    /// version coherence, …). Callers using `validate_structural`
+    /// directly were silently bypassing those checks. The deprecated
+    /// alias now runs the full pipeline so existing call sites remain
+    /// safe; new code should call `validate_post_schema` explicitly.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use validate_post_schema; this alias no longer skips runtime validation"
+    )]
     pub fn validate_structural(
+        &self,
+        req: &PublishRequest,
+        raw_body_bytes: usize,
+    ) -> Result<ValidatedPublish, AcdpError> {
+        self.validate_post_schema(req, raw_body_bytes)
+    }
+
+    /// Internal: registry-limit + cryptographic step list (no schema
+    /// validation). Keep private — bypassing the schema validation is
+    /// not a publishable surface.
+    fn validate_registry_limits_and_crypto(
         &self,
         req: &PublishRequest,
         raw_body_bytes: usize,
@@ -92,17 +122,21 @@ impl<'a> PublishValidator<'a> {
             )));
         }
 
-        // Step 3: embedded size
+        // Step 3: embedded size + optional embedded content_hash check
+        // (RFC-ACDP-0003 §2.1 step 3 last sentence; RFC-ACDP-0002 §6.6 #8).
         for dr in &req.data_refs {
             if let Some(emb) = &dr.embedded {
-                let approx = serde_json::to_vec(&emb.content)
-                    .map(|v| v.len())
-                    .unwrap_or(0);
-                if approx as u64 > self.caps.limits.max_embedded_bytes {
-                    return Err(AcdpError::SchemaViolation(
-                        "embedded data reference exceeds 64 KB limit".into(),
-                    ));
+                let decoded = crate::validation::embedded_decoded_bytes(emb)?;
+                if decoded.len() as u64 > self.caps.limits.max_embedded_bytes {
+                    return Err(AcdpError::EmbeddedTooLarge(format!(
+                        "embedded data reference {} bytes exceeds {} limit",
+                        decoded.len(),
+                        self.caps.limits.max_embedded_bytes
+                    )));
                 }
+                // If the producer declared an embedded content_hash, recompute
+                // and verify per §2.1 step 3.
+                crate::validation::verify_embedded_hash(dr)?;
             }
         }
 
@@ -247,7 +281,7 @@ mod tests {
         let v = PublishValidator::new(&caps);
         let req = test_request();
         let raw_len = serde_json::to_vec(&req).unwrap().len();
-        v.validate_structural(&req, raw_len).unwrap();
+        v.validate_post_schema(&req, raw_len).unwrap();
     }
 
     #[test]
@@ -256,7 +290,7 @@ mod tests {
         caps.limits.max_payload_bytes = 10;
         let v = PublishValidator::new(&caps);
         let req = test_request();
-        let err = v.validate_structural(&req, 1024).unwrap_err();
+        let err = v.validate_post_schema(&req, 1024).unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
     }
 
@@ -266,7 +300,7 @@ mod tests {
         caps.supported_signature_algorithms = vec!["secp256k1".into()];
         let v = PublishValidator::new(&caps);
         let req = test_request();
-        let err = v.validate_structural(&req, 1024).unwrap_err();
+        let err = v.validate_post_schema(&req, 1024).unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
     }
 
@@ -276,7 +310,7 @@ mod tests {
         let v = PublishValidator::new(&caps);
         let mut req = test_request();
         req.signature.key_id = "did:web:agents.example.com:test-producer".into();
-        let err = v.validate_structural(&req, 1024).unwrap_err();
+        let err = v.validate_post_schema(&req, 1024).unwrap_err();
         assert!(matches!(err, AcdpError::KeyResolution(_)));
     }
 
@@ -286,7 +320,7 @@ mod tests {
         let v = PublishValidator::new(&caps);
         let mut req = test_request();
         req.signature.key_id = "did:web:other.example.com:attacker#key-1".into();
-        let err = v.validate_structural(&req, 1024).unwrap_err();
+        let err = v.validate_post_schema(&req, 1024).unwrap_err();
         assert!(matches!(err, AcdpError::KeyNotAuthorized(_)));
     }
 
@@ -296,7 +330,7 @@ mod tests {
         let v = PublishValidator::new(&caps);
         let mut req = test_request();
         req.title = "tampered title".into();
-        let err = v.validate_structural(&req, 1024).unwrap_err();
+        let err = v.validate_post_schema(&req, 1024).unwrap_err();
         assert!(matches!(err, AcdpError::HashMismatch { .. }));
     }
 
@@ -346,7 +380,7 @@ mod tests {
             .build()
             .unwrap();
         let raw_len = serde_json::to_vec(&req).unwrap().len();
-        let err = v.validate_structural(&req, raw_len).unwrap_err();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
         match err {
             AcdpError::SupersededTarget { reason, .. } => {
                 assert_eq!(
@@ -377,7 +411,7 @@ mod tests {
             .build()
             .unwrap();
         let raw_len = serde_json::to_vec(&req).unwrap().len();
-        v.validate_structural(&req, raw_len).unwrap();
+        v.validate_post_schema(&req, raw_len).unwrap();
     }
 
     #[test]

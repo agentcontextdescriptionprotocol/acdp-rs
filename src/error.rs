@@ -18,8 +18,8 @@ pub enum AcdpError {
     #[error("JCS canonicalization failed: {0}")]
     Canonicalization(String),
 
-    /// Stored `content_hash` did not match the recomputed value.
-    /// Wire code: `hash_mismatch`.
+    /// Stored `content_hash` did not match the recomputed value
+    /// (locally detected during signature verification).
     #[error("content_hash mismatch\n  stored:     {stored}\n  recomputed: {recomputed}")]
     HashMismatch {
         /// The hash claimed by the body or request.
@@ -27,6 +27,16 @@ pub enum AcdpError {
         /// The hash recomputed by the verifier.
         recomputed: ContentHash,
     },
+
+    /// Wire code: `hash_mismatch`. The remote registry rejected a
+    /// publish request because its independent hash recomputation did
+    /// not match the producer-supplied `content_hash`. Distinct from
+    /// the local [`AcdpError::HashMismatch`] variant: this one carries
+    /// the registry's message verbatim and indicates a *producer-side*
+    /// bug (most often canonicalization divergence — see RFC-ACDP-0001
+    /// §5.7 and the `can-001` conformance fixture).
+    #[error("registry rejected hash_mismatch: {0}")]
+    RemoteHashMismatch(String),
 
     /// Signature verification failed or signature was malformed.
     /// Wire code: `invalid_signature`.
@@ -160,12 +170,41 @@ pub enum SupersessionReason {
     /// The target lives on a different registry; v0.0.1 only allows
     /// same-registry supersession.
     CrossRegistrySupersessionUnsupported,
+    /// The lineage walk through `supersedes` failed because an
+    /// intermediate context could not be retrieved (RFC-ACDP-0001 §5.6.1).
+    LineageWalkFailed,
     /// A reason this version of the library does not recognize.
     #[serde(other)]
     Other,
 }
 
 impl AcdpError {
+    /// Whether this error is plausibly transient and worth retrying
+    /// with the same request body (and, if applicable, the same
+    /// `Idempotency-Key`).
+    ///
+    /// Returned by [`AcdpError::is_transient`] only for variants whose
+    /// wire codes the spec marks retryable: `key_resolution_unreachable`
+    /// (RFC-ACDP-0001 §5.11), `rate_limited` (RFC-ACDP-0008 §4.3),
+    /// `cross_registry_resolution_failed` (RFC-ACDP-0006 §7), and
+    /// `internal_error` (RFC-ACDP-0007 §5). Generic `Http` transport
+    /// errors are conservatively treated as transient since they
+    /// usually mean DNS or TCP-level glitches.
+    ///
+    /// All cryptographic, schema, and authorization errors are NOT
+    /// transient: a malformed body or invalid signature will not
+    /// magically validate on retry.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            AcdpError::KeyResolutionUnreachable(_)
+                | AcdpError::RateLimited(_)
+                | AcdpError::CrossRegistryResolutionFailed(_)
+                | AcdpError::RegistryInternal(_)
+                | AcdpError::Http(_)
+        )
+    }
+
     /// Map a wire-protocol [`crate::types::WireError`] into a typed
     /// [`AcdpError`].
     ///
@@ -177,9 +216,7 @@ impl AcdpError {
 
         match code {
             "invalid_signature" => AcdpError::InvalidSignature(msg),
-            "hash_mismatch" => {
-                AcdpError::Serialization(format!("registry reported hash_mismatch: {msg}"))
-            }
+            "hash_mismatch" => AcdpError::RemoteHashMismatch(msg),
             "schema_violation" => AcdpError::SchemaViolation(msg),
             "not_authorized" => AcdpError::NotAuthorized(msg),
             "not_found" => AcdpError::NotFound(msg),
@@ -221,6 +258,12 @@ impl From<serde_json::Error> for AcdpError {
     }
 }
 
+impl From<std::io::Error> for AcdpError {
+    fn from(e: std::io::Error) -> Self {
+        AcdpError::Http(format!("io error: {e}"))
+    }
+}
+
 #[cfg(feature = "client")]
 impl From<reqwest::Error> for AcdpError {
     fn from(e: reqwest::Error) -> Self {
@@ -259,10 +302,8 @@ mod tests {
             ("invalid_signature", |e| {
                 matches!(e, AcdpError::InvalidSignature(_))
             }),
-            // hash_mismatch from the registry doesn't have stored/recomputed
-            // values; we surface it as Serialization to preserve the message.
             ("hash_mismatch", |e| {
-                matches!(e, AcdpError::Serialization(_))
+                matches!(e, AcdpError::RemoteHashMismatch(_))
             }),
             ("schema_violation", |e| {
                 matches!(e, AcdpError::SchemaViolation(_))
@@ -354,5 +395,39 @@ mod tests {
             AcdpError::from_wire_error(w),
             AcdpError::Registry(_)
         ));
+    }
+
+    /// T4 — `lineage_walk_failed` reason round-trips via WireError
+    /// (RFC-ACDP-0001 §5.6.1).
+    #[test]
+    fn lineage_walk_failed_reason_roundtrip() {
+        let w = wire(
+            "superseded_target",
+            "intermediate not retrievable",
+            Some(json!({
+                "reason": "lineage_walk_failed",
+                "unreachable_ctx_id":
+                    "acdp://r.example.com/12345678-1234-4321-8123-123456781234"
+            })),
+        );
+        match AcdpError::from_wire_error(w) {
+            AcdpError::SupersededTarget { reason, .. } => {
+                assert_eq!(reason, SupersessionReason::LineageWalkFailed);
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// `is_transient` covers the wire codes the spec marks retryable.
+    #[test]
+    fn is_transient_for_known_retryables() {
+        assert!(AcdpError::KeyResolutionUnreachable("x".into()).is_transient());
+        assert!(AcdpError::RateLimited("x".into()).is_transient());
+        assert!(AcdpError::CrossRegistryResolutionFailed("x".into()).is_transient());
+        assert!(AcdpError::RegistryInternal("x".into()).is_transient());
+        assert!(AcdpError::Http("x".into()).is_transient());
+        assert!(!AcdpError::SchemaViolation("x".into()).is_transient());
+        assert!(!AcdpError::InvalidSignature("x".into()).is_transient());
+        assert!(!AcdpError::NotFound("x".into()).is_transient());
     }
 }

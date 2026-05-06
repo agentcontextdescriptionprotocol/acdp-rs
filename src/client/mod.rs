@@ -4,4 +4,4 @@ pub mod verified;
 
 pub use cross_registry::CrossRegistryResolver;
 pub use registry::RegistryClient;
-pub use verified::VerifiedContext;
+pub use verified::{VerificationPolicy, VerifiedContext};

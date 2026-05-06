@@ -77,7 +77,8 @@ pub struct SearchParams {
 /// wrapping array MUST be named `matches`. Conformant consumers MUST reject
 /// responses that emit `results` or any other alternative spelling
 /// (RFC-ACDP-0005 §2.2, fixture vis-003).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchResponse {
     /// Lightweight projections of matching contexts.
     pub matches: Vec<SearchResult>,
@@ -101,7 +102,7 @@ impl SearchResponse {
 /// status. Optional: summary, domain. The full description, tags, etc. are
 /// NOT in this projection — fetch the full Body via the registry's
 /// retrieval endpoint to access them.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     /// Context identifier.
     pub ctx_id: CtxId,
@@ -133,9 +134,7 @@ pub struct SearchParamsBuilder {
     inner: SearchParams,
 }
 
-fn fmt_rfc3339_ms(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-}
+use crate::time::fmt_rfc3339_ms;
 
 impl SearchParamsBuilder {
     /// Start an empty builder.
@@ -176,6 +175,27 @@ impl SearchParamsBuilder {
     /// Filter to contexts whose `derived_from` includes this `ctx_id`.
     pub fn derived_from(mut self, c: impl Into<String>) -> Self {
         self.inner.derived_from = Some(c.into());
+        self
+    }
+
+    /// Typed alternative to [`Self::derived_from`] — accepts a strongly
+    /// typed [`CtxId`] so callers don't pass arbitrary strings.
+    pub fn derived_from_ctx_id(mut self, c: &CtxId) -> Self {
+        self.inner.derived_from = Some(c.as_str().to_string());
+        self
+    }
+
+    /// Accumulate a tag. Multiple calls are joined with `,` for the
+    /// AND-semantics matcher per RFC-ACDP-0005 §2.1.
+    pub fn tag(mut self, t: impl Into<String>) -> Self {
+        let t: String = t.into();
+        match self.inner.tags.as_mut() {
+            Some(existing) if !existing.is_empty() => {
+                existing.push(',');
+                existing.push_str(&t);
+            }
+            _ => self.inner.tags = Some(t),
+        }
         self
     }
 

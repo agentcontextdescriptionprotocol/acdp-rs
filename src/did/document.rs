@@ -68,6 +68,47 @@ impl VerificationMethod {
             "verification method has neither publicKeyJwk nor publicKeyMultibase".into(),
         ))
     }
+
+    /// Extract the SEC1-uncompressed P-256 public key (65 bytes
+    /// starting with `0x04`).
+    pub fn ecdsa_p256_public_key_sec1(&self) -> Result<Vec<u8>, AcdpError> {
+        if let Some(jwk) = &self.public_key_jwk {
+            return extract_p256_from_jwk(jwk);
+        }
+        Err(AcdpError::KeyResolution(
+            "ecdsa-p256 verification method requires publicKeyJwk \
+             (publicKeyMultibase not yet supported for P-256)"
+                .into(),
+        ))
+    }
+
+    /// Best-effort algorithm declaration derived from the verification
+    /// method's `type` and (when relevant) `publicKeyJwk` parameters.
+    ///
+    /// Returns the canonical lowercase algorithm string compatible with
+    /// `signature.algorithm` (e.g. `"ed25519"`, `"ecdsa-p256"`), or
+    /// `None` for verification methods whose declared algorithm cannot
+    /// be inferred from `type` alone.
+    ///
+    /// Used by [`crate::crypto::verify::Verifier::verify_body`] to
+    /// detect algorithm-downgrade attacks per RFC-ACDP-0008 §3.9.
+    pub fn declared_algorithm(&self) -> Option<&'static str> {
+        match self.method_type.as_str() {
+            "Ed25519VerificationKey2020" | "Ed25519VerificationKey2018" => Some("ed25519"),
+            "EcdsaSecp256r1VerificationKey2019" => Some("ecdsa-p256"),
+            "JsonWebKey2020" => {
+                let jwk = self.public_key_jwk.as_ref()?;
+                let kty = jwk.get("kty").and_then(|v| v.as_str())?;
+                let crv = jwk.get("crv").and_then(|v| v.as_str())?;
+                match (kty, crv) {
+                    ("OKP", "Ed25519") => Some("ed25519"),
+                    ("EC", "P-256") => Some("ecdsa-p256"),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// `assertionMethod` entries can be either an ID string or an embedded object.
@@ -101,6 +142,40 @@ fn extract_from_jwk(jwk: &serde_json::Value) -> Result<[u8; 32], AcdpError> {
     bytes
         .try_into()
         .map_err(|_| AcdpError::KeyResolution("JWK 'x' is not 32 bytes (not Ed25519)".into()))
+}
+
+fn extract_p256_from_jwk(jwk: &serde_json::Value) -> Result<Vec<u8>, AcdpError> {
+    let kty = jwk["kty"].as_str().unwrap_or("");
+    let crv = jwk["crv"].as_str().unwrap_or("");
+    if kty != "EC" || crv != "P-256" {
+        return Err(AcdpError::KeyResolution(format!(
+            "expected EC/P-256 JWK, got kty={kty} crv={crv}"
+        )));
+    }
+    let x = jwk["x"]
+        .as_str()
+        .ok_or_else(|| AcdpError::KeyResolution("JWK missing 'x'".into()))?;
+    let y = jwk["y"]
+        .as_str()
+        .ok_or_else(|| AcdpError::KeyResolution("JWK missing 'y'".into()))?;
+    let x_bytes = URL_SAFE_NO_PAD
+        .decode(x)
+        .map_err(|e| AcdpError::KeyResolution(format!("JWK 'x' base64url: {e}")))?;
+    let y_bytes = URL_SAFE_NO_PAD
+        .decode(y)
+        .map_err(|e| AcdpError::KeyResolution(format!("JWK 'y' base64url: {e}")))?;
+    if x_bytes.len() != 32 || y_bytes.len() != 32 {
+        return Err(AcdpError::KeyResolution(format!(
+            "P-256 JWK x/y must be 32 bytes each, got x={} y={}",
+            x_bytes.len(),
+            y_bytes.len()
+        )));
+    }
+    let mut sec1 = Vec::with_capacity(65);
+    sec1.push(0x04);
+    sec1.extend_from_slice(&x_bytes);
+    sec1.extend_from_slice(&y_bytes);
+    Ok(sec1)
 }
 
 fn extract_from_multibase(mb: &str) -> Result<[u8; 32], AcdpError> {

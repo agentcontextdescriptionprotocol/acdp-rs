@@ -50,6 +50,97 @@ const MAX_EMBEDDED_BYTES: usize = 65_536;
 const ED25519_SIG_B64_LEN: usize = 88;
 const ECDSA_P256_SIG_B64_LEN: usize = 88;
 
+// ── Capabilities ─────────────────────────────────────────────────────────────
+
+/// Validate a [`crate::types::CapabilitiesDocument`] against the
+/// runtime constraints listed in RFC-ACDP-0007 §3.
+///
+/// The JSON schema enforces *types*; this validator enforces the
+/// constraints the schema cannot express:
+///
+/// 1. `acdp_version` matches `^\d+\.\d+\.\d+$`.
+/// 2. `registry_did` is a v0.0.1 `did:web` DID.
+/// 3. `supported_signature_algorithms` MUST contain `"ed25519"`.
+/// 4. `supported_did_methods` MUST contain `"did:web"`.
+/// 5. `profiles` MUST contain `"acdp-registry-core"`.
+/// 6. `limits.max_embedded_bytes` MUST equal exactly 65536.
+/// 7. If `supports_idempotency_key` is `true`,
+///    `limits.idempotency_key_ttl_seconds` MUST be present and in
+///    `86400..=604800`.
+/// 8. `limits.max_payload_bytes` MUST be at least 1024 bytes.
+///
+/// Wired into [`crate::client::RegistryClient::capabilities`] and
+/// [`crate::client::CrossRegistryResolver::resolve`].
+pub fn validate_capabilities(caps: &crate::types::CapabilitiesDocument) -> Result<(), AcdpError> {
+    validate_semver_pattern("acdp_version", &caps.acdp_version)?;
+
+    AgentDid::parse_web(caps.registry_did.as_str()).map_err(|e| {
+        AcdpError::SchemaViolation(format!(
+            "capabilities.registry_did must be did:web for v0.0.1: {e}"
+        ))
+    })?;
+
+    if !caps
+        .supported_signature_algorithms
+        .iter()
+        .any(|a| a == "ed25519")
+    {
+        return Err(AcdpError::SchemaViolation(
+            "capabilities.supported_signature_algorithms MUST contain 'ed25519' \
+             (RFC-ACDP-0001 §5.10)"
+                .into(),
+        ));
+    }
+
+    if !caps.supported_did_methods.iter().any(|m| m == "did:web") {
+        return Err(AcdpError::SchemaViolation(
+            "capabilities.supported_did_methods MUST contain 'did:web' \
+             (RFC-ACDP-0001 §5.4)"
+                .into(),
+        ));
+    }
+
+    if !caps.profiles.iter().any(|p| p == "acdp-registry-core") {
+        return Err(AcdpError::SchemaViolation(
+            "capabilities.profiles MUST contain 'acdp-registry-core' \
+             (RFC-ACDP-0001 §9.1)"
+                .into(),
+        ));
+    }
+
+    if caps.limits.max_embedded_bytes != 65_536 {
+        return Err(AcdpError::SchemaViolation(format!(
+            "capabilities.limits.max_embedded_bytes must be 65536 (fixed by \
+             RFC-ACDP-0007 §3.1), got {}",
+            caps.limits.max_embedded_bytes
+        )));
+    }
+
+    if caps.limits.max_payload_bytes < 1024 {
+        return Err(AcdpError::SchemaViolation(format!(
+            "capabilities.limits.max_payload_bytes must be ≥ 1024, got {}",
+            caps.limits.max_payload_bytes
+        )));
+    }
+
+    if caps.supports_idempotency_key {
+        let ttl = caps.limits.idempotency_key_ttl_seconds.ok_or_else(|| {
+            AcdpError::SchemaViolation(
+                "limits.idempotency_key_ttl_seconds is required when \
+                 supports_idempotency_key is true (RFC-ACDP-0007 §3.2)"
+                    .into(),
+            )
+        })?;
+        if !(86_400..=604_800).contains(&ttl) {
+            return Err(AcdpError::SchemaViolation(format!(
+                "limits.idempotency_key_ttl_seconds must be in 86400..=604800, got {ttl}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 // ── Top-level entry points ───────────────────────────────────────────────────
 
 /// Validate a complete [`PublishRequest`] against every schema constraint
@@ -66,7 +157,7 @@ pub fn validate_publish_request(req: &PublishRequest) -> Result<(), AcdpError> {
 
     validate_agent_did(&req.agent_id)?;
     for c in &req.contributors {
-        validate_agent_did(c)?;
+        validate_loose_did(c)?;
     }
     validate_unique_array("contributors", &req.contributors, MAX_CONTRIBUTORS)?;
     validate_unique_array("derived_from", &req.derived_from, MAX_DERIVED_FROM)?;
@@ -77,7 +168,7 @@ pub fn validate_publish_request(req: &PublishRequest) -> Result<(), AcdpError> {
     if let Some(audience) = &req.audience {
         validate_unique_array("audience", audience, MAX_AUDIENCE)?;
         for did in audience {
-            validate_agent_did(did)?;
+            validate_loose_did(did)?;
         }
     }
 
@@ -105,6 +196,22 @@ pub fn validate_publish_request(req: &PublishRequest) -> Result<(), AcdpError> {
 
     validate_signature_length(&req.signature.algorithm, &req.signature.value)?;
     ContentHash::parse(req.content_hash.as_str())?;
+
+    // Identifier patterns on every supplied ctx_id
+    if let Some(prev) = &req.supersedes {
+        CtxId::parse(prev.as_str())?;
+    }
+    for ancestor in &req.derived_from {
+        CtxId::parse(ancestor.as_str())?;
+    }
+    if let Some(lineage) = &req.lineage_id {
+        crate::types::primitives::LineageId::parse(lineage.as_str())?;
+    }
+
+    // acdp_version pattern (semver `^\d+\.\d+\.\d+$`)
+    if let Some(v) = &req.acdp_version {
+        validate_semver_pattern("acdp_version", v)?;
+    }
 
     // Version coherence (also enforced by the builder)
     match (&req.supersedes, req.version) {
@@ -138,7 +245,7 @@ pub fn validate_body(body: &Body) -> Result<(), AcdpError> {
 
     validate_agent_did(&body.agent_id)?;
     for c in &body.contributors {
-        validate_agent_did(c)?;
+        validate_loose_did(c)?;
     }
     validate_unique_array("contributors", &body.contributors, MAX_CONTRIBUTORS)?;
     validate_unique_array("derived_from", &body.derived_from, MAX_DERIVED_FROM)?;
@@ -148,6 +255,9 @@ pub fn validate_body(body: &Body) -> Result<(), AcdpError> {
     }
     if let Some(audience) = &body.audience {
         validate_unique_array("audience", audience, MAX_AUDIENCE)?;
+        for did in audience {
+            validate_loose_did(did)?;
+        }
     }
     validate_visibility_audience(&body.visibility, body.audience.as_deref())?;
 
@@ -169,6 +279,19 @@ pub fn validate_body(body: &Body) -> Result<(), AcdpError> {
 
     validate_signature_length(&body.signature.algorithm, &body.signature.value)?;
     validate_identifiers(&body.ctx_id, &body.lineage_id, &body.content_hash)?;
+
+    // Every entry in supersedes / derived_from MUST be a valid ctx_id.
+    if let Some(prev) = &body.supersedes {
+        CtxId::parse(prev.as_str())?;
+    }
+    for ancestor in &body.derived_from {
+        CtxId::parse(ancestor.as_str())?;
+    }
+
+    if let Some(v) = &body.acdp_version {
+        validate_semver_pattern("acdp_version", v)?;
+    }
+
     let _ = &body.created_at; // schema-derived; serde already enforces RFC 3339
     let _ = &body.origin_registry;
 
@@ -224,8 +347,13 @@ pub fn validate_data_ref(dr: &DataRef) -> Result<(), AcdpError> {
     if let Some(loc) = &dr.location {
         validate_location(loc)?;
     }
-    if let Some(emb) = &dr.embedded {
-        validate_embedded(emb)?;
+    if dr.embedded.is_some() {
+        validate_embedded(dr.embedded.as_ref().unwrap())?;
+        // BUG-02: verify the declared content_hash against the decoded bytes
+        // (RFC-ACDP-0002 §6.6 #8). A producer-supplied wrong hash is a
+        // signed commitment to a misleading integrity claim, so we catch
+        // it at validate time, not just inside `PublishValidator`.
+        verify_embedded_hash(dr)?;
     }
 
     Ok(())
@@ -412,11 +540,14 @@ pub fn validate_metadata(value: &serde_json::Value) -> Result<(), AcdpError> {
     Ok(())
 }
 
+/// Depth measured per RFC-ACDP-0002 §3.3: nested-object/array count,
+/// not counting leaf scalars. The cap of 8 is inclusive (`≤ 8`).
+/// `meta-003` pins this boundary.
 fn json_depth(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
         serde_json::Value::Array(arr) => 1 + arr.iter().map(json_depth).max().unwrap_or(0),
-        _ => 1,
+        _ => 0,
     }
 }
 
@@ -428,7 +559,7 @@ fn validate_visibility_audience(
 ) -> Result<(), AcdpError> {
     match vis {
         Visibility::Restricted => {
-            if audience.map_or(true, |a| a.is_empty()) {
+            if audience.is_none_or(|a| a.is_empty()) {
                 return Err(AcdpError::SchemaViolation(
                     "visibility:restricted requires a non-empty audience".into(),
                 ));
@@ -537,7 +668,26 @@ fn validate_tag(tag: &str) -> Result<(), AcdpError> {
 
 // ── DID / agent_id ───────────────────────────────────────────────────────────
 
+/// Validate a DID used as `agent_id`.
+///
+/// RFC-ACDP-0001 §5.4 mandates `did:web` for v0.0.1 producers. Earlier
+/// revisions accepted any method; this closes a silent acceptance bug
+/// for `did:key`-signed publications.
 fn validate_agent_did(did: &AgentDid) -> Result<(), AcdpError> {
+    AgentDid::parse_web(did.as_str())?;
+    Ok(())
+}
+
+/// Validate a DID used in `contributors[]` or `audience[]`.
+///
+/// Per the spec plan's RFC-FIX-11 method-scope table:
+/// - contributors[] SHOULD be `did:web` (attribution; no key resolution),
+/// - audience[] MAY be any DID method (authorization list; not resolved
+///   in v0.0.1).
+///
+/// This helper enforces only the loose `did:` syntax (no method
+/// constraint) so other-method contributors are accepted.
+fn validate_loose_did(did: &AgentDid) -> Result<(), AcdpError> {
     AgentDid::parse(did.as_str())?;
     Ok(())
 }
@@ -588,6 +738,20 @@ impl ContextTypeExt for ContextType {
 }
 
 // ── Signatures ───────────────────────────────────────────────────────────────
+
+fn validate_semver_pattern(name: &str, value: &str) -> Result<(), AcdpError> {
+    let parts: Vec<&str> = value.split('.').collect();
+    let ok = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    if !ok {
+        return Err(AcdpError::SchemaViolation(format!(
+            "{name} '{value}' must match the semver pattern ^\\d+\\.\\d+\\.\\d+$"
+        )));
+    }
+    Ok(())
+}
 
 fn validate_signature_length(algorithm: &str, value_b64: &str) -> Result<(), AcdpError> {
     let expected = match algorithm {
@@ -713,7 +877,31 @@ mod tests {
 
     #[test]
     fn structured_locator_bad_scheme_rejected() {
-        let dr = DataRef::structured(DataRefType::RawData, "not_dotted", serde_json::Map::new());
+        // try_structured rejects at construction time; structured() panics
+        // in debug builds. The validate_data_ref guard catches anyone who
+        // assembles a `DataRef` literal with a bad scheme directly.
+        let err =
+            DataRef::try_structured(DataRefType::RawData, "not_dotted", serde_json::Map::new())
+                .unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+
+        // Direct literal construction (skipping the constructor): must
+        // also be caught by validate_data_ref.
+        let mut bad = serde_json::Map::new();
+        bad.insert(
+            "scheme".into(),
+            serde_json::Value::String("not_dotted".into()),
+        );
+        let dr = DataRef {
+            ref_type: DataRefType::RawData,
+            description: None,
+            size_bytes: None,
+            format: None,
+            schema_version: None,
+            content_hash: None,
+            location: Some(Location::Structured(bad)),
+            embedded: None,
+        };
         assert!(matches!(
             validate_data_ref(&dr),
             Err(AcdpError::SchemaViolation(_))
@@ -957,5 +1145,74 @@ mod tests {
         assert!(validate_namespaced_context_type("Finance:portfolio").is_err());
         assert!(validate_namespaced_context_type("finance:Portfolio").is_err());
         assert!(validate_namespaced_context_type("no-colon").is_err());
+    }
+
+    // ── R2 audit test-coverage matrix ────────────────────────────────────────
+
+    /// T8 — `acdp_version` semver pattern is enforced.
+    #[test]
+    fn acdp_version_pattern_rejects_non_semver() {
+        validate_semver_pattern("acdp_version", "0.0.1").unwrap();
+        validate_semver_pattern("acdp_version", "10.20.30").unwrap();
+        assert!(validate_semver_pattern("acdp_version", "0.0.1-rc.1").is_err());
+        assert!(validate_semver_pattern("acdp_version", "0.0").is_err());
+        assert!(validate_semver_pattern("acdp_version", "vee.zero.zero").is_err());
+    }
+
+    /// T7 — `derived_from` containing a malformed ctx_id is rejected by
+    /// `validate_publish_request`.
+    #[test]
+    fn derived_from_malformed_ctx_id_rejected() {
+        use crate::crypto::SigningKey;
+        use crate::producer::Producer;
+
+        let p = Producer::new(
+            SigningKey::from_bytes(&[0u8; 32]),
+            AgentDid::new("did:web:agents.example.com:test"),
+            "did:web:agents.example.com:test#key-1",
+        );
+        let err = p
+            .publish_request()
+            .title("t")
+            .context_type(ContextType::DataSnapshot)
+            .derived_from(vec![CtxId("not-a-ctx-id".into())])
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    /// T2 — Embedded `content_hash` mismatch caught by
+    /// `verify_embedded_hash`.
+    #[test]
+    fn embedded_content_hash_mismatch_caught() {
+        use crate::types::data_ref::DataRefType;
+        let dr = DataRef {
+            ref_type: DataRefType::PrimaryResult,
+            description: None,
+            size_bytes: None,
+            format: None,
+            schema_version: None,
+            content_hash: Some(ContentHash("sha256:0000".into())),
+            location: None,
+            embedded: Some(EmbeddedContent {
+                encoding: EmbeddedEncoding::Json,
+                content: json!({"x": 1}),
+            }),
+        };
+        assert!(matches!(
+            verify_embedded_hash(&dr),
+            Err(AcdpError::HashMismatch { .. })
+        ));
+    }
+
+    /// T14 — duplicate audience entries rejected (uniqueItems: true).
+    #[test]
+    fn audience_uniqueness_rejected() {
+        let dup = vec![
+            AgentDid::new("did:web:a.example.com"),
+            AgentDid::new("did:web:a.example.com"),
+        ];
+        let err = validate_unique_array("audience", &dup, MAX_AUDIENCE).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
     }
 }

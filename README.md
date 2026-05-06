@@ -23,12 +23,65 @@ cargo add acdp --no-default-features    # types/crypto only, no HTTP
 cargo add acdp --features server        # add the publish validator
 ```
 
+## Conformance
+
+This crate implements the **`acdp-consumer`** profile (RFC-ACDP-0001 §9.1):
+
+- Verifies producer signatures end-to-end on every retrieved context.
+- Resolves cross-registry `acdp://` references with cycle detection,
+  depth caps, SSRF defenses, and registry-DID web-binding verification.
+- Applies visibility rules client-side and tolerates unknown fields for
+  forward compatibility.
+
+The library also ships the building blocks (`PublishValidator`,
+`SsrfPolicy`, `validate_publish_request`, `compute_embedded_hash`) that
+registry implementers compose into `acdp-registry-core` /
+`acdp-registry-discovery` / `acdp-registry-federated` services. See
+`acdp::profile` for the typed profile vocabulary.
+
+## Glossary
+
+- **Body** — the immutable JSON object representing a context.
+- **ProducerContent** — the Body with the §5.7 exclusion set removed
+  (everything except the producer-controlled fields). The producer
+  signs ProducerContent; the SHA-256 of its JCS-canonicalized bytes
+  is the body's `content_hash`.
+- **RegistryState** — the mutable, registry-derived state (`status` in
+  v0.0.1) returned alongside the Body on retrieval.
+- **Lineage** — a chain of contexts representing successive versions of
+  the same logical work, identified by a stable `lineage_id` derived
+  from the v1 ctx_id.
+- **JCS** — JSON Canonicalization Scheme (RFC 8785). The deterministic
+  serialization used as the SHA-256 input for `content_hash`.
+- **DID** — Decentralized Identifier (W3C). v0.0.1 producers MUST use
+  `did:web` so their keys can be resolved over HTTPS.
+
 ## Features
 
-| Feature  | Default | Description                                          |
-|----------|---------|------------------------------------------------------|
-| `client` | ✓       | `RegistryClient`, `VerifiedContext`, `WebResolver`   |
-| `server` | ✗       | `PublishValidator` for registry implementations      |
+| Feature   | Default | Description                                                                  |
+|-----------|---------|------------------------------------------------------------------------------|
+| `client`  | ✓       | `RegistryClient`, `VerifiedContext`, `WebResolver`, `CrossRegistryResolver`  |
+| `server`  | ✗       | `PublishValidator` for registry implementations                              |
+| `tracing` | ✗       | `#[instrument]` spans on async ops; pulls in `tracing` (no subscriber)       |
+
+## Security defaults
+
+The library applies these defenses out of the box (RFC-ACDP-0006 §7,
+RFC-ACDP-0008):
+
+- **HTTPS-only** for all outbound requests; HTTP is rejected.
+- **IP-literal rejection** in `SsrfPolicy` (forces DNS resolution).
+- **Private-range blocking**: RFC 1918, loopback, link-local,
+  multicast, IMDS (`169.254.169.254`), IPv6 equivalents.
+- **Response-size caps**: 1 MB for context retrievals, 64 KB for
+  capabilities and DID documents.
+- **Redirect cap**: max 3 follows, same-authority only.
+- **Algorithm-downgrade rejection**: signatures are checked against
+  the algorithm declared by the resolved DID verification method.
+- **Ed25519 mandatory** (RFC-ACDP-0001 §5.10).
+
+DNS-rebinding pin (§7.6) is documented in
+`plans/defered/README.md` as a follow-up.
 
 ## Quick start
 
