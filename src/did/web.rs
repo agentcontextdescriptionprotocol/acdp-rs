@@ -5,7 +5,9 @@ use crate::error::AcdpError;
 #[cfg(feature = "client")]
 use {
     super::document::DidDocument,
+    crate::limits::{CONNECT_TIMEOUT, MAX_METADATA_BYTES, MAX_REDIRECTS, REQUEST_TIMEOUT},
     lru::LruCache,
+    reqwest::redirect,
     std::num::NonZeroUsize,
     std::sync::{Arc, Mutex},
     std::time::{Duration, Instant},
@@ -41,11 +43,42 @@ impl WebResolver {
     }
 
     /// Build a resolver with a custom LRU capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity == 0`. Use a positive capacity; the LRU
+    /// model has no semantically valid empty configuration.
     pub fn with_capacity(capacity: usize) -> Self {
-        let cap = NonZeroUsize::new(capacity.max(1)).expect("capacity > 0");
+        let cap =
+            NonZeroUsize::new(capacity).expect("WebResolver::with_capacity requires capacity > 0");
+
+        let policy = redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.error(format!("DID resolver: exceeded {MAX_REDIRECTS} redirects"));
+            }
+            // Same-authority enforcement against the original request URL.
+            // Pre-extract host strings so we don't double-borrow `attempt`.
+            let original_host = attempt
+                .previous()
+                .first()
+                .and_then(|u| u.host_str())
+                .map(str::to_string);
+            let next_host = attempt.url().host_str().map(str::to_string);
+            if let (Some(orig), Some(next)) = (original_host, next_host) {
+                if orig != next {
+                    return attempt.error(format!(
+                        "DID resolver: cross-authority redirect rejected ({orig} -> {next})"
+                    ));
+                }
+            }
+            attempt.follow()
+        });
+
         let http = reqwest::Client::builder()
             .use_rustls_tls()
-            .timeout(Duration::from_secs(10))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(policy)
             .build()
             .expect("failed to build HTTP client for DID resolver");
 
@@ -72,7 +105,7 @@ impl WebResolver {
         }
 
         let url = did_web_to_url(did)?;
-        let resp = self
+        let mut resp = self
             .http
             .get(&url)
             .header("Accept", "application/did+json, application/json")
@@ -93,9 +126,28 @@ impl WebResolver {
             )));
         }
 
-        let doc: DidDocument = resp
-            .json()
+        // Cap body size at 64 KB per RFC-ACDP-0006 §7.3.
+        if let Some(len) = resp.content_length() {
+            if len as usize > MAX_METADATA_BYTES {
+                return Err(AcdpError::KeyResolution(format!(
+                    "DID document Content-Length {len} exceeds {MAX_METADATA_BYTES}-byte cap"
+                )));
+            }
+        }
+        let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+        while let Some(chunk) = resp
+            .chunk()
             .await
+            .map_err(|e| AcdpError::KeyResolutionUnreachable(e.to_string()))?
+        {
+            if buf.len() + chunk.len() > MAX_METADATA_BYTES {
+                return Err(AcdpError::KeyResolution(format!(
+                    "DID document body exceeded {MAX_METADATA_BYTES}-byte cap"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        let doc: DidDocument = serde_json::from_slice(&buf)
             .map_err(|e| AcdpError::KeyResolution(format!("DID document parse: {e}")))?;
 
         // Store in cache (evicts LRU on overflow)

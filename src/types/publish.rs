@@ -68,6 +68,7 @@ pub struct PublishRequest {
 /// field — the producer already submitted those and the response is for
 /// retrieving the assigned identifiers.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishResponse {
     /// Registry-assigned context identifier.
     pub ctx_id: CtxId,
@@ -85,11 +86,13 @@ pub struct PublishResponse {
 ///
 /// Code values match the ACDP error registry (RFC-ACDP-0007 §5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireError {
     pub error: WireErrorBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WireErrorBody {
     /// Error code from the ACDP error registry.
     pub code: String,
@@ -98,6 +101,40 @@ pub struct WireErrorBody {
     /// Machine-readable details (e.g. `{"reason": "lineage_mismatch"}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+impl WireErrorBody {
+    /// Typed accessor for `details.reason` on `superseded_target` errors.
+    pub fn supersession_reason(&self) -> Option<crate::error::SupersessionReason> {
+        self.details
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// `details.unreachable_ctx_id` (set on `lineage_walk_failed`).
+    pub fn unreachable_ctx_id(&self) -> Option<&str> {
+        self.details
+            .as_ref()
+            .and_then(|d| d.get("unreachable_ctx_id"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// `details.idempotency_key` (set on `duplicate_publish`).
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.details
+            .as_ref()
+            .and_then(|d| d.get("idempotency_key"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// `details.original_ctx_id` (set on `duplicate_publish`).
+    pub fn original_ctx_id(&self) -> Option<&str> {
+        self.details
+            .as_ref()
+            .and_then(|d| d.get("original_ctx_id"))
+            .and_then(|v| v.as_str())
+    }
 }
 
 impl std::fmt::Display for WireError {
