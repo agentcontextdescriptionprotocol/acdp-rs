@@ -347,8 +347,8 @@ pub fn validate_data_ref(dr: &DataRef) -> Result<(), AcdpError> {
     if let Some(loc) = &dr.location {
         validate_location(loc)?;
     }
-    if dr.embedded.is_some() {
-        validate_embedded(dr.embedded.as_ref().unwrap())?;
+    if let Some(emb) = &dr.embedded {
+        validate_embedded(emb)?;
         // BUG-02: verify the declared content_hash against the decoded bytes
         // (RFC-ACDP-0002 §6.6 #8). A producer-supplied wrong hash is a
         // signed commitment to a misleading integrity claim, so we catch

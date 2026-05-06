@@ -227,7 +227,7 @@ impl RegistryStore for InMemoryStore {
             .collect();
 
         // Newest first
-        matches.sort_by(|a, b| b.body.created_at.cmp(&a.body.created_at));
+        matches.sort_by_key(|c| std::cmp::Reverse(c.body.created_at));
 
         let limit = params.limit.unwrap_or(50).min(100) as usize;
         let projected: Vec<SearchResult> = matches
