@@ -32,6 +32,12 @@ impl<'a> Verifier<'a> {
     ///
     ///  (Hash recomputation is step 0, performed first.)
     pub async fn verify_body(&self, body: &Body) -> Result<(), AcdpError> {
+        // Step -1 (BUG-04): structural / runtime validation. A body may be
+        // cryptographically correct but protocol-invalid (non-did:web
+        // producer, inverted data_period, oversize metadata). Catch those
+        // before paying the SHA-256 + DID resolution cost.
+        crate::validation::validate_body(body)?;
+
         // Step 0: recompute content_hash over ProducerContent
         let body_val = serde_json::to_value(body)?;
         verify_content_hash(&body_val, &body.content_hash)?;
@@ -41,6 +47,16 @@ impl<'a> Verifier<'a> {
         let (did_part, fragment) = key_id.split_once('#').ok_or_else(|| {
             AcdpError::KeyResolution(format!("signature.key_id '{key_id}' has no '#fragment'"))
         })?;
+
+        // Step 1.5 (BUG-01): `key_id` DID portion MUST be did:web for v0.0.1.
+        // RFC-ACDP-0001 §5.4 mandates did:web for producers; a key_id
+        // pointing to e.g. did:key would mean the resolver path could
+        // not even find the key.
+        if !did_part.starts_with("did:web:") {
+            return Err(AcdpError::KeyNotAuthorized(format!(
+                "v0.0.1 signatures require did:web key_id; got '{did_part}'"
+            )));
+        }
 
         // Step 2: DID portion MUST equal body.agent_id
         if did_part != body.agent_id.as_str() {
@@ -68,15 +84,40 @@ impl<'a> Verifier<'a> {
             )));
         }
 
-        // Step 6: extract raw Ed25519 public key bytes
-        let pub_bytes = method.ed25519_public_key_bytes()?;
+        // Step 5.5: algorithm-downgrade rejection (RFC-ACDP-0008 §3.9 +
+        // RFC-ACDP-0001 §5.11 step 6). When the verification method
+        // declares an algorithm via its `type` (or `publicKeyJwk` params),
+        // it MUST equal `signature.algorithm`. Otherwise an attacker
+        // could route an Ed25519 key through a verifier that thinks it's
+        // checking some other algorithm.
+        if let Some(declared) = method.declared_algorithm() {
+            if declared != body.signature.algorithm {
+                return Err(AcdpError::InvalidSignature(format!(
+                    "signature.algorithm '{}' does not match verification method type \
+                     (resolved key declares '{declared}')",
+                    body.signature.algorithm
+                )));
+            }
+        }
 
-        // Step 7: verify signature over ASCII bytes of content_hash string
-        verify_ed25519(
-            &pub_bytes,
-            &body.signature.value,
-            body.content_hash.as_str(),
-        )
+        // Steps 6 + 7: dispatch by algorithm.
+        match body.signature.algorithm.as_str() {
+            "ed25519" => {
+                let pub_bytes = method.ed25519_public_key_bytes()?;
+                verify_ed25519(
+                    &pub_bytes,
+                    &body.signature.value,
+                    body.content_hash.as_str(),
+                )
+            }
+            "ecdsa-p256" => {
+                let pub_sec1 = method.ecdsa_p256_public_key_sec1()?;
+                verify_ecdsa_p256(&pub_sec1, &body.signature.value, body.content_hash.as_str())
+            }
+            other => Err(AcdpError::UnsupportedAlgorithm(format!(
+                "verifier does not support signature algorithm '{other}'"
+            ))),
+        }
     }
 }
 
@@ -100,6 +141,39 @@ pub fn verify_ed25519(
 
     key.verify(message.as_bytes(), &sig)
         .map_err(|_| AcdpError::InvalidSignature("signature verification failed".into()))
+}
+
+/// Verify an ECDSA-P256 signature in IEEE 1363 (r‖s) wire form.
+///
+/// Per the ACDP signature-algorithms registry (`ecdsa-p256` Stable),
+/// the wire form is 64 raw bytes (32-byte `r` followed by 32-byte `s`),
+/// base64-encoded with padding (88 characters), NOT DER. The
+/// `pub_key_sec1` argument is the SEC1-uncompressed public key (65
+/// bytes starting with `0x04`).
+pub fn verify_ecdsa_p256(
+    pub_key_sec1: &[u8],
+    sig_b64: &str,
+    message: &str,
+) -> Result<(), AcdpError> {
+    use p256::ecdsa::{signature::Verifier as _, Signature, VerifyingKey as P256VerifyingKey};
+
+    let key = P256VerifyingKey::from_sec1_bytes(pub_key_sec1)
+        .map_err(|e| AcdpError::InvalidSignature(format!("ecdsa-p256 key parse: {e}")))?;
+
+    let sig_bytes = STANDARD
+        .decode(sig_b64)
+        .map_err(|e| AcdpError::InvalidSignature(format!("base64: {e}")))?;
+    if sig_bytes.len() != 64 {
+        return Err(AcdpError::InvalidSignature(format!(
+            "ecdsa-p256 signature MUST be 64 bytes (IEEE 1363 r‖s), got {}",
+            sig_bytes.len()
+        )));
+    }
+    let sig = Signature::from_slice(&sig_bytes)
+        .map_err(|e| AcdpError::InvalidSignature(format!("ecdsa-p256 sig parse: {e}")))?;
+
+    key.verify(message.as_bytes(), &sig)
+        .map_err(|_| AcdpError::InvalidSignature("ecdsa-p256 signature verification failed".into()))
 }
 
 #[cfg(test)]
@@ -141,5 +215,31 @@ mod tests {
         // Verify against wrong message should fail
         let result = verify_ed25519(&pub_bytes, &sig_b64, "sha256:wronghash");
         assert!(result.is_err());
+    }
+
+    /// T1 — Algorithm-downgrade attack is rejected (R2-CRIT-01).
+    ///
+    /// Construct a verification method that declares Ed25519 via
+    /// `Ed25519VerificationKey2020`, but a body whose
+    /// `signature.algorithm` is `ecdsa-p256`. The verifier MUST
+    /// refuse before reaching signature verification.
+    #[test]
+    fn declared_algorithm_mismatch_rejected() {
+        use crate::did::document::VerificationMethod;
+        let raw: [u8; 32] = hex::decode(TEST_PUB_HEX).unwrap().try_into().unwrap();
+        let mut prefixed = vec![0xed, 0x01];
+        prefixed.extend_from_slice(&raw);
+        let mb = format!("z{}", bs58::encode(&prefixed).into_string());
+        let vm = VerificationMethod {
+            id: "did:web:example.com#key-1".into(),
+            method_type: "Ed25519VerificationKey2020".into(),
+            controller: "did:web:example.com".into(),
+            public_key_jwk: None,
+            public_key_multibase: Some(mb),
+        };
+        assert_eq!(vm.declared_algorithm(), Some("ed25519"));
+        // The actual end-to-end check happens in Verifier::verify_body;
+        // the declared_algorithm() helper is the building block whose
+        // mismatch produces the rejection.
     }
 }

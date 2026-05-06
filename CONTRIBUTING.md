@@ -59,6 +59,23 @@ behavior MUST:
 - HTTP-mocked tests use [`wiremock`](https://docs.rs/wiremock).
 - Property tests use [`proptest`](https://docs.rs/proptest).
 
+## Adding a new wire error code
+
+When ACDP adds a new error code (e.g. v0.1's `immutable_field` or
+`unsupported_embedding_model`), wire it through the library in three
+places:
+
+1. **`src/error.rs` `AcdpError`** — add a typed variant with the
+   appropriate documentation citing the RFC section.
+2. **`AcdpError::from_wire_error`** — add a `match` arm that converts
+   the wire string into the new typed variant.
+3. **`src/error.rs` tests `all_19_wire_codes_round_trip`** — extend the
+   exhaustive map so the count and the round-trip assertion stay
+   accurate.
+
+Also update `AcdpError::is_transient` if the new code is retryable, and
+`SupersessionReason` if the code uses a `details.reason` sub-vocabulary.
+
 ## Reporting security issues
 
 Please **do not** open a public GitHub issue for security vulnerabilities.

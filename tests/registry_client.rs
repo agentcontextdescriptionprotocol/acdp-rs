@@ -430,6 +430,44 @@ async fn search_response_with_matches_and_full_summary() {
 
 // ── URL trimming ─────────────────────────────────────────────────────────────
 
+/// T5 — Cross-authority redirect MUST be rejected (RFC-ACDP-0006 §7.5).
+#[tokio::test]
+async fn cross_authority_redirect_rejected() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/acdp.json"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("Location", "https://attacker.example.com/y"),
+        )
+        .mount(&server)
+        .await;
+    let client = RegistryClient::new(&server.uri()).unwrap();
+    let err = client.capabilities().await.unwrap_err();
+    // Reqwest surfaces the policy rejection as an Http error.
+    assert!(matches!(err, AcdpError::Http(_)));
+}
+
+/// T6 — Oversize body MUST be aborted before parse (§7.3 cap, ~1 MB).
+#[tokio::test]
+async fn oversize_response_body_aborted() {
+    let server = MockServer::start().await;
+    // 2 MB of JSON-shaped padding — well over the MAX_CONTEXT_BYTES cap.
+    let big = "x".repeat(2 * 1024 * 1024);
+    let payload = format!("{{\"junk\":\"{big}\"}}");
+    Mock::given(method("GET"))
+        .and(path("/contexts/search"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "application/acdp+json")
+                .set_body_raw(payload, "application/acdp+json"),
+        )
+        .mount(&server)
+        .await;
+    let client = RegistryClient::new(&server.uri()).unwrap();
+    let err = client.search(&SearchParams::default()).await.unwrap_err();
+    assert!(matches!(err, AcdpError::PayloadTooLarge(_)));
+}
+
 #[tokio::test]
 async fn trailing_slash_is_normalized() {
     let server = MockServer::start().await;
@@ -442,7 +480,7 @@ async fn trailing_slash_is_normalized() {
             "supported_signature_algorithms": ["ed25519"],
             "supported_did_methods": ["did:web"],
             "profiles": ["acdp-registry-core"],
-            "limits": { "max_payload_bytes": 1, "max_embedded_bytes": 1 }
+            "limits": { "max_payload_bytes": 1024, "max_embedded_bytes": 65536 }
         })))
         .mount(&server)
         .await;

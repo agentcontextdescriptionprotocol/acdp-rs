@@ -61,6 +61,15 @@ pub struct Body {
     pub metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_uri: Option<String>,
+
+    /// Forward-compatible carry-through of unknown producer-controlled
+    /// fields (e.g. v0.1's `priority`). Including these in the typed
+    /// model is required for `serde_json::to_value(body)` → JCS → SHA-256
+    /// to reproduce the original `content_hash`. Without `flatten`, a
+    /// v0.0.1 consumer reading a v0.1 body would silently drop the new
+    /// field and compute a different hash, falsely rejecting the body.
+    #[serde(flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Time window the underlying data covers.
@@ -96,11 +105,17 @@ pub struct Signature {
 
 /// Mutable, registry-derived state returned alongside the Body on retrieval.
 ///
-/// In v0.0.1 this contains only `status`.  Future versions add lifecycle
-/// events, relationships, and attestations here without modifying the Body.
+/// In v0.0.1 this contains only `status`. Future versions add lifecycle
+/// events, relationships, and attestations here without modifying the
+/// Body. Unknown fields are preserved in [`Self::extensions`] so consumers
+/// can surface them to operators (RFC-ACDP-0004 §3 forward-compat).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryState {
     pub status: Status,
+    /// Forward-compatible passthrough for fields added in future versions
+    /// (e.g. v0.1's `lifecycle_events`, `relationships`, `attestations`).
+    #[serde(flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 // ── Full retrieval envelope ───────────────────────────────────────────────────

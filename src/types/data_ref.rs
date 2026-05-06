@@ -112,13 +112,27 @@ impl DataRef {
 
     /// Structured-locator data reference. `scheme` MUST match
     /// `^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+$`. Additional fields go in `extra`.
+    ///
+    /// In debug builds, an invalid scheme triggers a `debug_assert!`
+    /// to surface the bug at construction time. Release builds accept
+    /// the malformed value silently — pair this constructor with
+    /// [`crate::validation::validate_data_ref`] (called automatically
+    /// by `RequestBuilder::build`) for runtime rejection. For a
+    /// fallible variant, use [`Self::try_structured`].
     pub fn structured(
         ref_type: DataRefType,
         scheme: impl Into<String>,
         extra: serde_json::Map<String, serde_json::Value>,
     ) -> Self {
+        let scheme: String = scheme.into();
+        debug_assert!(
+            is_dotted_namespace_scheme(&scheme),
+            "DataRef::structured: scheme '{scheme}' does not match \
+             ^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$ — pass a dotted-namespace identifier \
+             like 'kafka.offset' or use try_structured for runtime checking"
+        );
         let mut map = extra;
-        map.insert("scheme".into(), serde_json::Value::String(scheme.into()));
+        map.insert("scheme".into(), serde_json::Value::String(scheme));
         Self {
             ref_type,
             description: None,
@@ -129,6 +143,35 @@ impl DataRef {
             location: Some(Location::Structured(map)),
             embedded: None,
         }
+    }
+
+    /// Fallible structured-locator constructor. Returns
+    /// [`crate::error::AcdpError::SchemaViolation`] if `scheme` does
+    /// not match the dotted-namespace pattern.
+    pub fn try_structured(
+        ref_type: DataRefType,
+        scheme: impl Into<String>,
+        extra: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, crate::error::AcdpError> {
+        let scheme: String = scheme.into();
+        if !is_dotted_namespace_scheme(&scheme) {
+            return Err(crate::error::AcdpError::SchemaViolation(format!(
+                "structured locator scheme '{scheme}' must match \
+                 ^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$"
+            )));
+        }
+        let mut map = extra;
+        map.insert("scheme".into(), serde_json::Value::String(scheme));
+        Ok(Self {
+            ref_type,
+            description: None,
+            size_bytes: None,
+            format: None,
+            schema_version: None,
+            content_hash: None,
+            location: Some(Location::Structured(map)),
+            embedded: None,
+        })
     }
 
     /// Embedded JSON data reference.
@@ -181,16 +224,63 @@ impl DataRef {
             }),
         }
     }
+
+    // ── Type-bound URI shortcuts ─────────────────────────────────────────────
+    //
+    // The four DataRefType variants come up frequently; these one-liners
+    // save a `DataRefType::PrimaryResult` mention at every call site.
+
+    /// `DataRef::uri(DataRefType::PrimaryResult, uri)`.
+    pub fn primary_result_uri(uri: impl Into<String>) -> Self {
+        Self::uri(DataRefType::PrimaryResult, uri)
+    }
+    /// `DataRef::uri(DataRefType::RawData, uri)`.
+    pub fn raw_data_uri(uri: impl Into<String>) -> Self {
+        Self::uri(DataRefType::RawData, uri)
+    }
+    /// `DataRef::uri(DataRefType::SupportingInfo, uri)`.
+    pub fn supporting_info_uri(uri: impl Into<String>) -> Self {
+        Self::uri(DataRefType::SupportingInfo, uri)
+    }
+    /// `DataRef::uri(DataRefType::DerivedData, uri)`.
+    pub fn derived_data_uri(uri: impl Into<String>) -> Self {
+        Self::uri(DataRefType::DerivedData, uri)
+    }
+
+    /// `DataRef::embedded_json(DataRefType::PrimaryResult, content)`.
+    pub fn primary_result_json(content: serde_json::Value) -> Self {
+        Self::embedded_json(DataRefType::PrimaryResult, content)
+    }
+    /// `DataRef::embedded_json(DataRefType::DerivedData, content)`.
+    pub fn derived_data_json(content: serde_json::Value) -> Self {
+        Self::embedded_json(DataRefType::DerivedData, content)
+    }
 }
 
 /// Inline embedded data payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmbeddedContent {
     /// Content encoding / interpretation.
     pub encoding: EmbeddedEncoding,
     /// The actual content. For `json` encoding this is any JSON value.
     /// For `utf8` / `base64` it MUST be a JSON string.
     pub content: serde_json::Value,
+}
+
+/// Validate dotted-namespace scheme pattern.
+fn is_dotted_namespace_scheme(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    parts.iter().all(|part| {
+        !part.is_empty()
+            && part.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && part
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
 }
 
 /// How the `content` field of an embedded data reference is encoded.

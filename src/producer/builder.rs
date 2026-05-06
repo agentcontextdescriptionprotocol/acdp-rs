@@ -58,6 +58,38 @@ impl Producer {
         b.expected_lineage_id = Some(previous.lineage_id.clone());
         b
     }
+
+    /// Start building a new version that carries every producer-controlled
+    /// field over from `previous`, then lets the caller override what
+    /// changed. Inverts [`Self::supersede_body`]'s "blank slate" approach
+    /// for workflows where most fields stay the same and only the data /
+    /// summary / metadata move.
+    ///
+    /// Pre-fills supersedes / version / expected_lineage_id (same as
+    /// `supersede_body`) plus title, context_type, contributors,
+    /// data_refs, derived_from, visibility, audience, description,
+    /// summary, tags, domain, expires_at, data_period, metadata,
+    /// schema_uri, and acdp_version.
+    pub fn new_version_from(&self, previous: &Body) -> RequestBuilder<'_> {
+        let mut b = self.supersede_body(previous);
+        b.title = Some(previous.title.clone());
+        b.context_type = Some(previous.context_type.clone());
+        b.contributors = previous.contributors.clone();
+        b.data_refs = previous.data_refs.clone();
+        b.derived_from = previous.derived_from.clone();
+        b.visibility = previous.visibility.clone();
+        b.audience = previous.audience.clone();
+        b.description = previous.description.clone();
+        b.summary = previous.summary.clone();
+        b.tags = previous.tags.clone();
+        b.domain = previous.domain.clone();
+        b.expires_at = previous.expires_at;
+        b.data_period = previous.data_period.clone();
+        b.metadata = previous.metadata.clone();
+        b.schema_uri = previous.schema_uri.clone();
+        b.acdp_version = previous.acdp_version.clone();
+        b
+    }
 }
 
 // ── RequestBuilder ────────────────────────────────────────────────────────────
@@ -103,14 +135,7 @@ pub struct RequestBuilder<'a> {
     acdp_version: Option<String>,
 }
 
-/// Truncate a `DateTime<Utc>` to millisecond precision per RFC-ACDP-0001 §5.3.
-///
-/// `chrono` defaults to nanoseconds; producer-side timestamps in the body are
-/// part of ProducerContent (the hash preimage) and so MUST use the canonical
-/// millisecond emission form for interoperable `content_hash` values.
-fn trunc_ms(dt: DateTime<Utc>) -> DateTime<Utc> {
-    DateTime::from_timestamp_millis(dt.timestamp_millis()).unwrap_or(dt)
-}
+use crate::time::trunc_ms;
 
 impl<'a> RequestBuilder<'a> {
     fn new(producer: &'a Producer) -> Self {
@@ -292,7 +317,7 @@ impl<'a> RequestBuilder<'a> {
 
         // Validate: restricted visibility requires a non-empty audience
         if matches!(self.visibility, Visibility::Restricted)
-            && self.audience.as_ref().map_or(true, |v| v.is_empty())
+            && self.audience.as_ref().is_none_or(|v| v.is_empty())
         {
             return Err(AcdpError::SchemaViolation(
                 "visibility:restricted requires a non-empty audience".into(),
@@ -467,7 +492,7 @@ mod tests {
     #[test]
     fn supersede_requires_explicit_version() {
         let p = test_producer();
-        let prev = CtxId("acdp://r/uuid-prev".into());
+        let prev = CtxId("acdp://r.example.com/12345678-1234-4321-8123-123456781234".into());
         let err = p
             .supersede(prev)
             .title("t")
@@ -480,7 +505,7 @@ mod tests {
     #[test]
     fn supersede_with_explicit_version() {
         let p = test_producer();
-        let prev = CtxId("acdp://r/uuid-prev".into());
+        let prev = CtxId("acdp://r.example.com/12345678-1234-4321-8123-123456781234".into());
         let req = p
             .supersede(prev.clone())
             .version(2)
@@ -495,7 +520,7 @@ mod tests {
     #[test]
     fn supersede_v3_chain() {
         let p = test_producer();
-        let v2 = CtxId("acdp://r/uuid-v2".into());
+        let v2 = CtxId("acdp://r.example.com/12345678-1234-4321-8123-1234567812aa".into());
         let req = p
             .supersede(v2.clone())
             .version(3)
@@ -509,7 +534,7 @@ mod tests {
     #[test]
     fn supersede_with_version_below_2_rejected() {
         let p = test_producer();
-        let prev = CtxId("acdp://r/uuid-prev".into());
+        let prev = CtxId("acdp://r.example.com/12345678-1234-4321-8123-123456781234".into());
         let err = p
             .supersede(prev)
             .version(1)
@@ -629,9 +654,11 @@ mod tests {
             data_period: None,
             metadata: None,
             schema_uri: None,
+            extensions: Default::default(),
         };
         let _state = RegistryState {
             status: Status::Active,
+            extensions: Default::default(),
         };
 
         let p = test_producer();
