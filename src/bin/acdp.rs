@@ -6,7 +6,9 @@
 //! acdp capabilities <registry-url>
 //! acdp retrieve     <registry-url> <ctx_id>
 //! acdp body         <registry-url> <ctx_id>
-//! acdp search       <registry-url> [--q QUERY] [--limit N]
+//! acdp search       <registry-url> [--q QUERY] [--limit N] [--type T]
+//!                                   [--tags A,B] [--domain D] [--status S]
+//!                                   [--agent-id DID] [--cursor C]
 //! acdp canonicalize                          # JCS bytes from stdin JSON
 //! acdp hash                                  # content_hash from stdin JSON
 //! acdp verify       <body.json>              # verify a stored body via DID resolution
@@ -40,7 +42,9 @@ fn print_usage() {
          \tacdp capabilities <registry-url>\n\
          \tacdp retrieve     <registry-url> <ctx_id>\n\
          \tacdp body         <registry-url> <ctx_id>\n\
-         \tacdp search       <registry-url> [--q QUERY] [--limit N]\n\
+         \tacdp search       <registry-url> [--q QUERY] [--limit N] [--type T]\n\
+         \t                                  [--tags A,B] [--domain D] [--status S]\n\
+         \t                                  [--agent-id DID] [--cursor C]\n\
          \tacdp canonicalize                          # JCS bytes from stdin JSON\n\
          \tacdp hash                                  # content_hash from stdin JSON\n\
          \tacdp verify       <body.json>              # verify a stored body\n\
@@ -222,6 +226,34 @@ async fn cmd_search(rest: &[String]) -> Result<(), CliError> {
                     .get(i + 1)
                     .ok_or_else(|| CliError::Usage("--tags requires a value".into()))?;
                 params.tags = Some(v.clone());
+                i += 2;
+            }
+            "--domain" => {
+                let v = rest
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("--domain requires a value".into()))?;
+                params.domain = Some(v.clone());
+                i += 2;
+            }
+            "--status" => {
+                let v = rest
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("--status requires a value".into()))?;
+                params.status = Some(v.clone());
+                i += 2;
+            }
+            "--agent-id" => {
+                let v = rest
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("--agent-id requires a value".into()))?;
+                params.agent_id = Some(v.clone());
+                i += 2;
+            }
+            "--cursor" => {
+                let v = rest
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("--cursor requires a value".into()))?;
+                params.cursor = Some(v.clone());
                 i += 2;
             }
             other => return Err(CliError::Usage(format!("unknown search flag '{other}'"))),

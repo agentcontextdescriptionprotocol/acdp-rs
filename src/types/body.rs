@@ -109,11 +109,26 @@ pub struct Signature {
 /// events, relationships, and attestations here without modifying the
 /// Body. Unknown fields are preserved in [`Self::extensions`] so consumers
 /// can surface them to operators (RFC-ACDP-0004 §3 forward-compat).
+///
+/// # Reserved extension field names (RFC-ACDP-0009 §2.1)
+///
+/// The following keys are reserved for future RFCs. Until the relevant
+/// RFC ships normative text, v0.0.1 consumers will see them in
+/// [`Self::extensions`] (the `#[serde(flatten)]` map below). v0.0.1
+/// producers MUST NOT emit them.
+///
+/// | Name              | RFC                           | Purpose                                                       |
+/// |-------------------|-------------------------------|---------------------------------------------------------------|
+/// | `lifecycle_events`| RFC-ACDP-0009 §2.1 (reserved) | Retraction / republication / status-change audit trail.        |
+/// | `relationships`   | RFC-ACDP-0009 §2.1 (reserved) | Post-publication `builds_on` / `disputes` etc.                 |
+/// | `attestations`    | RFC-ACDP-0009 §2.1 (reserved) | Third-party `reproduced` / `audit` markers.                    |
+/// | `subscriptions`   | RFC-ACDP-0009 §2.1 (reserved) | Push-subscription receipts.                                    |
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryState {
     pub status: Status,
     /// Forward-compatible passthrough for fields added in future versions
-    /// (e.g. v0.1's `lifecycle_events`, `relationships`, `attestations`).
+    /// (e.g. v0.1's `lifecycle_events`, `relationships`, `attestations`,
+    /// `subscriptions` — see the type docs for the reserved set).
     #[serde(flatten)]
     pub extensions: serde_json::Map<String, serde_json::Value>,
 }

@@ -11,7 +11,16 @@ use serde::{Deserialize, Serialize};
 /// `lineage_id`, `origin_registry`, `created_at`).
 ///
 /// Normally built via [`crate::producer::RequestBuilder::build`].
+///
+/// Mirrors `acdp-publish-request.schema.json` (`additionalProperties: false`).
+/// Registry-assigned fields (`ctx_id`, `origin_registry`, `created_at`)
+/// in an incoming request are a producer bug, not forward-compat slack —
+/// silently dropping them would mean the registry recomputes a different
+/// hash than the producer signed. `deny_unknown_fields` surfaces them at
+/// deserialization, before they can confuse the hash recomputation in
+/// [`crate::registry::PublishValidator::validate_post_schema`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishRequest {
     // Producer-controlled required fields
     pub version: u32,
@@ -140,5 +149,73 @@ impl WireErrorBody {
 impl std::fmt::Display for WireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.error.code, self.error.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_request_with_extra(extra: &str) -> String {
+        format!(
+            r#"{{
+            "version": 1,
+            "agent_id": "did:web:agents.example.com:test",
+            "contributors": [],
+            "title": "t",
+            "type": "data_snapshot",
+            "data_refs": [],
+            "derived_from": [],
+            "visibility": "public",
+            "content_hash": "sha256:0",
+            "signature": {{
+              "algorithm": "ed25519",
+              "key_id": "did:web:agents.example.com:test#key-1",
+              "value": "{sig}"
+            }}{extra}
+          }}"#,
+            sig = "A".repeat(88),
+            extra = extra
+        )
+    }
+
+    /// BUG-02 — `PublishRequest` is `additionalProperties: false` per
+    /// `acdp-publish-request.schema.json`. Registry-assigned fields
+    /// (`ctx_id`, `origin_registry`, `created_at`) in a publish request
+    /// are a producer bug; silently dropping them would mean the
+    /// registry recomputes a different hash than the producer signed.
+    #[test]
+    fn extra_top_level_field_is_rejected() {
+        let body = minimal_request_with_extra(r#", "ctx_id": "acdp://r/x""#);
+        let res: Result<PublishRequest, _> = serde_json::from_str(&body);
+        assert!(res.is_err(), "ctx_id in publish request must be rejected");
+    }
+
+    #[test]
+    fn extra_origin_registry_field_is_rejected() {
+        let body = minimal_request_with_extra(r#", "origin_registry": "did:web:r.x""#);
+        let res: Result<PublishRequest, _> = serde_json::from_str(&body);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn extra_created_at_field_is_rejected() {
+        let body = minimal_request_with_extra(r#", "created_at": "2026-01-01T00:00:00.000Z""#);
+        let res: Result<PublishRequest, _> = serde_json::from_str(&body);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn arbitrary_unknown_field_is_rejected() {
+        let body = minimal_request_with_extra(r#", "noodle": 42"#);
+        let res: Result<PublishRequest, _> = serde_json::from_str(&body);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn baseline_no_extra_fields_deserializes_ok() {
+        let body = minimal_request_with_extra("");
+        serde_json::from_str::<PublishRequest>(&body)
+            .expect("baseline minimal request must still deserialize");
     }
 }
