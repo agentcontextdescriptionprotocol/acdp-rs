@@ -18,6 +18,12 @@ use chrono::{DateTime, Utc};
 use reqwest::{redirect, Client};
 
 /// HTTP client for a single ACDP registry.
+///
+/// `reqwest::Client` clones cheaply (it's an `Arc` internally), so this
+/// struct is `Clone` to enable per-authority caching in
+/// [`crate::client::CrossRegistryResolver`] without re-wiring HTTP+TLS
+/// state on every hop.
+#[derive(Clone)]
 pub struct RegistryClient {
     base: String,
     http: Client,
