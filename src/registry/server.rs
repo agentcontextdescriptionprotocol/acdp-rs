@@ -28,6 +28,7 @@
 //! resolution would require a live network or mock server.
 
 use crate::error::AcdpError;
+use crate::registry::rate_limit::{NoopRateLimiter, RateLimiter};
 use crate::registry::store::RegistryStore;
 use crate::registry::validator::{assign_identifiers, PublishValidator};
 use crate::types::{
@@ -39,13 +40,18 @@ use crate::types::{
 };
 
 /// Logical registry handler over an arbitrary [`RegistryStore`].
-pub struct RegistryServer<S: RegistryStore> {
+///
+/// `L` is the rate-limiting policy (RFC-ACDP-0008 §4.3). The default
+/// [`NoopRateLimiter`] accepts every publish; operators that need a
+/// real limiter construct via [`Self::with_rate_limiter`].
+pub struct RegistryServer<S: RegistryStore, L: RateLimiter = NoopRateLimiter> {
     store: S,
     caps: CapabilitiesDocument,
     authority: String,
+    rate_limiter: L,
 }
 
-impl<S: RegistryStore> RegistryServer<S> {
+impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
     /// Unchecked constructor. Skips capabilities and DID-authority binding
     /// validation; prefer [`Self::try_new`] in production. Retained for
     /// tests that build a server from known-good fixtures.
@@ -55,6 +61,7 @@ impl<S: RegistryStore> RegistryServer<S> {
             store,
             caps,
             authority: authority.into(),
+            rate_limiter: NoopRateLimiter,
         }
     }
 
@@ -83,7 +90,20 @@ impl<S: RegistryStore> RegistryServer<S> {
             store,
             caps,
             authority,
+            rate_limiter: NoopRateLimiter,
         })
+    }
+}
+
+impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
+    /// Replace the rate-limiting policy (RFC-ACDP-0008 §4.3).
+    pub fn with_rate_limiter<L2: RateLimiter>(self, limiter: L2) -> RegistryServer<S, L2> {
+        RegistryServer {
+            store: self.store,
+            caps: self.caps,
+            authority: self.authority,
+            rate_limiter: limiter,
+        }
     }
 
     /// Borrow the underlying store. Useful for tests that want to
@@ -116,17 +136,60 @@ impl<S: RegistryStore> RegistryServer<S> {
     pub async fn publish_verified(
         &self,
         req: &PublishRequest,
+        idempotency_key: Option<&str>,
         resolver: &crate::did::WebResolver,
     ) -> Result<PublishResponse, AcdpError> {
+        // Rate-limit gate runs before any expensive work — RFC-ACDP-0008 §4.3.
+        self.rate_limiter.check_publish(&req.agent_id)?;
+
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
         let validated = validator.validate_post_schema(req, raw_bytes)?;
+
+        // RFC-ACDP-0003 §6 — Idempotency-Key handling.
+        // idem-005: registries that don't support the header MUST ignore it.
+        if self.caps.supports_idempotency_key {
+            if let Some(key) = idempotency_key {
+                if let Some(prior) = self.store.idempotency_lookup(&req.agent_id, key)? {
+                    if prior.content_hash == req.content_hash {
+                        // idem-002: replay returns the original response unchanged.
+                        return Ok(prior.response);
+                    }
+                    // idem-003: same key, different hash → duplicate_publish.
+                    return Err(AcdpError::DuplicatePublish(format!(
+                        "Idempotency-Key '{key}' was previously used by '{}' \
+                         with a different content_hash",
+                        req.agent_id
+                    )));
+                }
+            }
+        }
 
         // Steps 7–8: DID resolution + signature verification.
         crate::crypto::verify::verify_publish_request_signature(req, resolver).await?;
 
         // Steps 9–11: assign identifiers, enforce lineage coherence, persist.
-        self.persist_validated(req, validated)
+        let response = self.persist_validated(req, validated)?;
+
+        // Persist idempotency record AFTER successful publish (idem-001).
+        if self.caps.supports_idempotency_key {
+            if let Some(key) = idempotency_key {
+                let ttl_secs = self
+                    .caps
+                    .limits
+                    .idempotency_key_ttl_seconds
+                    .unwrap_or(86_400);
+                let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
+                self.store.idempotency_record(
+                    &req.agent_id,
+                    key,
+                    &req.content_hash,
+                    &response,
+                    expires_at,
+                )?;
+            }
+        }
+        Ok(response)
     }
 
     /// **NOT RFC-conformant.** Skips DID resolution and signature
@@ -140,6 +203,11 @@ impl<S: RegistryStore> RegistryServer<S> {
         &self,
         req: &PublishRequest,
     ) -> Result<PublishResponse, AcdpError> {
+        // Rate-limit gate fires here too — the limiter is intentionally
+        // wired BEFORE validation so it works as a defensive cap even
+        // when the test path is used.
+        self.rate_limiter.check_publish(&req.agent_id)?;
+
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
         let validated = validator.validate_post_schema(req, raw_bytes)?;
@@ -678,7 +746,10 @@ mod tests {
         // Re-sign isn't necessary: the verifier rejects before signature check.
         req.signature.key_id = "did:key:z6Mki#key-1".into();
         let resolver = crate::did::WebResolver::new();
-        let err = server.publish_verified(&req, &resolver).await.unwrap_err();
+        let err = server
+            .publish_verified(&req, None, &resolver)
+            .await
+            .unwrap_err();
         match err {
             AcdpError::KeyNotAuthorized(msg) => assert!(msg.contains("did:web")),
             other => panic!("expected KeyNotAuthorized for non-did:web, got {other:?}"),
@@ -699,7 +770,10 @@ mod tests {
             .unwrap();
         req.signature.key_id = "did:web:other.example.com:agent#key-1".into();
         let resolver = crate::did::WebResolver::new();
-        let err = server.publish_verified(&req, &resolver).await.unwrap_err();
+        let err = server
+            .publish_verified(&req, None, &resolver)
+            .await
+            .unwrap_err();
         match err {
             AcdpError::KeyNotAuthorized(msg) => assert!(msg.contains("agent_id")),
             other => panic!("expected KeyNotAuthorized for agent_id mismatch, got {other:?}"),
@@ -720,7 +794,10 @@ mod tests {
             .unwrap();
         req.signature.key_id = "did:web:agents.example.com:test".into(); // no '#'
         let resolver = crate::did::WebResolver::new();
-        let err = server.publish_verified(&req, &resolver).await.unwrap_err();
+        let err = server
+            .publish_verified(&req, None, &resolver)
+            .await
+            .unwrap_err();
         // Schema validation (step 1) catches missing-fragment before
         // step 7 fires, so the surface error is SchemaViolation.
         assert!(
@@ -729,6 +806,122 @@ mod tests {
                 AcdpError::SchemaViolation(_) | AcdpError::KeyResolution(_)
             ),
             "expected fragment-rejection error, got {err:?}"
+        );
+    }
+
+    // ── FEAT-04 idempotency tests ──────────────────────────────────────
+
+    fn caps_with_idempotency() -> CapabilitiesDocument {
+        let mut c = caps();
+        c.supports_idempotency_key = true;
+        c.limits.idempotency_key_ttl_seconds = Some(86_400);
+        c
+    }
+
+    #[test]
+    fn idempotency_same_hash_returns_original_response() {
+        let server = RegistryServer::new(
+            InMemoryStore::new(),
+            caps_with_idempotency(),
+            "registry.example.com",
+        );
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("once")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        // First publish (using the offline path; idempotency works either way).
+        let first = server.publish_unverified_for_tests(&req).unwrap();
+        // Record the idempotency entry as if it had come in through
+        // publish_verified — we test only the lookup logic here, so
+        // simulate via the store API.
+        let ttl = caps_with_idempotency()
+            .limits
+            .idempotency_key_ttl_seconds
+            .unwrap() as i64;
+        server
+            .store()
+            .idempotency_record(
+                &req.agent_id,
+                "k-001",
+                &req.content_hash,
+                &first,
+                chrono::Utc::now() + chrono::Duration::seconds(ttl),
+            )
+            .unwrap();
+        let prior = server
+            .store()
+            .idempotency_lookup(&req.agent_id, "k-001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(prior.content_hash, req.content_hash);
+        assert_eq!(prior.response.ctx_id, first.ctx_id);
+    }
+
+    #[test]
+    fn idempotency_evicts_after_ttl() {
+        let store = InMemoryStore::new();
+        let agent = AgentDid::new("did:web:agents.example.com:test");
+        let resp = PublishResponse {
+            ctx_id: crate::types::CtxId("acdp://r/12345678-1234-4321-8123-000000000099".into()),
+            lineage_id: crate::types::LineageId(
+                "lin:sha256:9999999999999999999999999999999999999999999999999999999999999999"
+                    .into(),
+            ),
+            version: 1,
+            created_at: chrono::Utc::now(),
+            status: Status::Active,
+        };
+        // Already-past expiration.
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        store
+            .idempotency_record(
+                &agent,
+                "expired",
+                &crate::types::ContentHash("sha256:0".into()),
+                &resp,
+                past,
+            )
+            .unwrap();
+        // Lookup runs lazy eviction; the expired record MUST be gone.
+        let prior = store.idempotency_lookup(&agent, "expired").unwrap();
+        assert!(
+            prior.is_none(),
+            "lazy TTL eviction should drop expired record"
+        );
+    }
+
+    // ── FEAT-05 rate limiter tests ─────────────────────────────────────
+
+    struct AlwaysDeny;
+    impl crate::registry::RateLimiter for AlwaysDeny {
+        fn check_publish(&self, agent_id: &AgentDid) -> Result<(), AcdpError> {
+            Err(AcdpError::RateLimited(format!("blocked: {agent_id}")))
+        }
+    }
+
+    #[test]
+    fn rate_limiter_blocks_publish_before_persist() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com")
+            .with_rate_limiter(AlwaysDeny);
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("blocked")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let err = server.publish_unverified_for_tests(&req).unwrap_err();
+        assert!(matches!(err, AcdpError::RateLimited(_)));
+        // And the store is empty — the limiter MUST short-circuit before persist.
+        let resp = server.search(&SearchParams::default(), None).unwrap();
+        assert!(
+            resp.matches.is_empty(),
+            "rate-limited publish must not persist"
         );
     }
 

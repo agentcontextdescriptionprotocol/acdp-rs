@@ -68,6 +68,65 @@ pub trait RegistryStore: Send + Sync {
         params: &SearchParams,
         requester: Option<&AgentDid>,
     ) -> Result<SearchResponse, AcdpError>;
+
+    // ── Idempotency (RFC-ACDP-0003 §6) ─────────────────────────────────
+    //
+    // Stores supporting the `idempotency_key` capability MUST implement
+    // these three methods. The default impls treat the store as
+    // non-idempotent: lookup always returns `None`, record is a no-op,
+    // evict is a no-op. A `RegistryServer` configured with
+    // `caps.supports_idempotency_key = false` MUST never call them
+    // (RFC-ACDP-0007 §3.2).
+
+    /// Look up a prior publish record for `(agent_id, key)`.
+    ///
+    /// Returns `Some((content_hash, response))` if a record exists and
+    /// has not expired. Scoping by `agent_id` prevents a malicious
+    /// producer from poisoning another producer's key namespace
+    /// (RFC-ACDP-0003 §6 — idem-004 fixture).
+    fn idempotency_lookup(
+        &self,
+        _agent_id: &AgentDid,
+        _key: &str,
+    ) -> Result<Option<IdempotencyRecord>, AcdpError> {
+        Ok(None)
+    }
+
+    /// Record a successful publish under `(agent_id, key)` with TTL
+    /// `expires_at`. Calling on a store that does not support
+    /// idempotency is a no-op.
+    fn idempotency_record(
+        &self,
+        _agent_id: &AgentDid,
+        _key: &str,
+        _hash: &crate::types::primitives::ContentHash,
+        _response: &crate::types::publish::PublishResponse,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), AcdpError> {
+        Ok(())
+    }
+
+    /// Evict records whose `expires_at` is past `now`. Implementations
+    /// may call this on a janitor schedule or lazily at lookup time.
+    fn idempotency_evict_expired(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), AcdpError> {
+        Ok(())
+    }
+}
+
+/// Cached publish response keyed by `(agent_id, idempotency_key)`
+/// (RFC-ACDP-0003 §6).
+#[derive(Debug, Clone)]
+pub struct IdempotencyRecord {
+    /// The original request's `content_hash`. A retry with the same key
+    /// but a different hash MUST be rejected as `duplicate_publish`.
+    pub content_hash: crate::types::primitives::ContentHash,
+    /// The response the registry returned on the first acceptance.
+    pub response: crate::types::publish::PublishResponse,
+    /// Eviction time (TTL window from caps.limits.idempotency_key_ttl_seconds).
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 // ── In-memory reference implementation ───────────────────────────────────────
@@ -86,6 +145,8 @@ struct Inner {
     by_ctx: std::collections::BTreeMap<String, FullContext>,
     /// `lineage_id -> [ctx_id, ctx_id, ...]` in publish order.
     lineages: std::collections::BTreeMap<String, Vec<String>>,
+    /// `(agent_did, idempotency_key) -> record` (RFC-ACDP-0003 §6).
+    idempotency: std::collections::HashMap<(String, String), IdempotencyRecord>,
 }
 
 impl InMemoryStore {
@@ -97,6 +158,37 @@ impl InMemoryStore {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("InMemoryStore mutex poisoned")
     }
+}
+
+/// RFC-ACDP-0004 §4 — derive `Status::Expired` from `body.expires_at` at
+/// read time so a registry that does not run a janitor still surfaces the
+/// correct lifecycle status.
+///
+/// `Superseded` outranks `Expired` (consistent with the lifecycle precedence
+/// in RFC-ACDP-0004 §4.1 — once a successor replaces a context, expiry of
+/// the predecessor is irrelevant to the lineage's current view).
+pub(crate) fn project_status(
+    stored: &Status,
+    body: &Body,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Status {
+    match stored {
+        Status::Active => match body.expires_at {
+            Some(exp) if exp <= now => Status::Expired,
+            _ => Status::Active,
+        },
+        other => other.clone(),
+    }
+}
+
+/// Materialize the effective view of a stored context: applies
+/// [`project_status`] to override the stored status when expired.
+pub(crate) fn project_context(
+    mut ctx: FullContext,
+    now: chrono::DateTime<chrono::Utc>,
+) -> FullContext {
+    ctx.registry_state.status = project_status(&ctx.registry_state.status, &ctx.body, now);
+    ctx
 }
 
 /// RFC-ACDP-0008 §4.5 search-disclosure rule.
@@ -145,34 +237,47 @@ impl RegistryStore for InMemoryStore {
     }
 
     fn get(&self, ctx_id: &CtxId) -> Result<Option<FullContext>, AcdpError> {
-        Ok(self.lock().by_ctx.get(ctx_id.as_str()).cloned())
+        let now = chrono::Utc::now();
+        Ok(self
+            .lock()
+            .by_ctx
+            .get(ctx_id.as_str())
+            .cloned()
+            .map(|c| project_context(c, now)))
     }
 
     fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
+        let now = chrono::Utc::now();
         let g = self.lock();
         let Some(ids) = g.lineages.get(lineage_id.as_str()) else {
             return Ok(Vec::new());
         };
         Ok(ids
             .iter()
-            .filter_map(|id| g.by_ctx.get(id).cloned())
+            .filter_map(|id| g.by_ctx.get(id).cloned().map(|c| project_context(c, now)))
             .collect())
     }
 
     fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
+        let now = chrono::Utc::now();
         let g = self.lock();
         let Some(ids) = g.lineages.get(lineage_id.as_str()) else {
             return Ok(None);
         };
-        // Prefer the last `Active`; fall back to the highest version.
+        // Prefer the last `Active` (after projection); fall back to the
+        // last entry projected. An expired predecessor is not "current".
         for id in ids.iter().rev() {
             if let Some(ctx) = g.by_ctx.get(id) {
-                if matches!(ctx.registry_state.status, Status::Active) {
-                    return Ok(Some(ctx.clone()));
+                let projected = project_context(ctx.clone(), now);
+                if matches!(projected.registry_state.status, Status::Active) {
+                    return Ok(Some(projected));
                 }
             }
         }
-        Ok(ids.last().and_then(|id| g.by_ctx.get(id).cloned()))
+        Ok(ids
+            .last()
+            .and_then(|id| g.by_ctx.get(id).cloned())
+            .map(|c| project_context(c, now)))
     }
 
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
@@ -191,24 +296,78 @@ impl RegistryStore for InMemoryStore {
             .map(CtxId))
     }
 
+    fn idempotency_lookup(
+        &self,
+        agent_id: &AgentDid,
+        key: &str,
+    ) -> Result<Option<IdempotencyRecord>, AcdpError> {
+        // Lazy TTL eviction at lookup time keeps the table bounded
+        // without requiring a janitor — see idempotency_evict_expired.
+        self.idempotency_evict_expired(chrono::Utc::now())?;
+        let g = self.lock();
+        Ok(g.idempotency
+            .get(&(agent_id.as_str().to_string(), key.to_string()))
+            .cloned())
+    }
+
+    fn idempotency_record(
+        &self,
+        agent_id: &AgentDid,
+        key: &str,
+        hash: &crate::types::primitives::ContentHash,
+        response: &crate::types::publish::PublishResponse,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), AcdpError> {
+        let mut g = self.lock();
+        g.idempotency.insert(
+            (agent_id.as_str().to_string(), key.to_string()),
+            IdempotencyRecord {
+                content_hash: hash.clone(),
+                response: response.clone(),
+                expires_at,
+            },
+        );
+        Ok(())
+    }
+
+    fn idempotency_evict_expired(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), AcdpError> {
+        let mut g = self.lock();
+        g.idempotency.retain(|_, r| r.expires_at > now);
+        Ok(())
+    }
+
     fn search(
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
     ) -> Result<SearchResponse, AcdpError> {
         let g = self.lock();
+        let now = chrono::Utc::now();
 
         let q_lower = params.q.as_deref().map(str::to_lowercase);
         let domain = params.domain.as_deref();
         let agent = params.agent_id.as_deref();
         let context_type = params.context_type.as_deref();
         let derived_from = params.derived_from.as_deref();
+        let schema_uri = params.schema_uri.as_deref();
         let tags: Option<Vec<&str>> = params.tags.as_deref().map(|s| {
             s.split(',')
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .collect()
         });
+
+        // BUG-10: parse date-time filter params at the boundary so the
+        // hot loop just compares DateTime<Utc> values.
+        let created_after = parse_opt_rfc3339(&params.created_after)?;
+        let created_before = parse_opt_rfc3339(&params.created_before)?;
+        let dp_start_after = parse_opt_rfc3339(&params.data_period_start_after)?;
+        let dp_end_before = parse_opt_rfc3339(&params.data_period_end_before)?;
+        let expires_after = parse_opt_rfc3339(&params.expires_after)?;
+        let expires_before = parse_opt_rfc3339(&params.expires_before)?;
 
         let mut matches: Vec<&FullContext> = g
             .by_ctx
@@ -268,19 +427,92 @@ impl RegistryStore for InMemoryStore {
                         return false;
                     }
                 }
-                // Status filter — registry default is `active`.
+                if let Some(uri) = schema_uri {
+                    if body.schema_uri.as_deref() != Some(uri) {
+                        return false;
+                    }
+                }
+                if let Some(after) = created_after {
+                    if body.created_at < after {
+                        return false;
+                    }
+                }
+                if let Some(before) = created_before {
+                    if body.created_at > before {
+                        return false;
+                    }
+                }
+                if let Some(after) = dp_start_after {
+                    match &body.data_period {
+                        Some(p) if p.start >= after => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(before) = dp_end_before {
+                    match &body.data_period {
+                        Some(p) if p.end <= before => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(after) = expires_after {
+                    match body.expires_at {
+                        Some(e) if e >= after => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(before) = expires_before {
+                    match body.expires_at {
+                        Some(e) if e <= before => {}
+                        _ => return false,
+                    }
+                }
+                // Status filter — registry default is `active`. Compare
+                // against PROJECTED status so a stored-Active body whose
+                // expires_at has passed is filtered out (RFC-ACDP-0004 §4).
                 let want_status = params.status.as_deref().unwrap_or("active");
-                if ctx.registry_state.status.as_str() != want_status {
+                let effective = project_status(&ctx.registry_state.status, body, now);
+                if effective.as_str() != want_status {
                     return false;
                 }
                 true
             })
             .collect();
 
-        // Newest first
-        matches.sort_by_key(|c| std::cmp::Reverse(c.body.created_at));
+        // Newest first; IMP-03 — fall back to ctx_id for a deterministic
+        // total order when many contexts share a millisecond.
+        matches.sort_by(|a, b| {
+            b.body
+                .created_at
+                .cmp(&a.body.created_at)
+                .then_with(|| a.body.ctx_id.as_str().cmp(b.body.ctx_id.as_str()))
+        });
+
+        // BUG-10 cursor: opaque base64 of "<created_at_ms>:<ctx_id>".
+        // ≥1h validity is implicit — cursors do not embed a timestamp,
+        // so they remain valid until the underlying context is deleted.
+        let cursor_anchor = params
+            .cursor
+            .as_deref()
+            .map(decode_cursor)
+            .transpose()?
+            .flatten();
+        if let Some((anchor_ms, anchor_id)) = &cursor_anchor {
+            matches.retain(|c| {
+                let ms = c.body.created_at.timestamp_millis();
+                ms < *anchor_ms || (ms == *anchor_ms && c.body.ctx_id.as_str() > anchor_id.as_str())
+            });
+        }
 
         let limit = params.limit.unwrap_or(50).min(100) as usize;
+        let next_cursor = if matches.len() > limit {
+            matches.get(limit - 1).map(|c| {
+                encode_cursor(c.body.created_at.timestamp_millis(), c.body.ctx_id.as_str())
+            })
+        } else {
+            None
+        };
+        let total_estimate = Some(matches.len() as u64);
+
         let projected: Vec<SearchResult> = matches
             .iter()
             .take(limit)
@@ -293,7 +525,7 @@ impl RegistryStore for InMemoryStore {
                 context_type: ctx.body.context_type.clone(),
                 domain: ctx.body.domain.clone(),
                 created_at: ctx.body.created_at,
-                status: ctx.registry_state.status.clone(),
+                status: project_status(&ctx.registry_state.status, &ctx.body, now),
                 // RFC-ACDP-0008 §4.5: only disclose visibility when the
                 // requester is authorized for it. Public is always safe.
                 // For restricted/private, the search filter above guarantees
@@ -305,10 +537,46 @@ impl RegistryStore for InMemoryStore {
 
         Ok(SearchResponse {
             matches: projected,
-            total_estimate: Some(matches.len() as u64),
-            next_cursor: None,
+            total_estimate,
+            next_cursor,
         })
     }
+}
+
+/// Parse an optional RFC 3339 string parameter; surface a
+/// [`AcdpError::SchemaViolation`] on malformed input.
+fn parse_opt_rfc3339(
+    s: &Option<String>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, AcdpError> {
+    let Some(raw) = s.as_deref() else {
+        return Ok(None);
+    };
+    let dt = chrono::DateTime::parse_from_rfc3339(raw)
+        .map_err(|e| AcdpError::SchemaViolation(format!("malformed datetime '{raw}': {e}")))?;
+    Ok(Some(dt.with_timezone(&chrono::Utc)))
+}
+
+/// Opaque cursor encoding — base64 of `<created_at_millis>:<ctx_id>`.
+/// Plain `STANDARD` engine so cursors are stable across machines.
+fn encode_cursor(created_at_ms: i64, ctx_id: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    STANDARD.encode(format!("{created_at_ms}:{ctx_id}"))
+}
+
+fn decode_cursor(s: &str) -> Result<Option<(i64, String)>, AcdpError> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let bytes = STANDARD
+        .decode(s)
+        .map_err(|_| AcdpError::InvalidCursor("cursor is not valid base64".into()))?;
+    let decoded = String::from_utf8(bytes)
+        .map_err(|_| AcdpError::InvalidCursor("cursor is not utf-8".into()))?;
+    let (ms_str, id) = decoded
+        .split_once(':')
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ':' separator".into()))?;
+    let ms: i64 = ms_str
+        .parse()
+        .map_err(|_| AcdpError::InvalidCursor("cursor anchor millis is not an integer".into()))?;
+    Ok(Some((ms, id.to_string())))
 }
 
 #[cfg(test)]
@@ -389,6 +657,205 @@ mod tests {
         s.mark_superseded(&CtxId(v1.into())).unwrap();
         let got = s.get(&CtxId(v1.into())).unwrap().unwrap();
         assert!(matches!(got.registry_state.status, Status::Superseded));
+    }
+
+    // BUG-11 — Status::Expired derived from body.expires_at at read time.
+
+    fn expired_body(
+        ctx_id: &str,
+        lineage_id: &str,
+        title: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Body {
+        let mut b = fake_body(ctx_id, lineage_id, title);
+        b.expires_at = Some(expires_at);
+        b
+    }
+
+    #[test]
+    fn get_projects_active_to_expired_when_past_expires_at() {
+        use chrono::Duration;
+        let s = InMemoryStore::new();
+        let lin = "lin:sha256:5555555555555555555555555555555555555555555555555555555555555555";
+        let id = "acdp://r/12345678-1234-4321-8123-000000000006";
+        s.put(expired_body(
+            id,
+            lin,
+            "old",
+            chrono::Utc::now() - Duration::hours(1),
+        ))
+        .unwrap();
+        let got = s.get(&CtxId(id.into())).unwrap().unwrap();
+        assert!(
+            matches!(got.registry_state.status, Status::Expired),
+            "expected Status::Expired projection, got {:?}",
+            got.registry_state.status
+        );
+    }
+
+    #[test]
+    fn get_keeps_active_when_expires_at_in_future() {
+        use chrono::Duration;
+        let s = InMemoryStore::new();
+        let lin = "lin:sha256:6666666666666666666666666666666666666666666666666666666666666666";
+        let id = "acdp://r/12345678-1234-4321-8123-000000000007";
+        s.put(expired_body(
+            id,
+            lin,
+            "fresh",
+            chrono::Utc::now() + Duration::hours(1),
+        ))
+        .unwrap();
+        let got = s.get(&CtxId(id.into())).unwrap().unwrap();
+        assert!(matches!(got.registry_state.status, Status::Active));
+    }
+
+    #[test]
+    fn search_status_active_filters_out_expired() {
+        use chrono::Duration;
+        let s = InMemoryStore::new();
+        let lin = "lin:sha256:7777777777777777777777777777777777777777777777777777777777777777";
+        let id = "acdp://r/12345678-1234-4321-8123-000000000008";
+        s.put(expired_body(
+            id,
+            lin,
+            "old",
+            chrono::Utc::now() - Duration::hours(1),
+        ))
+        .unwrap();
+        let resp = s.search(&SearchParams::default(), None).unwrap();
+        assert!(
+            resp.matches.is_empty(),
+            "expired must not surface under status=active default"
+        );
+        // Asking for `expired` SHOULD surface it.
+        let resp = s
+            .search(
+                &SearchParams {
+                    status: Some("expired".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(resp.matches.len(), 1);
+    }
+
+    /// BUG-10 — date/time filter is honored.
+    #[test]
+    fn search_filters_by_created_after() {
+        let s = InMemoryStore::new();
+        let lin = "lin:sha256:8888888888888888888888888888888888888888888888888888888888888888";
+        let mut body = fake_body(
+            "acdp://r/12345678-1234-4321-8123-000000000009",
+            lin,
+            "match",
+        );
+        body.created_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        s.put(body).unwrap();
+        // `created_after` AFTER body.created_at → 0 matches
+        let resp = s
+            .search(
+                &SearchParams {
+                    created_after: Some("2026-02-01T00:00:00.000Z".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(resp.matches.len(), 0);
+        // `created_after` BEFORE body.created_at → 1 match
+        let resp = s
+            .search(
+                &SearchParams {
+                    created_after: Some("2025-12-01T00:00:00.000Z".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(resp.matches.len(), 1);
+    }
+
+    #[test]
+    fn search_invalid_rfc3339_filter_rejected() {
+        let s = InMemoryStore::new();
+        let err = s
+            .search(
+                &SearchParams {
+                    created_after: Some("not-a-date".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    /// BUG-10 cursor round-trips and pages correctly.
+    #[test]
+    fn search_cursor_pages_results() {
+        let s = InMemoryStore::new();
+        let lin = "lin:sha256:9999999999999999999999999999999999999999999999999999999999999999";
+        // Insert 5 contexts with distinct created_at so order is deterministic.
+        let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for i in 0..5u8 {
+            let mut body = fake_body(
+                &format!("acdp://r/12345678-1234-4321-8123-00000000010{i}"),
+                lin,
+                "match",
+            );
+            body.created_at = base + chrono::Duration::minutes(i as i64);
+            s.put(body).unwrap();
+        }
+        let p1 = s
+            .search(
+                &SearchParams {
+                    limit: Some(2),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(p1.matches.len(), 2);
+        let cursor = p1.next_cursor.expect("page 1 should carry a cursor");
+        let p2 = s
+            .search(
+                &SearchParams {
+                    limit: Some(2),
+                    cursor: Some(cursor.clone()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(p2.matches.len(), 2);
+        // No overlap between page 1 and page 2.
+        for r in &p2.matches {
+            assert!(
+                !p1.matches.iter().any(|q| q.ctx_id == r.ctx_id),
+                "page 2 overlapped page 1"
+            );
+        }
+    }
+
+    #[test]
+    fn search_malformed_cursor_rejected() {
+        let s = InMemoryStore::new();
+        let err = s
+            .search(
+                &SearchParams {
+                    cursor: Some("not_base64!@#".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, AcdpError::InvalidCursor(_)));
     }
 
     #[test]
