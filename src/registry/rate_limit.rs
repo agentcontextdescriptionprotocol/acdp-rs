@@ -5,7 +5,8 @@
 //! sliding window, per-tenant quotas are all conformant. This trait lets
 //! a registry plug a policy in without the core library taking a
 //! dependency on a specific store. The default [`NoopRateLimiter`] is a
-//! pass-through and is wired into [`RegistryServer`] unless the operator
+//! pass-through and is wired into
+//! [`RegistryServer`](super::server::RegistryServer) unless the operator
 //! supplies their own.
 //!
 //! Rate-limit decisions surface as [`AcdpError::RateLimited`], which

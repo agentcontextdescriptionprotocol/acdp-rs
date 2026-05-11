@@ -44,7 +44,7 @@ pub struct ResolverOptions {
     /// either malformed or hostile — short-circuit before fanning out.
     pub max_fanout: usize,
     /// Wall-clock budget for the entire walk (default 30 s). Wraps
-    /// [`Self::walk_derived_from`] in `tokio::time::timeout`.
+    /// [`CrossRegistryResolver::walk_derived_from`] in `tokio::time::timeout`.
     pub total_timeout: Duration,
     /// How long to cache a foreign registry's capabilities document
     /// before re-fetching (default 5 min). Avoids hammering the foreign
