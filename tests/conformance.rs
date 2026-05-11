@@ -67,9 +67,14 @@ fn all_conformance_fixtures_parse_as_valid_json() {
         );
         count += 1;
     }
+    // BUG-05: spec is at round-3 hardening (72 fixtures across `can`,
+    // `caps`, `data-ref`, `err`, `fed`, `idem`, `meta`, `pub`, `rate`,
+    // `ret`, `schema`, `sig`, `status`, `vis` families). Floor at 60 so
+    // small future renames / merges don't break CI while still catching
+    // a wholesale regression in fixture loading.
     assert!(
-        count >= 29,
-        "expected ≥29 fixtures (post round-2 spec), found {count}"
+        count >= 60,
+        "expected ≥60 fixtures (post round-3 spec), found {count}"
     );
 }
 
