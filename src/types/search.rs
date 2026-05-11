@@ -99,10 +99,14 @@ impl SearchResponse {
 /// `acdp-common.schema.json#/$defs/match_summary`.
 ///
 /// Required fields: ctx_id, lineage_id, type, agent_id, title, created_at,
-/// status. Optional: summary, domain. The full description, tags, etc. are
-/// NOT in this projection — fetch the full Body via the registry's
-/// retrieval endpoint to access them.
+/// status. Optional: summary, domain, visibility. The full description,
+/// tags, etc. are NOT in this projection — fetch the full Body via the
+/// registry's retrieval endpoint to access them.
+///
+/// `match_summary` is `additionalProperties: false`; deserialization
+/// rejects unknown fields to keep the projection aligned with the schema.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchResult {
     /// Context identifier.
     pub ctx_id: CtxId,
@@ -123,6 +127,13 @@ pub struct SearchResult {
     pub created_at: DateTime<Utc>,
     /// Lifecycle status.
     pub status: Status,
+    /// Visibility level per RFC-ACDP-0005 §2.2 / RFC-ACDP-0008 §4.5
+    /// disclosure rules. Registries SHOULD include `Public` for public
+    /// results; for `Restricted` / `Private` results the field MUST only
+    /// be present when the requester is authorized. Absence MUST NOT be
+    /// interpreted as `Public`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
 }
 
 // ── Typed builder ────────────────────────────────────────────────────────────
@@ -256,5 +267,62 @@ impl SearchParamsBuilder {
     /// Finalize.
     pub fn build(self) -> SearchParams {
         self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_result() -> serde_json::Value {
+        serde_json::json!({
+            "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+            "lineage_id": "lin:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "agent_id": "did:web:agents.example.com:test",
+            "title": "x",
+            "summary": null,
+            "type": "data_snapshot",
+            "domain": null,
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "status": "active",
+        })
+    }
+
+    /// BUG-03 — `SearchResult` carries the `visibility` projection field.
+    /// `match_summary` schema marks it optional; a registry SHOULD emit
+    /// it for public results and MUST omit it for restricted/private
+    /// results when the requester is unauthorized.
+    #[test]
+    fn deserializes_with_visibility() {
+        let mut v = base_result();
+        v["visibility"] = serde_json::json!("public");
+        let r: SearchResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.visibility, Some(Visibility::Public));
+    }
+
+    #[test]
+    fn deserializes_without_visibility() {
+        let r: SearchResult = serde_json::from_value(base_result()).unwrap();
+        assert_eq!(r.visibility, None, "absence must NOT be coerced to Public");
+    }
+
+    /// `match_summary` is `additionalProperties: false` — extra fields
+    /// must be rejected so the projection stays aligned with the schema.
+    #[test]
+    fn rejects_unknown_field() {
+        let mut v = base_result();
+        v["surprise"] = serde_json::json!("rejected");
+        let r: Result<SearchResult, _> = serde_json::from_value(v);
+        assert!(r.is_err(), "unknown field must trigger deny_unknown_fields");
+    }
+
+    /// Round-trip preserves visibility.
+    #[test]
+    fn round_trip_with_visibility_public() {
+        let mut v = base_result();
+        v["visibility"] = serde_json::json!("restricted");
+        let r: SearchResult = serde_json::from_value(v).unwrap();
+        let back = serde_json::to_value(&r).unwrap();
+        assert_eq!(back["visibility"], serde_json::json!("restricted"));
     }
 }

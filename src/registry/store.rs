@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use crate::error::AcdpError;
 use crate::types::{
     body::{Body, FullContext, RegistryState},
-    primitives::{CtxId, LineageId, Status},
+    primitives::{AgentDid, CtxId, LineageId, Status, Visibility},
     search::{SearchParams, SearchResponse, SearchResult},
 };
 
@@ -47,9 +47,27 @@ pub trait RegistryStore: Send + Sync {
     /// lineage_id of a supersession publish per RFC-ACDP-0001 §5.6.
     fn first_version_ctx_id(&self, lineage_id: &LineageId) -> Result<Option<CtxId>, AcdpError>;
 
-    /// Keyword/filter search. Implementations may project a subset of
-    /// fields per RFC-ACDP-0005 §2.2 `match_summary`.
-    fn search(&self, params: &SearchParams) -> Result<SearchResponse, AcdpError>;
+    /// Keyword/filter search. Implementations MUST apply the RFC-ACDP-0008
+    /// §4.5 search-disclosure rules using `requester`:
+    ///
+    /// | Visibility   | Surfaces in search to                        |
+    /// |--------------|----------------------------------------------|
+    /// | `public`     | anyone                                       |
+    /// | `restricted` | producer (`agent_id`) **or** any DID in `audience` |
+    /// | `private`    | producer (`agent_id`) only — audience members must already know the ctx_id |
+    ///
+    /// `requester == None` represents an anonymous caller; only `Public`
+    /// contexts may surface, and the implementation MAY further restrict
+    /// based on `capabilities.anonymous_public_reads` (that flag lives in
+    /// [`RegistryServer`](super::server::RegistryServer); the store
+    /// itself does not see it).
+    ///
+    /// Projection follows RFC-ACDP-0005 §2.2 `match_summary`.
+    fn search(
+        &self,
+        params: &SearchParams,
+        requester: Option<&AgentDid>,
+    ) -> Result<SearchResponse, AcdpError>;
 }
 
 // ── In-memory reference implementation ───────────────────────────────────────
@@ -78,6 +96,28 @@ impl InMemoryStore {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("InMemoryStore mutex poisoned")
+    }
+}
+
+/// RFC-ACDP-0008 §4.5 search-disclosure rule.
+///
+/// Note the asymmetry vs retrieval: a `Private` context surfaces in search
+/// **only** to its producer — audience members must already know the
+/// `ctx_id` to fetch it. `Restricted` surfaces to producer + audience.
+fn can_surface_in_search(body: &Body, requester: Option<&AgentDid>) -> bool {
+    match body.visibility {
+        Visibility::Public => true,
+        Visibility::Restricted => match requester {
+            None => false,
+            Some(r) => {
+                r == &body.agent_id
+                    || body
+                        .audience
+                        .as_deref()
+                        .is_some_and(|a| a.iter().any(|d| d == r))
+            }
+        },
+        Visibility::Private => requester == Some(&body.agent_id),
     }
 }
 
@@ -151,7 +191,11 @@ impl RegistryStore for InMemoryStore {
             .map(CtxId))
     }
 
-    fn search(&self, params: &SearchParams) -> Result<SearchResponse, AcdpError> {
+    fn search(
+        &self,
+        params: &SearchParams,
+        requester: Option<&AgentDid>,
+    ) -> Result<SearchResponse, AcdpError> {
         let g = self.lock();
 
         let q_lower = params.q.as_deref().map(str::to_lowercase);
@@ -171,6 +215,13 @@ impl RegistryStore for InMemoryStore {
             .values()
             .filter(|ctx| {
                 let body = &ctx.body;
+
+                // RFC-ACDP-0008 §4.5 search-disclosure gate (note the
+                // private/restricted asymmetry: private contexts surface
+                // in search only to their producer).
+                if !can_surface_in_search(body, requester) {
+                    return false;
+                }
 
                 if let Some(q) = &q_lower {
                     let haystack = format!(
@@ -243,6 +294,12 @@ impl RegistryStore for InMemoryStore {
                 domain: ctx.body.domain.clone(),
                 created_at: ctx.body.created_at,
                 status: ctx.registry_state.status.clone(),
+                // RFC-ACDP-0008 §4.5: only disclose visibility when the
+                // requester is authorized for it. Public is always safe.
+                // For restricted/private, the search filter above guarantees
+                // the requester is producer-or-audience, so it's safe to
+                // surface the label.
+                visibility: Some(ctx.body.visibility.clone()),
             })
             .collect();
 
@@ -344,18 +401,24 @@ mod tests {
         s.put(fake_body(v2, lin, "new")).unwrap();
         s.mark_superseded(&CtxId(v1.into())).unwrap();
         let resp = s
-            .search(&SearchParams {
-                q: Some("old".into()),
-                ..Default::default()
-            })
+            .search(
+                &SearchParams {
+                    q: Some("old".into()),
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         // Only `active` matches — superseded "old" filtered out.
         assert_eq!(resp.matches.len(), 0);
         let resp = s
-            .search(&SearchParams {
-                q: Some("new".into()),
-                ..Default::default()
-            })
+            .search(
+                &SearchParams {
+                    q: Some("new".into()),
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
     }
@@ -400,9 +463,9 @@ mod tests {
         };
 
         let server = RegistryServer::new(InMemoryStore::new(), caps, "registry.example.com");
-        let resp = server.publish(&req).unwrap();
+        let resp = server.publish_unverified_for_tests(&req).unwrap();
         assert_eq!(resp.version, 1);
-        let ctx = server.retrieve(&resp.ctx_id).unwrap().unwrap();
+        let ctx = server.retrieve(&resp.ctx_id, None).unwrap().unwrap();
         assert_eq!(ctx.body.title, "hello");
 
         // Ignore unused imports under different feature combinations
