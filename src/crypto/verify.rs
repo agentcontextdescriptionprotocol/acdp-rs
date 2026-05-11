@@ -5,7 +5,15 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{Verifier as _, VerifyingKey};
 
 #[cfg(feature = "client")]
-use {super::hash::verify_content_hash, crate::did::web::WebResolver, crate::types::body::Body};
+use {
+    super::hash::verify_content_hash,
+    crate::did::web::WebResolver,
+    crate::types::{
+        body::{Body, Signature},
+        primitives::{AgentDid, ContentHash},
+        publish::PublishRequest,
+    },
+};
 
 /// Stateless verifier.  Requires a DID resolver to fetch producer keys.
 #[cfg(feature = "client")]
@@ -42,82 +50,116 @@ impl<'a> Verifier<'a> {
         let body_val = serde_json::to_value(body)?;
         verify_content_hash(&body_val, &body.content_hash)?;
 
-        // Step 1: parse key_id — must contain a '#' fragment
-        let key_id = &body.signature.key_id;
-        let (did_part, fragment) = key_id.split_once('#').ok_or_else(|| {
-            AcdpError::KeyResolution(format!("signature.key_id '{key_id}' has no '#fragment'"))
-        })?;
+        // Steps 1–7: shared signature-envelope verification.
+        verify_signature_envelope(
+            &body.agent_id,
+            &body.signature,
+            &body.content_hash,
+            self.resolver,
+        )
+        .await
+    }
+}
 
-        // Step 1.5 (BUG-01): `key_id` DID portion MUST be did:web for v0.0.1.
-        // RFC-ACDP-0001 §5.4 mandates did:web for producers; a key_id
-        // pointing to e.g. did:key would mean the resolver path could
-        // not even find the key.
-        if !did_part.starts_with("did:web:") {
-            return Err(AcdpError::KeyNotAuthorized(format!(
-                "v0.0.1 signatures require did:web key_id; got '{did_part}'"
+/// Verify the producer signature on a [`PublishRequest`] per RFC-ACDP-0003
+/// §2.1 steps 7–8.
+///
+/// Assumes structural validation and `content_hash` recomputation have
+/// already been performed (e.g. by [`crate::registry::PublishValidator::validate_post_schema`]).
+/// Executes only the DID resolution + signature verification steps shared
+/// with [`Verifier::verify_body`].
+///
+/// Used by [`crate::registry::RegistryServer::publish_verified`] to fulfill
+/// the §2.1 publish algorithm before persistence; consumers wanting end-to-end
+/// verification on retrieval should prefer
+/// [`crate::client::VerifiedContext::fetch`] which calls [`Verifier::verify_body`].
+#[cfg(feature = "client")]
+pub async fn verify_publish_request_signature(
+    req: &PublishRequest,
+    resolver: &WebResolver,
+) -> Result<(), AcdpError> {
+    verify_signature_envelope(&req.agent_id, &req.signature, &req.content_hash, resolver).await
+}
+
+/// Steps 1–7 of RFC-ACDP-0001 §5.11 — the part of body verification that
+/// operates only on the signature envelope and is identical for stored
+/// `Body` values and incoming `PublishRequest` values. Caller is responsible
+/// for hash recomputation (step 0).
+#[cfg(feature = "client")]
+async fn verify_signature_envelope(
+    agent_id: &AgentDid,
+    signature: &Signature,
+    content_hash: &ContentHash,
+    resolver: &WebResolver,
+) -> Result<(), AcdpError> {
+    // Step 1: parse key_id — must contain a '#' fragment
+    let key_id = &signature.key_id;
+    let (did_part, fragment) = key_id.split_once('#').ok_or_else(|| {
+        AcdpError::KeyResolution(format!("signature.key_id '{key_id}' has no '#fragment'"))
+    })?;
+
+    // Step 1.5: `key_id` DID portion MUST be did:web for v0.0.1
+    // (RFC-ACDP-0001 §5.4). A key_id pointing to e.g. did:key would mean
+    // the resolver path could not even find the key.
+    if !did_part.starts_with("did:web:") {
+        return Err(AcdpError::KeyNotAuthorized(format!(
+            "v0.0.1 signatures require did:web key_id; got '{did_part}'"
+        )));
+    }
+
+    // Step 2: DID portion MUST equal agent_id
+    if did_part != agent_id.as_str() {
+        return Err(AcdpError::KeyNotAuthorized(format!(
+            "key_id DID '{did_part}' ≠ agent_id '{agent_id}'"
+        )));
+    }
+
+    // Step 3: resolve DID document
+    let doc = resolver.resolve(did_part).await?;
+
+    // Step 4: find verification method by fragment
+    let method = doc.find_by_fragment(fragment).ok_or_else(|| {
+        AcdpError::KeyResolution(format!(
+            "no verification method with fragment '#{fragment}'"
+        ))
+    })?;
+
+    // Step 5: assertionMethod authorization
+    if !doc.is_assertion_method(&method.id) {
+        return Err(AcdpError::KeyNotAuthorized(format!(
+            "'{}' is not in assertionMethod",
+            method.id
+        )));
+    }
+
+    // Step 5.5: algorithm-downgrade rejection (RFC-ACDP-0008 §3.9 +
+    // RFC-ACDP-0001 §5.11 step 6). When the verification method declares
+    // an algorithm via its `type` (or `publicKeyJwk` params), it MUST equal
+    // `signature.algorithm`. Otherwise an attacker could route an Ed25519
+    // key through a verifier that thinks it's checking some other algorithm.
+    if let Some(declared) = method.declared_algorithm() {
+        if declared != signature.algorithm {
+            return Err(AcdpError::InvalidSignature(format!(
+                "signature.algorithm '{}' does not match verification method type \
+                 (resolved key declares '{declared}')",
+                signature.algorithm
             )));
         }
+    }
 
-        // Step 2: DID portion MUST equal body.agent_id
-        if did_part != body.agent_id.as_str() {
-            return Err(AcdpError::KeyNotAuthorized(format!(
-                "key_id DID '{did_part}' ≠ agent_id '{}'",
-                body.agent_id
-            )));
+    // Steps 6 + 7: dispatch by algorithm.
+    match signature.algorithm.as_str() {
+        "ed25519" => {
+            let pub_bytes = method.ed25519_public_key_bytes()?;
+            verify_ed25519(&pub_bytes, &signature.value, content_hash.as_str())
         }
-
-        // Step 3: resolve DID document
-        let doc = self.resolver.resolve(did_part).await?;
-
-        // Step 4: find verification method by fragment
-        let method = doc.find_by_fragment(fragment).ok_or_else(|| {
-            AcdpError::KeyResolution(format!(
-                "no verification method with fragment '#{fragment}'"
-            ))
-        })?;
-
-        // Step 5: assertionMethod authorization
-        if !doc.is_assertion_method(&method.id) {
-            return Err(AcdpError::KeyNotAuthorized(format!(
-                "'{}' is not in assertionMethod",
-                method.id
-            )));
+        "ecdsa-p256" => {
+            let pub_sec1 = method.ecdsa_p256_public_key_sec1()?;
+            verify_ecdsa_p256(&pub_sec1, &signature.value, content_hash.as_str())
         }
-
-        // Step 5.5: algorithm-downgrade rejection (RFC-ACDP-0008 §3.9 +
-        // RFC-ACDP-0001 §5.11 step 6). When the verification method
-        // declares an algorithm via its `type` (or `publicKeyJwk` params),
-        // it MUST equal `signature.algorithm`. Otherwise an attacker
-        // could route an Ed25519 key through a verifier that thinks it's
-        // checking some other algorithm.
-        if let Some(declared) = method.declared_algorithm() {
-            if declared != body.signature.algorithm {
-                return Err(AcdpError::InvalidSignature(format!(
-                    "signature.algorithm '{}' does not match verification method type \
-                     (resolved key declares '{declared}')",
-                    body.signature.algorithm
-                )));
-            }
-        }
-
-        // Steps 6 + 7: dispatch by algorithm.
-        match body.signature.algorithm.as_str() {
-            "ed25519" => {
-                let pub_bytes = method.ed25519_public_key_bytes()?;
-                verify_ed25519(
-                    &pub_bytes,
-                    &body.signature.value,
-                    body.content_hash.as_str(),
-                )
-            }
-            "ecdsa-p256" => {
-                let pub_sec1 = method.ecdsa_p256_public_key_sec1()?;
-                verify_ecdsa_p256(&pub_sec1, &body.signature.value, body.content_hash.as_str())
-            }
-            other => Err(AcdpError::UnsupportedAlgorithm(format!(
-                "verifier does not support signature algorithm '{other}'"
-            ))),
-        }
+        other => Err(AcdpError::UnsupportedAlgorithm(format!(
+            "verifier does not support signature algorithm '{other}'"
+        ))),
     }
 }
 
