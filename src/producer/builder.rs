@@ -1,5 +1,6 @@
 //! Producer-side API for building and signing publish requests.
 
+use crate::crypto::sign::{AcdpSigningKey, P256SigningKey};
 use crate::crypto::{compute_content_hash, SigningKey};
 use crate::error::AcdpError;
 use crate::types::body::{Body, DataPeriod, Signature};
@@ -10,21 +11,58 @@ use chrono::{DateTime, Utc};
 
 // ── Producer ─────────────────────────────────────────────────────────────────
 
-/// A context producer.  Wraps a signing key and identity.
+/// A context producer. Wraps a signing key and identity.
+///
+/// The signing key may be Ed25519 (the mandatory baseline) or
+/// ECDSA-P256 (interop). Construct with [`Producer::new`] /
+/// [`Producer::new_ed25519`] for Ed25519 keys, or [`Producer::new_p256`]
+/// for P-256 keys; the builder emits the matching `signature.algorithm`
+/// string and the corresponding wire-form signature.
 pub struct Producer {
-    signing_key: SigningKey,
+    signing_key: AcdpSigningKey,
     agent_id: AgentDid,
     /// DID URL of the signing key, e.g. `did:web:example.com#key-1`.
     key_id: String,
 }
 
 impl Producer {
-    /// Create a new producer.
+    /// Create a new producer with an Ed25519 signing key.
     ///
     /// `key_id` MUST be a DID URL whose DID portion equals `agent_id`.
+    /// Equivalent to [`Producer::new_ed25519`] — retained as the
+    /// historically-stable name.
     pub fn new(signing_key: SigningKey, agent_id: AgentDid, key_id: impl Into<String>) -> Self {
+        Self::new_ed25519(signing_key, agent_id, key_id)
+    }
+
+    /// Create a new producer with an Ed25519 signing key (explicit).
+    ///
+    /// `key_id` MUST be a DID URL whose DID portion equals `agent_id`.
+    pub fn new_ed25519(
+        signing_key: SigningKey,
+        agent_id: AgentDid,
+        key_id: impl Into<String>,
+    ) -> Self {
         Self {
-            signing_key,
+            signing_key: AcdpSigningKey::Ed25519(signing_key),
+            agent_id,
+            key_id: key_id.into(),
+        }
+    }
+
+    /// Create a new producer with an ECDSA-P256 signing key.
+    ///
+    /// `key_id` MUST be a DID URL whose DID portion equals `agent_id`,
+    /// and the corresponding DID document verification method MUST
+    /// declare the P-256 algorithm so that consumers don't reject the
+    /// signature on algorithm-downgrade grounds (RFC-ACDP-0008 §3.9).
+    pub fn new_p256(
+        signing_key: P256SigningKey,
+        agent_id: AgentDid,
+        key_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            signing_key: AcdpSigningKey::P256(signing_key),
             agent_id,
             key_id: key_id.into(),
         }
@@ -379,8 +417,10 @@ impl<'a> RequestBuilder<'a> {
         // (none of the excluded keys appear in producer_content_value above)
         let content_hash = compute_content_hash(&producer_content_value)?;
 
-        // Sign the ASCII bytes of the full "sha256:<hex>" string
-        let sig_value = self.producer.signing_key.sign_content_hash(&content_hash);
+        // Sign the ASCII bytes of the full "sha256:<hex>" string. The
+        // `AcdpSigningKey` enum reports the matching algorithm string so
+        // the Signature envelope stays in sync with the key variant.
+        let (algorithm, sig_value) = self.producer.signing_key.sign_content_hash(&content_hash);
 
         let req = PublishRequest {
             version,
@@ -394,7 +434,7 @@ impl<'a> RequestBuilder<'a> {
             visibility: self.visibility,
             content_hash,
             signature: Signature {
-                algorithm: "ed25519".into(),
+                algorithm: algorithm.into(),
                 key_id: self.producer.key_id.clone(),
                 value: sig_value,
             },

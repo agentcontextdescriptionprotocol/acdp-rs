@@ -49,39 +49,32 @@ impl WebResolver {
     /// Panics if `capacity == 0`. Use a positive capacity; the LRU
     /// model has no semantically valid empty configuration.
     pub fn with_capacity(capacity: usize) -> Self {
-        let cap =
-            NonZeroUsize::new(capacity).expect("WebResolver::with_capacity requires capacity > 0");
+        let http = build_http_client(None).expect("failed to build HTTP client for DID resolver");
+        Self::from_parts(http, capacity)
+    }
 
-        let policy = redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(format!("DID resolver: exceeded {MAX_REDIRECTS} redirects"));
-            }
-            // Same-authority enforcement against the original request URL.
-            // Pre-extract host strings so we don't double-borrow `attempt`.
-            let original_host = attempt
-                .previous()
-                .first()
-                .and_then(|u| u.host_str())
-                .map(str::to_string);
-            let next_host = attempt.url().host_str().map(str::to_string);
-            if let (Some(orig), Some(next)) = (original_host, next_host) {
-                if orig != next {
-                    return attempt.error(format!(
-                        "DID resolver: cross-authority redirect rejected ({orig} -> {next})"
-                    ));
-                }
-            }
-            attempt.follow()
-        });
+    /// Build a resolver that trusts the given PEM-encoded root certificate
+    /// in addition to the system roots.
+    ///
+    /// Primary use is the in-process self-signed HTTPS server in the
+    /// crate's `tests/helpers/tls_did_server.rs` harness, so the spec
+    /// fixtures `pub-001` / `pub-006` / `fed-001..006` can drive the
+    /// resolver end-to-end without going over the network. Production
+    /// callers on corporate intranets MAY also use this to trust a
+    /// private CA.
+    pub fn with_root_cert_pem(pem: &[u8]) -> Result<Self, AcdpError> {
+        let http = build_http_client(Some(pem))?;
+        Ok(Self::from_parts(http, DEFAULT_CACHE_CAPACITY))
+    }
 
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(policy)
-            .build()
-            .expect("failed to build HTTP client for DID resolver");
+    /// Build a resolver with a custom LRU capacity AND a custom root cert.
+    pub fn with_capacity_and_root_cert_pem(capacity: usize, pem: &[u8]) -> Result<Self, AcdpError> {
+        let http = build_http_client(Some(pem))?;
+        Ok(Self::from_parts(http, capacity))
+    }
 
+    fn from_parts(http: reqwest::Client, capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity).expect("WebResolver capacity must be > 0");
         Self {
             http,
             cache: Arc::new(Mutex::new(LruCache::new(cap))),
@@ -176,6 +169,51 @@ impl Default for WebResolver {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Build the `reqwest::Client` used by `WebResolver`, optionally trusting
+/// an additional PEM-encoded root certificate.
+///
+/// Encapsulates the redirect policy and timeouts so the no-cert and
+/// with-cert constructors stay byte-for-byte identical on TLS posture.
+#[cfg(feature = "client")]
+fn build_http_client(extra_root_pem: Option<&[u8]>) -> Result<reqwest::Client, AcdpError> {
+    let policy = redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error(format!("DID resolver: exceeded {MAX_REDIRECTS} redirects"));
+        }
+        // Same-authority enforcement against the original request URL.
+        let original_host = attempt
+            .previous()
+            .first()
+            .and_then(|u| u.host_str())
+            .map(str::to_string);
+        let next_host = attempt.url().host_str().map(str::to_string);
+        if let (Some(orig), Some(next)) = (original_host, next_host) {
+            if orig != next {
+                return attempt.error(format!(
+                    "DID resolver: cross-authority redirect rejected ({orig} -> {next})"
+                ));
+            }
+        }
+        attempt.follow()
+    });
+
+    let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(policy);
+
+    if let Some(pem) = extra_root_pem {
+        let cert = reqwest::Certificate::from_pem(pem)
+            .map_err(|e| AcdpError::Http(format!("invalid root cert PEM: {e}")))?;
+        builder = builder.add_root_certificate(cert);
+    }
+
+    builder
+        .build()
+        .map_err(|e| AcdpError::Http(format!("DID resolver client build: {e}")))
 }
 
 /// Convert a `did:web:…` DID to its HTTPS URL per the `did:web` spec.
