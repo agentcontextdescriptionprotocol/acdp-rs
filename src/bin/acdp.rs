@@ -494,36 +494,28 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
     if let Some(serde_json::Value::Object(map)) = stdin_overlay {
         for (k, v) in map {
             match k.as_str() {
-                // CLI flags win over stdin overlay (per the docstring),
-                // so each field is only adopted from stdin if the matching
-                // flag wasn't supplied. The `.map(str::to_string)` form
-                // collapses the nested `if let` clippy's `collapsible_match`
-                // (stable on 1.95+) would otherwise flag — let-chains would
-                // be cleaner but aren't stable until 1.88 (MSRV is 1.86).
-                "title" => {
-                    if title.is_none() {
-                        title = v.as_str().map(str::to_string);
-                    }
+                // CLI flags win over stdin overlay (per the docstring), so
+                // each field is only adopted from stdin if the matching
+                // flag wasn't supplied — encoded as a match guard so
+                // clippy's `collapsible_if` (stable on 1.95+) is happy.
+                // When the guard fails the arm doesn't match and falls
+                // through to the catch-all, which is the correct no-op
+                // semantic. Let-chains would be cleaner but aren't
+                // stable until 1.88 (MSRV is 1.86).
+                "title" if title.is_none() => {
+                    title = v.as_str().map(str::to_string);
                 }
-                "type" => {
-                    if context_type.is_none() {
-                        context_type = v.as_str().map(str::to_string);
-                    }
+                "type" if context_type.is_none() => {
+                    context_type = v.as_str().map(str::to_string);
                 }
-                "summary" => {
-                    if summary.is_none() {
-                        summary = v.as_str().map(str::to_string);
-                    }
+                "summary" if summary.is_none() => {
+                    summary = v.as_str().map(str::to_string);
                 }
-                "description" => {
-                    if description.is_none() {
-                        description = v.as_str().map(str::to_string);
-                    }
+                "description" if description.is_none() => {
+                    description = v.as_str().map(str::to_string);
                 }
-                "domain" => {
-                    if domain.is_none() {
-                        domain = v.as_str().map(str::to_string);
-                    }
+                "domain" if domain.is_none() => {
+                    domain = v.as_str().map(str::to_string);
                 }
                 "data_refs" => {
                     let drs: Vec<acdp::types::DataRef> = serde_json::from_value(v)
