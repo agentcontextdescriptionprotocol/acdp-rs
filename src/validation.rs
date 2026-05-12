@@ -229,11 +229,42 @@ pub fn validate_publish_request(req: &PublishRequest) -> Result<(), AcdpError> {
         }
     }
 
+    // RFC-ACDP-0003 §2.2 / `acdp-publish-request.schema.json` allOf:
+    // v1 publications MUST NOT include lineage_id (the value would
+    // necessarily be wrong because the formula depends on the
+    // registry-assigned ctx_id). The builder enforces this too, but
+    // applying it here lets the validator stand alone for callers that
+    // do not go through `RequestBuilder` (e.g. the conformance harness,
+    // server-side validators).
+    if req.version == 1 && req.lineage_id.is_some() {
+        return Err(AcdpError::SchemaViolation(
+            "lineage_id MUST NOT be set on v1 publish requests (RFC-ACDP-0003 §2.2)".into(),
+        ));
+    }
+
     Ok(())
 }
 
 /// Validate a stored [`Body`] (retrieval-side check).
 pub fn validate_body(body: &Body) -> Result<(), AcdpError> {
+    validate_body_inner(body, /* check_embedded_hashes = */ true)
+}
+
+/// Same as [`validate_body`] but skips the embedded-`content_hash` recomputation.
+///
+/// Used by [`crate::client::VerifiedContext::fetch_report`] so per-`DataRef`
+/// embedded-hash outcomes can be recorded individually rather than
+/// short-circuiting the whole verification. Callers that want the
+/// embedded-hash check MUST run [`verify_embedded_hash`] themselves —
+/// `fetch_report`'s recording loop is one such caller.
+///
+/// Production code that doesn't need partial-failure reporting should
+/// prefer [`validate_body`].
+pub fn validate_body_structural(body: &Body) -> Result<(), AcdpError> {
+    validate_body_inner(body, /* check_embedded_hashes = */ false)
+}
+
+fn validate_body_inner(body: &Body, check_embedded_hashes: bool) -> Result<(), AcdpError> {
     validate_title(&body.title)?;
     validate_optional_string(
         body.description.as_deref(),
@@ -274,7 +305,11 @@ pub fn validate_body(body: &Body) -> Result<(), AcdpError> {
     }
 
     for dr in &body.data_refs {
-        validate_data_ref(dr)?;
+        if check_embedded_hashes {
+            validate_data_ref(dr)?;
+        } else {
+            validate_data_ref_structural(dr)?;
+        }
     }
 
     validate_signature_length(&body.signature.algorithm, &body.signature.value)?;
@@ -319,6 +354,23 @@ pub fn validate_identifiers(
 /// Validate a single [`DataRef`] against `acdp-data-ref.schema.json` and the
 /// runtime invariants the schema delegates.
 pub fn validate_data_ref(dr: &DataRef) -> Result<(), AcdpError> {
+    validate_data_ref_structural(dr)?;
+    // BUG-02: verify the declared content_hash against the decoded bytes
+    // (RFC-ACDP-0002 §6.6 #8). A producer-supplied wrong hash is a
+    // signed commitment to a misleading integrity claim, so we catch
+    // it at validate time, not just inside `PublishValidator`.
+    if dr.embedded.is_some() {
+        verify_embedded_hash(dr)?;
+    }
+    Ok(())
+}
+
+/// Same as [`validate_data_ref`] but skips the embedded-`content_hash`
+/// recomputation. Callers that want to report per-`DataRef` hash failures
+/// (e.g. [`crate::client::VerifiedContext::fetch_report`]) run the
+/// structural checks via this helper, then call [`verify_embedded_hash`]
+/// themselves and record the outcome instead of short-circuiting.
+pub fn validate_data_ref_structural(dr: &DataRef) -> Result<(), AcdpError> {
     // oneOf: exactly one of location / embedded
     match (&dr.location, &dr.embedded) {
         (None, None) => {
@@ -349,11 +401,6 @@ pub fn validate_data_ref(dr: &DataRef) -> Result<(), AcdpError> {
     }
     if let Some(emb) = &dr.embedded {
         validate_embedded(emb)?;
-        // BUG-02: verify the declared content_hash against the decoded bytes
-        // (RFC-ACDP-0002 §6.6 #8). A producer-supplied wrong hash is a
-        // signed commitment to a misleading integrity claim, so we catch
-        // it at validate time, not just inside `PublishValidator`.
-        verify_embedded_hash(dr)?;
     }
 
     Ok(())

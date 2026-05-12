@@ -10,9 +10,11 @@ use acdp::{
 
 fn main() {
     // ── 1. Create a signing key ─────────────────────────────────────────────
-    // In production, load from secure storage (HSM, env var, etc.)
-    let seed = [0u8; 32]; // test seed — do NOT use in production
-    let key = SigningKey::from_bytes(&seed);
+    // In production, load from secure storage (HSM, env var, …). The
+    // example uses `SigningKey::generate()` so that this binary
+    // exercises a real OS-entropy keypair and the run is repeatable in
+    // CI without committing a private seed.
+    let key = SigningKey::generate();
 
     // ── 2. Create a producer ────────────────────────────────────────────────
     let agent_id = AgentDid::new("did:web:agents.example.com:my-agent");

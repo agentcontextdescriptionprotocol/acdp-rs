@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project metadata: repository, homepage, documentation, README, exclude rules,
   `[package.metadata.docs.rs]` for all-features doc builds.
 - GitHub Actions CI: rustfmt, clippy (default + no-default-features),
-  cross-platform tests (Linux/macOS/Windows + beta), MSRV check (1.75),
+  cross-platform tests (Linux/macOS/Windows + beta), MSRV check (1.86),
   doc build with `-D warnings`, cargo-deny, cargo-audit, llvm-cov coverage.
 - `release-plz` workflow for automated crates.io publishing.
 - Dependabot configuration for cargo and github-actions.

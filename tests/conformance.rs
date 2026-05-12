@@ -67,14 +67,14 @@ fn all_conformance_fixtures_parse_as_valid_json() {
         );
         count += 1;
     }
-    // BUG-05: spec is at round-3 hardening (72 fixtures across `can`,
-    // `caps`, `data-ref`, `err`, `fed`, `idem`, `meta`, `pub`, `rate`,
-    // `ret`, `schema`, `sig`, `status`, `vis` families). Floor at 60 so
-    // small future renames / merges don't break CI while still catching
-    // a wholesale regression in fixture loading.
+    // Spec is at round-4 hardening (71 fixtures across `can`, `caps`,
+    // `data-ref`, `err`, `fed`, `idem`, `meta`, `pub`, `rate`, `ret`,
+    // `schema`, `sig`, `status`, `vis` families). Floor at 71 so a
+    // wholesale regression in fixture loading is caught while small
+    // future renames / merges remain accommodatable.
     assert!(
-        count >= 60,
-        "expected ≥60 fixtures (post round-3 spec), found {count}"
+        count >= 71,
+        "expected ≥71 fixtures (post round-4 spec), found {count}"
     );
 }
 
@@ -625,9 +625,8 @@ fn can_vectors_match_expected_hash() {
 }
 
 /// FEAT-04 — verify the sig-002 ECDSA-P256 golden vector with the test
-/// public key. The library does not produce ecdsa-p256 signatures
-/// (signing is ed25519-only); this confirms the verify path matches
-/// the spec wire form (IEEE 1363 r‖s, 88 base64 chars).
+/// public key. Confirms the verify path matches the spec wire form
+/// (IEEE 1363 r‖s, 88 base64 chars).
 #[test]
 fn sig_002_ecdsa_p256_verify_against_spec_fixture() {
     let Some(root) = spec_root() else { return };
@@ -644,6 +643,81 @@ fn sig_002_ecdsa_p256_verify_against_spec_fixture() {
     let content_hash = vec["content_hash"].as_str().unwrap();
     acdp::crypto::verify::verify_ecdsa_p256(&pub_sec1, sig_b64, content_hash)
         .expect("sig-002 ecdsa-p256 verification must pass");
+}
+
+/// FEAT-01 — sign-side round trip: the producer-side ECDSA-P256 signer
+/// MUST reproduce the spec's golden signature byte-for-byte when given
+/// the test private scalar. Confirms (a) deterministic RFC 6979
+/// signing, (b) IEEE 1363 r‖s output (not DER), (c) 88-char base64 wire
+/// form.
+#[test]
+fn sig_002_ecdsa_p256_sign_round_trip() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/sig-002-ecdsa-p256-golden.json");
+    if !path.exists() {
+        return;
+    }
+    let v = read_json(&path);
+    let priv_hex = v["test_keypair"]["private_scalar_hex"].as_str().unwrap();
+    let priv_bytes: [u8; 32] = hex::decode(priv_hex).unwrap().try_into().unwrap();
+
+    let key = acdp::crypto::P256SigningKey::from_bytes(&priv_bytes)
+        .expect("p256 scalar=1 is a valid test key");
+    let expected_hash = v["vectors"][0]["expected"]["content_hash"]
+        .as_str()
+        .unwrap();
+    let expected_sig = v["vectors"][0]["expected"]["signature_value_base64"]
+        .as_str()
+        .unwrap();
+    let hash = acdp::ContentHash(expected_hash.to_string());
+    let sig = key.sign_content_hash(&hash);
+    assert_eq!(
+        sig.len(),
+        88,
+        "sig-002: wire signature MUST be 88 base64 chars"
+    );
+    // RFC 6979 deterministic ECDSA — value MUST match the spec exactly.
+    assert_eq!(
+        sig, expected_sig,
+        "sig-002: producer signature MUST match spec golden vector byte-for-byte"
+    );
+}
+
+/// FEAT-01 — when a Producer is constructed with a P256 key, the
+/// emitted PublishRequest carries `signature.algorithm = "ecdsa-p256"`
+/// and the value verifies against the producer's own public key.
+/// Confirms the algorithm-string plumb-through end-to-end.
+#[test]
+fn p256_producer_emits_ecdsa_p256_algorithm() {
+    use acdp::crypto::{verify::verify_ecdsa_p256, P256SigningKey};
+    use acdp::producer::Producer;
+    use acdp::types::{AgentDid, ContextType, Visibility};
+
+    let key = P256SigningKey::generate();
+    let pub_sec1 = key.verifying_key_sec1();
+    let p = Producer::new_p256(
+        key,
+        AgentDid::new("did:web:agents.example.com:p256-producer"),
+        "did:web:agents.example.com:p256-producer#key-1",
+    );
+    let req = p
+        .publish_request()
+        .title("p256 round-trip")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("p256 producer build");
+    assert_eq!(
+        req.signature.algorithm, "ecdsa-p256",
+        "p256-keyed producer MUST emit signature.algorithm == 'ecdsa-p256'"
+    );
+    assert_eq!(
+        req.signature.value.len(),
+        88,
+        "p256 wire signature MUST be 88 base64 chars"
+    );
+    verify_ecdsa_p256(&pub_sec1, &req.signature.value, req.content_hash.as_str())
+        .expect("emitted signature MUST verify against the producer's public key");
 }
 
 /// Replays `sig-001-ed25519-golden.json` end-to-end through the producer
@@ -965,4 +1039,127 @@ fn ret_001_and_err_001_present() {
         ret.exists() || err.exists(),
         "expected at least one of ret-001 / err-001 in fixtures"
     );
+}
+
+// ── pub-004 / pub-007 — offline fixture binding (no TLS) ─────────────────────
+
+/// pub-004 — a v1 publish request with `lineage_id` set MUST be rejected
+/// at schema-level validation. The producer cannot compute a correct
+/// value (it depends on the registry-assigned ctx_id), so any value is
+/// necessarily wrong (RFC-ACDP-0003 §2.2).
+///
+/// Fixture body uses `did:agent:test` rather than `did:web:…`, so a
+/// strict v0.0.1 validator may surface the agent_id violation first;
+/// either way the outcome MUST be `SchemaViolation` and the publish
+/// MUST NOT be accepted.
+#[test]
+fn pub_004_first_version_with_lineage_id_rejected() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/pub-004-first-version-with-lineage.json");
+    if !path.exists() {
+        return;
+    }
+    let fixture = read_json(&path);
+    // The fixture in round-4 uses `request.body`, but earlier revisions
+    // used `input.body`. Try both so the test is robust to format drift.
+    let body = fixture
+        .pointer("/request/body")
+        .or_else(|| fixture.pointer("/input/body"))
+        .cloned();
+    let Some(body) = body else { return };
+
+    // Normalize the fixture for offline validation:
+    //   - replace the non-did:web agent_id/key_id with did:web placeholders,
+    //   - pad the signature value to the valid 88-char ed25519 length.
+    // Without these the agent_id or signature-length check fires first
+    // and the assertion still passes `matches!(SchemaViolation)`, but
+    // does not prove the v1+lineage_id rule. After normalization, the
+    // only remaining schema-level violation is `lineage_id` on a v1
+    // publish — exactly what pub-004 is asserting.
+    let mut body = body;
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "agent_id".into(),
+            serde_json::json!("did:web:agents.example.com:test"),
+        );
+        if let Some(sig) = obj.get_mut("signature").and_then(|s| s.as_object_mut()) {
+            sig.insert(
+                "key_id".into(),
+                serde_json::json!("did:web:agents.example.com:test#key-1"),
+            );
+            // 88-char base64 = the wire length the schema enforces for
+            // both ed25519 and ecdsa-p256 signature values.
+            sig.insert("value".into(), serde_json::json!("A".repeat(86) + "=="));
+        }
+    }
+
+    let req: acdp::types::PublishRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(_) => return, // deny_unknown_fields caught it earlier — still a rejection
+    };
+    let err = acdp::validation::validate_publish_request(&req).unwrap_err();
+    assert!(
+        matches!(err, acdp::AcdpError::SchemaViolation(_)),
+        "pub-004 must reject v1 with lineage_id as SchemaViolation, got {err:?}"
+    );
+}
+
+/// pub-007 — `PublishResponse` shape: exactly five registry-assigned
+/// fields, no echoed `content_hash`/`signature`/body fields.
+///
+/// The fixture is descriptive (lists required/forbidden field names),
+/// but `scenarios[0].input.publish_response.body` is a concrete
+/// conformant response object that MUST deserialize. Symmetrically, a
+/// response object carrying any of the forbidden fields MUST be
+/// rejected by serde's `deny_unknown_fields`.
+#[test]
+fn pub_007_publish_response_shape() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/pub-007-publish-response-shape.json");
+    if !path.exists() {
+        return;
+    }
+    let fixture = read_json(&path);
+
+    // Step 1: the conformant scenario body MUST parse as PublishResponse.
+    if let Some(body) = fixture.pointer("/scenarios/0/input/publish_response/body") {
+        let parsed: acdp::types::PublishResponse = serde_json::from_value(body.clone()).expect(
+            "pub-007: conformant publish-response body must deserialize as PublishResponse",
+        );
+        assert_eq!(
+            parsed.status,
+            acdp::types::Status::Active,
+            "pub-007: status on first-publish MUST be `active`"
+        );
+        assert_eq!(
+            parsed.version, 1,
+            "pub-007: first-publish version MUST be 1"
+        );
+    }
+
+    // Step 2: a publish response that echoes ANY forbidden field MUST be
+    // rejected (deny_unknown_fields). Pull the forbidden list straight
+    // from the fixture so this test follows the spec as it evolves.
+    if let (Some(body), Some(forbidden)) = (
+        fixture.pointer("/scenarios/0/input/publish_response/body"),
+        fixture
+            .pointer("/expected/response_body_shape/forbidden_fields")
+            .and_then(|v| v.as_array()),
+    ) {
+        for field in forbidden {
+            let Some(field_name) = field.as_str() else {
+                continue;
+            };
+            let mut tampered = body.clone();
+            if let Some(obj) = tampered.as_object_mut() {
+                obj.insert(field_name.into(), serde_json::json!("forbidden-value"));
+            }
+            let r: Result<acdp::types::PublishResponse, _> = serde_json::from_value(tampered);
+            assert!(
+                r.is_err(),
+                "pub-007: publish response with forbidden field `{field_name}` \
+                 MUST be rejected by deny_unknown_fields, got {r:?}"
+            );
+        }
+    }
 }

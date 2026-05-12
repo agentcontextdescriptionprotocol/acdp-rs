@@ -9,8 +9,8 @@
 //! ```rust,no_run
 //! # use acdp::{producer::Producer, crypto::SigningKey,
 //! #            types::{AgentDid, ContextType, Visibility}};
-//! let seed = [0u8; 32]; // use a real secret
-//! let key  = SigningKey::from_bytes(&seed);
+//! // In production, load from secure storage; `generate` uses OsRng.
+//! let key  = SigningKey::generate();
 //! let prod = Producer::new(
 //!     key,
 //!     AgentDid::new("did:web:agents.example.com:my-agent"),
