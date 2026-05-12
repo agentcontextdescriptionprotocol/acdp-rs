@@ -82,7 +82,7 @@ thiserror = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
 
 # Cache (used by the DID resolver under the client feature)
-lru = { version = "0.16", optional = true }
+lru = { version = "0.18", optional = true }
 
 # Async runtime hooks (sleep for retry backoff). Reqwest already pulls
 # in tokio transitively, but being explicit keeps the dep graph honest.
