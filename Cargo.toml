@@ -35,6 +35,22 @@ name              = "acdp"
 path              = "src/bin/acdp.rs"
 required-features = ["cli"]
 
+# TLS-backed fixture conformance tests need both the `client` (resolver,
+# RegistryClient, CrossRegistryResolver) and `server` (RegistryServer,
+# InMemoryStore — used by the pub-003 supersession lineage test) features.
+# `--no-default-features` test runs skip them entirely.
+[[test]]
+name              = "tls_conformance"
+path              = "tests/tls_conformance.rs"
+required-features = ["client", "server"]
+
+# CLI subprocess tests need the `cli` feature so the `acdp` binary is
+# actually built.
+[[test]]
+name              = "cli"
+path              = "tests/cli.rs"
+required-features = ["cli"]
+
 [dependencies]
 # Serialisation
 serde      = { version = "1", features = ["derive"] }
@@ -47,6 +63,10 @@ p256          = { version = "0.13", default-features = false, features = ["ecdsa
 base64        = "0.22"
 hex           = "0.4"
 zeroize       = { version = "1", features = ["derive"] }
+# RNG trait used by both ed25519-dalek and p256 for key generation.
+# Already a transitive dep — promoted to direct so `SigningKey::generate()`
+# and `P256SigningKey::generate()` can plumb `OsRng` through both libraries.
+rand_core     = { version = "0.6", features = ["std"] }
 
 # Identity / time
 chrono      = { version = "0.4", features = ["serde"] }
@@ -76,6 +96,19 @@ tokio    = { version = "1", features = ["full"] }
 anyhow   = "1"
 wiremock = "0.6"
 proptest = "1"
+# TLS test harness — used to mock a `did:web` HTTPS endpoint and a
+# foreign registry so conformance fixtures pub-001 / pub-003 / pub-006
+# and fed-001..006 can be bound to behavioral assertions without going
+# over the network. Kept in dev-dependencies so they don't propagate to
+# downstream consumers.
+rcgen        = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+axum         = { version = "0.7", default-features = false, features = ["json"] }
+axum-server  = { version = "0.7", default-features = false, features = ["tls-rustls"] }
+# rustls 0.23 requires the process to install a crypto provider before
+# the first TLS handshake — there's no auto-detect when more than one
+# backend is in scope. We install `aws-lc-rs` (matches what `axum-server`'s
+# `tls-rustls` feature pulls in transitively).
+rustls       = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [package.metadata.docs.rs]
 all-features        = true

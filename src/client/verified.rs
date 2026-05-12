@@ -1,5 +1,6 @@
 //! VerifiedContext: retrieve + verify in one call.
 
+use super::data_ref::{fetch_and_verify_data_ref, DataRefFetcher};
 use super::registry::RegistryClient;
 use crate::crypto::verify::Verifier;
 use crate::did::WebResolver;
@@ -120,6 +121,115 @@ impl VerifiedContext {
         Ok(Self { inner: ctx })
     }
 
+    /// Retrieve + verify, returning a structured [`VerificationReport`]
+    /// alongside the verified context. Does NOT attempt external
+    /// `DataRef` fetches — use [`Self::fetch_report_with_fetcher`] for
+    /// that. Each `data_ref_external` slot in the returned report is
+    /// `None`.
+    ///
+    /// Unlike [`Self::fetch_with_policy`], per-`DataRef` embedded-hash
+    /// failures are recorded in the report instead of aborting the
+    /// verification. The top-level checks (schema, body hash,
+    /// signature) remain hard-fail: if any of them fails, the method
+    /// returns an `AcdpError` and produces no report.
+    pub async fn fetch_report(
+        client: &RegistryClient,
+        resolver: &WebResolver,
+        ctx_id: &CtxId,
+        policy: &VerificationPolicy,
+    ) -> Result<(Self, VerificationReport), AcdpError> {
+        Self::fetch_report_inner::<NoFetcher>(client, resolver, ctx_id, policy, None).await
+    }
+
+    /// Retrieve + verify like [`Self::fetch_report`], and additionally
+    /// fetch every `DataRef` whose `location` resolves through `fetcher`.
+    /// Each external fetch outcome is recorded in `report.data_ref_external`.
+    pub async fn fetch_report_with_fetcher<F: DataRefFetcher>(
+        client: &RegistryClient,
+        resolver: &WebResolver,
+        ctx_id: &CtxId,
+        policy: &VerificationPolicy,
+        fetcher: &F,
+    ) -> Result<(Self, VerificationReport), AcdpError> {
+        Self::fetch_report_inner(client, resolver, ctx_id, policy, Some(fetcher)).await
+    }
+
+    async fn fetch_report_inner<F: DataRefFetcher>(
+        client: &RegistryClient,
+        resolver: &WebResolver,
+        ctx_id: &CtxId,
+        policy: &VerificationPolicy,
+        fetcher: Option<&F>,
+    ) -> Result<(Self, VerificationReport), AcdpError> {
+        let ctx = client.retrieve(ctx_id).await?;
+        let mut report = VerificationReport {
+            body_hash_ok: false,
+            signature_ok: false,
+            schema_ok: false,
+            data_ref_embedded: Vec::with_capacity(ctx.body.data_refs.len()),
+            data_ref_external: Vec::with_capacity(ctx.body.data_refs.len()),
+        };
+
+        // Structural-only schema validation — embedded-hash checks are
+        // intentionally skipped here so per-DataRef hash failures land
+        // in the report (below) instead of short-circuiting the whole
+        // verification. That's the diagnostic shape `fetch_report`
+        // promises in its docstring.
+        if policy.validate_body_schema {
+            crate::validation::validate_body_structural(&ctx.body)?;
+        }
+        report.schema_ok = true;
+
+        // Per-DataRef embedded-hash outcomes — recorded individually.
+        for dr in &ctx.body.data_refs {
+            if let (Some(emb), Some(_)) = (&dr.embedded, &dr.content_hash) {
+                let outcome = crate::validation::verify_embedded_hash(dr)
+                    .and_then(|()| crate::validation::embedded_decoded_bytes(emb).map(|b| b.len()));
+                report.data_ref_embedded.push(outcome);
+            } else {
+                report.data_ref_embedded.push(Ok(0));
+            }
+        }
+
+        if policy.require_did_web && !ctx.body.agent_id.as_str().starts_with("did:web:") {
+            return Err(AcdpError::KeyNotAuthorized(format!(
+                "policy requires did:web agent_id; got '{}'",
+                ctx.body.agent_id
+            )));
+        }
+
+        // `verify_body_signed` recomputes content_hash + verifies the
+        // signature WITHOUT re-running the schema validator (we already
+        // ran the structural part above, and embedded-hash failures are
+        // recorded per-DataRef rather than aborting).
+        Verifier::new(resolver)
+            .verify_body_signed(&ctx.body)
+            .await?;
+        report.body_hash_ok = true;
+        report.signature_ok = true;
+
+        if !policy.allow_unknown_status {
+            if let Some(other) = ctx.registry_state.status.as_other() {
+                return Err(AcdpError::SchemaViolation(format!(
+                    "policy.allow_unknown_status=false; registry returned '{other}'"
+                )));
+            }
+        }
+
+        // External fetches — record per-ref outcomes when a fetcher is
+        // supplied; otherwise leave each slot as `None` so callers can
+        // distinguish "skipped" from "failed".
+        for dr in &ctx.body.data_refs {
+            let slot: Option<Result<usize, AcdpError>> = match (fetcher, &dr.location) {
+                (Some(f), Some(_)) => Some(fetch_and_verify_data_ref(dr, f).await.map(|b| b.len())),
+                _ => None,
+            };
+            report.data_ref_external.push(slot);
+        }
+
+        Ok((Self { inner: ctx }, report))
+    }
+
     pub fn body(&self) -> &crate::types::body::Body {
         &self.inner.body
     }
@@ -151,5 +261,56 @@ impl VerifiedContext {
             ));
         }
         Ok(())
+    }
+}
+
+/// Structured diagnostic outcome from [`VerifiedContext::fetch_report`].
+///
+/// Top-level booleans report the per-stage outcome of the verification
+/// pipeline. Per-`DataRef` slots track outcomes for each entry in
+/// `body.data_refs`, in declaration order:
+///
+/// - `data_ref_embedded[i]` — `Ok(decoded_size_bytes)` when the embedded
+///   payload's `content_hash` matched; `Err` when it didn't (or the
+///   embedded was malformed). Refs without an embedded payload or
+///   without a declared `content_hash` produce `Ok(0)`.
+/// - `data_ref_external[i]` — `None` when no external fetch was
+///   attempted (either no `location` or no `fetcher` was provided);
+///   `Some(Ok(bytes_len))` when the fetch + hash succeeded;
+///   `Some(Err(_))` on any failure (SSRF rejection, hash mismatch,
+///   timeout, …).
+///
+/// `AcdpError` doesn't implement `Clone`, so the report is move-only.
+#[derive(Debug)]
+pub struct VerificationReport {
+    /// `content_hash` recomputed from the body matches the declared one.
+    pub body_hash_ok: bool,
+    /// The producer signature verified against the resolved DID key.
+    pub signature_ok: bool,
+    /// `validate_body` passed (or was disabled by policy).
+    pub schema_ok: bool,
+    /// Per-`DataRef` embedded-hash outcome, in `body.data_refs` order.
+    pub data_ref_embedded: Vec<Result<usize, AcdpError>>,
+    /// Per-`DataRef` external-fetch outcome, in `body.data_refs` order.
+    /// `None` indicates "not attempted" (no fetcher provided or no
+    /// `location` to fetch from).
+    pub data_ref_external: Vec<Option<Result<usize, AcdpError>>>,
+}
+
+/// Sentinel `DataRefFetcher` used as the type parameter for
+/// `fetch_report_inner` when no fetcher is supplied. `fetch` is never
+/// actually called — the option is matched out before that — but
+/// providing a real impl lets the generic monomorphize cleanly without
+/// requiring `fetch_report`'s callers to name a type.
+struct NoFetcher;
+
+impl DataRefFetcher for NoFetcher {
+    async fn fetch(
+        &self,
+        _location: &crate::types::data_ref::Location,
+    ) -> Result<Vec<u8>, AcdpError> {
+        Err(AcdpError::NotImplemented(
+            "NoFetcher should never be called — this is a fetch_report sentinel".into(),
+        ))
     }
 }

@@ -46,6 +46,17 @@ impl<'a> Verifier<'a> {
         // before paying the SHA-256 + DID resolution cost.
         crate::validation::validate_body(body)?;
 
+        self.verify_body_signed(body).await
+    }
+
+    /// Verify only the hash recomputation + DID resolution + signature
+    /// envelope, assuming structural validation has already been done by
+    /// the caller. Use when you want to separate structural failures
+    /// from cryptographic ones — e.g.
+    /// [`crate::client::VerifiedContext::fetch_report`] runs the
+    /// structural part itself and records per-`DataRef` outcomes
+    /// individually.
+    pub async fn verify_body_signed(&self, body: &Body) -> Result<(), AcdpError> {
         // Step 0: recompute content_hash over ProducerContent
         let body_val = serde_json::to_value(body)?;
         verify_content_hash(&body_val, &body.content_hash)?;

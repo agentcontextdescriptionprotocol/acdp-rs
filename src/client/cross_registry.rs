@@ -131,6 +131,33 @@ impl CrossRegistryResolver {
         &self.options
     }
 
+    /// Override the [`WebResolver`] used for DID document lookups.
+    ///
+    /// Primary use is supplying a `WebResolver::with_root_cert_pem`
+    /// instance in tests so a self-signed mock can answer DID-document
+    /// requests for `did:web:localhost%3A<port>`. Production callers do
+    /// not need this — the default resolver trusts the system CA bundle.
+    pub fn with_did_resolver(mut self, resolver: WebResolver) -> Self {
+        self.did_resolver = resolver;
+        self
+    }
+
+    /// Pre-populate the per-authority [`RegistryClient`] cache.
+    ///
+    /// Primary use is the conformance harness: tests supply a client
+    /// whose HTTP layer trusts the in-process TLS server's self-signed
+    /// root certificate (via [`RegistryClient::with_root_cert_pem`]), so
+    /// the resolver hits the mock instead of attempting a real network
+    /// call. The seeded client wins over the lazy `RegistryClient::new`
+    /// constructor that [`Self::resolve`] would otherwise invoke on
+    /// first access.
+    pub fn seed_client(&self, authority: impl Into<String>, client: RegistryClient) {
+        self.client_cache
+            .lock()
+            .unwrap()
+            .insert(authority.into(), client);
+    }
+
     /// Restrict cross-registry resolution to a fixed set of authorities
     /// (lowercase DNS hostnames). When set, any reference outside the
     /// allowlist is rejected with [`AcdpError::CrossRegistryResolutionFailed`].
