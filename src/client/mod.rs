@@ -8,4 +8,4 @@ pub use data_ref::{
     fetch_and_verify_data_ref, DataRefFetcher, HttpsDataRefFetcher, DEFAULT_MAX_BYTES,
 };
 pub use registry::RegistryClient;
-pub use verified::{VerificationPolicy, VerifiedContext};
+pub use verified::{VerificationPolicy, VerificationReport, VerifiedContext};

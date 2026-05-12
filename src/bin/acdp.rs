@@ -9,6 +9,16 @@
 //! acdp search       <registry-url> [--q QUERY] [--limit N] [--type T]
 //!                                   [--tags A,B] [--domain D] [--status S]
 //!                                   [--agent-id DID] [--cursor C]
+//! acdp publish      <registry-url> --key-seed <64-hex>
+//!                                   --agent-id <DID> --key-id <DID-URL>
+//!                                   [--title T] [--type CT] [--domain D]
+//!                                   [--visibility V] [--audience DID,DID]
+//!                                   [--summary S] [--description D]
+//!                                   [--tags A,B,C]
+//!                                   [--idempotency-key UUID]
+//!                                   < producer_content.json   # stdin overlay (optional)
+//! acdp validate     <file.json>              # offline validate_publish_request
+//! acdp resolve      <acdp-ctx-id-uri> [--max-depth N]
 //! acdp canonicalize                          # JCS bytes from stdin JSON
 //! acdp hash                                  # content_hash from stdin JSON
 //! acdp verify       <body.json>              # verify a stored body via DID resolution
@@ -27,10 +37,14 @@
 use std::process::ExitCode;
 
 use acdp::{
-    client::{RegistryClient, VerifiedContext},
+    client::{CrossRegistryResolver, RegistryClient, VerifiedContext},
     crypto::{canonicalize, compute_content_hash, SigningKey},
     did::WebResolver,
-    types::{primitives::ContentHash, Body, CtxId, SearchParams},
+    producer::Producer,
+    types::{
+        primitives::{AgentDid, ContentHash, ContextType, Visibility},
+        Body, CtxId, PublishRequest, SearchParams,
+    },
     AcdpError,
 };
 
@@ -45,6 +59,16 @@ fn print_usage() {
          \tacdp search       <registry-url> [--q QUERY] [--limit N] [--type T]\n\
          \t                                  [--tags A,B] [--domain D] [--status S]\n\
          \t                                  [--agent-id DID] [--cursor C]\n\
+         \tacdp publish      <registry-url> --key-seed <64-hex>\n\
+         \t                                  --agent-id <DID> --key-id <DID-URL>\n\
+         \t                                  [--title T] [--type CT] [--domain D]\n\
+         \t                                  [--visibility V] [--audience DID,DID]\n\
+         \t                                  [--summary S] [--description D]\n\
+         \t                                  [--tags A,B,C]\n\
+         \t                                  [--idempotency-key UUID]\n\
+         \t                                  < producer_content.json (stdin overlay; optional)\n\
+         \tacdp validate     <file.json>              # offline schema validation\n\
+         \tacdp resolve      <ctx-id> [--max-depth N] # walk derived_from\n\
          \tacdp canonicalize                          # JCS bytes from stdin JSON\n\
          \tacdp hash                                  # content_hash from stdin JSON\n\
          \tacdp verify       <body.json>              # verify a stored body\n\
@@ -66,6 +90,9 @@ async fn main() -> ExitCode {
         "retrieve" => cmd_retrieve(rest).await,
         "body" => cmd_body(rest).await,
         "search" => cmd_search(rest).await,
+        "publish" => cmd_publish(rest).await,
+        "validate" => cmd_validate(rest),
+        "resolve" => cmd_resolve(rest).await,
         "canonicalize" => cmd_canonicalize(),
         "hash" => cmd_hash(),
         "verify" => cmd_verify(rest).await,
@@ -347,4 +374,282 @@ fn read_stdin_json() -> Result<serde_json::Value, CliError> {
     std::io::stdin().read_to_string(&mut buf)?;
     let v: serde_json::Value = serde_json::from_str(&buf)?;
     Ok(v)
+}
+
+/// Like `read_stdin_json` but returns `None` when stdin is closed /
+/// empty / whitespace-only, so callers can decide whether the JSON
+/// overlay is mandatory.
+fn try_read_stdin_json() -> Result<Option<serde_json::Value>, CliError> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    if buf.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&buf)?))
+}
+
+// ── publish ──────────────────────────────────────────────────────────────────
+
+async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
+    let url = rest
+        .first()
+        .ok_or_else(|| CliError::Usage("`publish` requires <registry-url>".into()))?;
+
+    let mut key_seed: Option<String> = None;
+    let mut agent_id: Option<String> = None;
+    let mut key_id: Option<String> = None;
+    let mut idempotency_key: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut context_type: Option<String> = None;
+    let mut domain: Option<String> = None;
+    let mut visibility: Option<String> = None;
+    let mut audience_csv: Option<String> = None;
+    let mut summary: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut tags_csv: Option<String> = None;
+
+    let mut i = 1;
+    while i < rest.len() {
+        let take = |name: &str, idx: usize, rest: &[String]| -> Result<String, CliError> {
+            rest.get(idx + 1)
+                .cloned()
+                .ok_or_else(|| CliError::Usage(format!("{name} requires a value")))
+        };
+        match rest[i].as_str() {
+            "--key-seed" => {
+                key_seed = Some(take("--key-seed", i, rest)?);
+                i += 2;
+            }
+            "--agent-id" => {
+                agent_id = Some(take("--agent-id", i, rest)?);
+                i += 2;
+            }
+            "--key-id" => {
+                key_id = Some(take("--key-id", i, rest)?);
+                i += 2;
+            }
+            "--idempotency-key" => {
+                idempotency_key = Some(take("--idempotency-key", i, rest)?);
+                i += 2;
+            }
+            "--title" => {
+                title = Some(take("--title", i, rest)?);
+                i += 2;
+            }
+            "--type" => {
+                context_type = Some(take("--type", i, rest)?);
+                i += 2;
+            }
+            "--domain" => {
+                domain = Some(take("--domain", i, rest)?);
+                i += 2;
+            }
+            "--visibility" => {
+                visibility = Some(take("--visibility", i, rest)?);
+                i += 2;
+            }
+            "--audience" => {
+                audience_csv = Some(take("--audience", i, rest)?);
+                i += 2;
+            }
+            "--summary" => {
+                summary = Some(take("--summary", i, rest)?);
+                i += 2;
+            }
+            "--description" => {
+                description = Some(take("--description", i, rest)?);
+                i += 2;
+            }
+            "--tags" => {
+                tags_csv = Some(take("--tags", i, rest)?);
+                i += 2;
+            }
+            other => return Err(CliError::Usage(format!("unknown publish flag '{other}'"))),
+        }
+    }
+
+    let seed_hex =
+        key_seed.ok_or_else(|| CliError::Usage("`publish` requires --key-seed".into()))?;
+    let agent_id =
+        agent_id.ok_or_else(|| CliError::Usage("`publish` requires --agent-id".into()))?;
+    let key_id = key_id.ok_or_else(|| CliError::Usage("`publish` requires --key-id".into()))?;
+    let seed_bytes: [u8; 32] = hex::decode(&seed_hex)
+        .map_err(|e| CliError::Usage(format!("invalid --key-seed hex: {e}")))?
+        .try_into()
+        .map_err(|v: Vec<u8>| {
+            CliError::Usage(format!("--key-seed must be 32 bytes, got {}", v.len()))
+        })?;
+    let key = SigningKey::from_bytes(&seed_bytes);
+
+    let producer = Producer::new(key, AgentDid::new(agent_id), key_id);
+    let mut builder = producer.publish_request();
+
+    // ProducerContent JSON overlay from stdin lets users supply the
+    // structured fields (data_refs, metadata, data_period) that have no
+    // CLI flag. Top-level keys map to builder setters where they exist;
+    // unrecognized keys are passed through to the validator for a
+    // clearer error.
+    let stdin_overlay = try_read_stdin_json()?;
+    if let Some(serde_json::Value::Object(map)) = stdin_overlay {
+        for (k, v) in map {
+            match k.as_str() {
+                // CLI flags win over stdin overlay (per the docstring), so
+                // each field is only adopted from stdin if the matching
+                // flag wasn't supplied — encoded as a match guard so
+                // clippy's `collapsible_if` (stable on 1.95+) is happy.
+                // When the guard fails the arm doesn't match and falls
+                // through to the catch-all, which is the correct no-op
+                // semantic. Let-chains would be cleaner but aren't
+                // stable until 1.88 (MSRV is 1.86).
+                "title" if title.is_none() => {
+                    title = v.as_str().map(str::to_string);
+                }
+                "type" if context_type.is_none() => {
+                    context_type = v.as_str().map(str::to_string);
+                }
+                "summary" if summary.is_none() => {
+                    summary = v.as_str().map(str::to_string);
+                }
+                "description" if description.is_none() => {
+                    description = v.as_str().map(str::to_string);
+                }
+                "domain" if domain.is_none() => {
+                    domain = v.as_str().map(str::to_string);
+                }
+                "data_refs" => {
+                    let drs: Vec<acdp::types::DataRef> = serde_json::from_value(v)
+                        .map_err(|e| CliError::Usage(format!("invalid data_refs JSON: {e}")))?;
+                    builder = builder.data_refs(drs);
+                }
+                "metadata" => {
+                    builder = builder.metadata(v);
+                }
+                "tags" => {
+                    if let Some(arr) = v.as_array() {
+                        let vs: Vec<String> = arr
+                            .iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect();
+                        builder = builder.tags(vs);
+                    }
+                }
+                _ => {
+                    // Forward-compat: unknown overlay keys are ignored
+                    // rather than rejected. RequestBuilder doesn't have
+                    // setters for every conceivable field; the user is
+                    // expected to know which keys are meaningful.
+                }
+            }
+        }
+    }
+
+    let title = title.ok_or_else(|| CliError::Usage("--title is required".into()))?;
+    let context_type = context_type.ok_or_else(|| CliError::Usage("--type is required".into()))?;
+    let context_type: ContextType =
+        serde_json::from_value(serde_json::Value::String(context_type.clone()))
+            .map_err(|e| CliError::Usage(format!("invalid context type '{context_type}': {e}")))?;
+
+    builder = builder.title(title).context_type(context_type);
+    if let Some(d) = domain {
+        builder = builder.domain(d);
+    }
+    if let Some(s) = summary {
+        builder = builder.summary(s);
+    }
+    if let Some(d) = description {
+        builder = builder.description(d);
+    }
+    if let Some(t) = tags_csv {
+        let vs: Vec<String> = t.split(',').map(|s| s.trim().to_string()).collect();
+        builder = builder.tags(vs);
+    }
+    if let Some(v) = visibility {
+        let vis: Visibility = serde_json::from_value(serde_json::Value::String(v.clone()))
+            .map_err(|e| CliError::Usage(format!("invalid --visibility '{v}': {e}")))?;
+        builder = builder.visibility(vis);
+    }
+    if let Some(csv) = audience_csv {
+        let dids: Vec<AgentDid> = csv.split(',').map(|s| AgentDid::new(s.trim())).collect();
+        builder = builder.audience(dids);
+    }
+
+    let req: PublishRequest = builder.build()?;
+
+    let client = RegistryClient::new(url)?;
+    let resp = if let Some(key) = idempotency_key {
+        client.publish_idempotent(&req, &key).await?
+    } else {
+        client.publish(&req).await?
+    };
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(())
+}
+
+// ── validate ─────────────────────────────────────────────────────────────────
+
+fn cmd_validate(rest: &[String]) -> Result<(), CliError> {
+    let path = rest
+        .first()
+        .ok_or_else(|| CliError::Usage("`validate` requires <file.json>".into()))?;
+    let text = std::fs::read_to_string(path)?;
+    let req: PublishRequest = serde_json::from_str(&text)?;
+    acdp::validation::validate_publish_request(&req)?;
+    // Optional: recompute and compare the content_hash so users can see
+    // whether the producer-controlled portion matches the declared
+    // hash. Doesn't change the validation outcome — just informative.
+    let req_value = serde_json::to_value(&req)?;
+    let computed = compute_content_hash(&req_value)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "ok": true,
+            "ctx_id_declared": "(registry-assigned at publish-time)",
+            "content_hash_declared": req.content_hash,
+            "content_hash_recomputed": computed,
+            "hash_matches": computed == req.content_hash,
+        })
+    );
+    Ok(())
+}
+
+// ── resolve ──────────────────────────────────────────────────────────────────
+
+async fn cmd_resolve(rest: &[String]) -> Result<(), CliError> {
+    let id = rest
+        .first()
+        .ok_or_else(|| CliError::Usage("`resolve` requires <ctx-id>".into()))?;
+    let mut max_depth: Option<usize> = None;
+    let mut i = 1;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--max-depth" => {
+                let v = rest
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("--max-depth requires a value".into()))?;
+                max_depth = Some(
+                    v.parse()
+                        .map_err(|_| CliError::Usage(format!("invalid --max-depth: {v}")))?,
+                );
+                i += 2;
+            }
+            other => return Err(CliError::Usage(format!("unknown resolve flag '{other}'"))),
+        }
+    }
+
+    let mut resolver = CrossRegistryResolver::new();
+    if let Some(d) = max_depth {
+        resolver = resolver.with_max_depth(d);
+    }
+
+    let root = resolver.resolve(&CtxId(id.clone())).await?;
+    let ancestors = resolver.walk_derived_from(root.body()).await?;
+
+    let mut all: Vec<&Body> = Vec::with_capacity(1 + ancestors.len());
+    all.push(root.body());
+    for a in &ancestors {
+        all.push(a.body());
+    }
+    println!("{}", serde_json::to_string_pretty(&all)?);
+    Ok(())
 }

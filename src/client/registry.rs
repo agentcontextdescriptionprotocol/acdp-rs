@@ -51,11 +51,51 @@ impl RegistryClient {
     /// the RFC-ACDP-0006 §7.4 default timeouts (5s connect, 30s total)
     /// and §7.5 redirect policy (max 3 follows, same authority only).
     pub fn new(base_url: &str) -> Result<Self, AcdpError> {
+        Self::build(base_url, None, None)
+    }
+
+    /// Connect to a registry that trusts the given PEM-encoded root
+    /// certificate in addition to the system roots.
+    ///
+    /// Primary use is the in-process self-signed HTTPS server in the
+    /// crate's `tests/helpers/tls_did_server.rs` harness so the spec
+    /// fixtures `fed-001..006` can drive `CrossRegistryResolver`
+    /// end-to-end without going over the network.
+    pub fn with_root_cert_pem(base_url: &str, pem: &[u8]) -> Result<Self, AcdpError> {
+        Self::build(base_url, Some(pem), None)
+    }
+
+    /// Connect to a registry whose `<authority>` in `base_url` is routed
+    /// to a fixed socket address. Trusts the given PEM-encoded root
+    /// certificate in addition to the system roots.
+    ///
+    /// Use only in tests: a `CrossRegistryResolver` test that wants to
+    /// drive `acdp://<host>/<uuid>` references requires `<host>` to be
+    /// a valid lowercase DNS label (per `is_valid_dns_authority` in
+    /// `types::primitives`), which precludes embedding the port in the
+    /// `ctx_id`. This factory accepts a logical hostname (e.g.
+    /// `localhost`) and pins it to the test server's actual
+    /// `127.0.0.1:<port>` via reqwest's `.resolve()` hook.
+    #[doc(hidden)]
+    pub fn with_test_endpoint(
+        base_url: &str,
+        target: std::net::SocketAddr,
+        pem: &[u8],
+    ) -> Result<Self, AcdpError> {
+        Self::build(base_url, Some(pem), Some(target))
+    }
+
+    fn build(
+        base_url: &str,
+        extra_root_pem: Option<&[u8]>,
+        resolve_target: Option<std::net::SocketAddr>,
+    ) -> Result<Self, AcdpError> {
         let base = base_url.trim_end_matches('/').to_string();
         let original_authority = url::Url::parse(&base)
             .ok()
             .and_then(|u| u.host_str().map(str::to_string));
 
+        let authority_for_redirect = original_authority.clone();
         let policy = redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
                 return attempt.error(format!(
@@ -64,7 +104,7 @@ impl RegistryClient {
             }
             // Same-authority enforcement (skip when we couldn't parse the base).
             let next_host = attempt.url().host_str().map(str::to_string);
-            if let (Some(orig), Some(next_host)) = (&original_authority, &next_host) {
+            if let (Some(orig), Some(next_host)) = (&authority_for_redirect, &next_host) {
                 if next_host != orig {
                     return attempt.error(format!(
                         "cross-authority redirect rejected ({orig} -> {next_host})"
@@ -74,11 +114,23 @@ impl RegistryClient {
             attempt.follow()
         });
 
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .use_rustls_tls()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .redirect(policy)
+            .redirect(policy);
+
+        if let Some(pem) = extra_root_pem {
+            let cert = reqwest::Certificate::from_pem(pem)
+                .map_err(|e| AcdpError::Http(format!("invalid root cert PEM: {e}")))?;
+            builder = builder.add_root_certificate(cert);
+        }
+
+        if let (Some(target), Some(host)) = (resolve_target, original_authority) {
+            builder = builder.resolve(&host, target);
+        }
+
+        let http = builder
             .build()
             .map_err(|e| AcdpError::Http(e.to_string()))?;
 

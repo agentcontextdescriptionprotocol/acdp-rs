@@ -76,7 +76,10 @@ pub struct PublishRequest {
 /// MUST NOT echo `content_hash`, the producer's signature, or any body
 /// field — the producer already submitted those and the response is for
 /// retrieving the assigned identifiers.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` is supported (alongside `Deserialize`) so CLI/HTTP-binding
+/// layers can echo the response shape back to operators.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishResponse {
     /// Registry-assigned context identifier.

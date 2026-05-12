@@ -6,7 +6,15 @@ all-features = true
 [advisories]
 version = 2
 yanked   = "deny"
-ignore   = []
+ignore = [
+  # rustls-pemfile is "unmaintained" (RUSTSEC-2025-0134) — its PEM
+  # parsing was folded back into rustls upstream. The only ACDP code
+  # path that pulls it in is `axum-server` v0.7, used in our
+  # tests/common TLS harness (dev-dependency only). It never ships to
+  # crates.io consumers of `acdp`. Revisit once `axum-server` releases
+  # a version that uses rustls' built-in PEM helpers.
+  { id = "RUSTSEC-2025-0134", reason = "transitive dev-dep via axum-server; unmaintained ≠ vulnerable" },
+]
 
 [licenses]
 version    = 2
