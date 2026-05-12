@@ -494,39 +494,35 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
     if let Some(serde_json::Value::Object(map)) = stdin_overlay {
         for (k, v) in map {
             match k.as_str() {
+                // CLI flags win over stdin overlay (per the docstring),
+                // so each field is only adopted from stdin if the matching
+                // flag wasn't supplied. The `.map(str::to_string)` form
+                // collapses the nested `if let` clippy's `collapsible_match`
+                // (stable on 1.95+) would otherwise flag — let-chains would
+                // be cleaner but aren't stable until 1.88 (MSRV is 1.86).
                 "title" => {
                     if title.is_none() {
-                        if let Some(s) = v.as_str() {
-                            title = Some(s.to_string());
-                        }
+                        title = v.as_str().map(str::to_string);
                     }
                 }
                 "type" => {
                     if context_type.is_none() {
-                        if let Some(s) = v.as_str() {
-                            context_type = Some(s.to_string());
-                        }
+                        context_type = v.as_str().map(str::to_string);
                     }
                 }
                 "summary" => {
                     if summary.is_none() {
-                        if let Some(s) = v.as_str() {
-                            summary = Some(s.to_string());
-                        }
+                        summary = v.as_str().map(str::to_string);
                     }
                 }
                 "description" => {
                     if description.is_none() {
-                        if let Some(s) = v.as_str() {
-                            description = Some(s.to_string());
-                        }
+                        description = v.as_str().map(str::to_string);
                     }
                 }
                 "domain" => {
                     if domain.is_none() {
-                        if let Some(s) = v.as_str() {
-                            domain = Some(s.to_string());
-                        }
+                        domain = v.as_str().map(str::to_string);
                     }
                 }
                 "data_refs" => {
