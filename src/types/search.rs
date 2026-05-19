@@ -1,4 +1,5 @@
 use crate::types::primitives::*;
+use crate::types::serde_helpers::de_present;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -82,9 +83,26 @@ pub struct SearchParams {
 pub struct SearchResponse {
     /// Lightweight projections of matching contexts.
     pub matches: Vec<SearchResult>,
-    /// Estimated total — may be approximate.
+    /// Estimated total — may be approximate. Omitted (never serialized
+    /// as `null`) when the registry supplies no estimate.
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub total_estimate: Option<u64>,
-    /// Opaque pagination cursor; absent if no more results.
+    /// Opaque pagination cursor; absent when there are no more results.
+    ///
+    /// `acdp-search-response.schema.json` types `next_cursor` as a bare
+    /// `string` (not `["string","null"]`): a missing cursor MUST be
+    /// expressed by omitting the key, never by serializing `null`. The
+    /// field is omitted on serialize and an explicit `null` is rejected
+    /// on deserialize (RFC-ACDP-0005 §2.2.1, fixture schema-005).
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub next_cursor: Option<String>,
 }
 
@@ -116,12 +134,26 @@ pub struct SearchResult {
     pub agent_id: AgentDid,
     /// Short human-readable title.
     pub title: String,
-    /// Producer-supplied search-summary (≤ 1000 chars).
+    /// Producer-supplied search-summary (≤ 1000 chars). Omitted (never
+    /// `null`) when the context has no summary — `match_summary` types
+    /// it as a bare string; an explicit `null` is rejected (schema-006).
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub summary: Option<String>,
     /// Standard or namespaced custom context type.
     #[serde(rename = "type")]
     pub context_type: ContextType,
-    /// Subject-domain identifier.
+    /// Subject-domain identifier. Omitted (never `null`) when absent —
+    /// `match_summary` types it as a bare string; an explicit `null` is
+    /// rejected (schema-007).
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub domain: Option<String>,
     /// Registry-assigned acceptance time.
     pub created_at: DateTime<Utc>,
@@ -274,15 +306,16 @@ impl SearchParamsBuilder {
 mod tests {
     use super::*;
 
+    /// A minimal conformant `match_summary` value. Optional bare-string
+    /// fields (`summary`, `domain`) are *omitted*, not set to `null` —
+    /// emitting `null` for them is schema-invalid (schema-006/007).
     fn base_result() -> serde_json::Value {
         serde_json::json!({
             "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
             "lineage_id": "lin:sha256:1111111111111111111111111111111111111111111111111111111111111111",
             "agent_id": "did:web:agents.example.com:test",
             "title": "x",
-            "summary": null,
             "type": "data_snapshot",
-            "domain": null,
             "created_at": "2026-01-01T00:00:00.000Z",
             "status": "active",
         })
@@ -324,5 +357,91 @@ mod tests {
         let r: SearchResult = serde_json::from_value(v).unwrap();
         let back = serde_json::to_value(&r).unwrap();
         assert_eq!(back["visibility"], serde_json::json!("restricted"));
+    }
+
+    // ── BUG-03 — absent-vs-null wire convention ────────────────────────
+
+    /// BUG-03: a `SearchResponse` with no `total_estimate` / `next_cursor`
+    /// MUST omit those keys, never serialize them as `null`
+    /// (`acdp-search-response.schema.json` is `additionalProperties:
+    /// false` and types both as non-nullable).
+    #[test]
+    fn search_response_omits_none_fields() {
+        let r = SearchResponse {
+            matches: vec![],
+            total_estimate: None,
+            next_cursor: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("total_estimate"),
+            "total_estimate: None MUST be omitted, not null"
+        );
+        assert!(
+            !obj.contains_key("next_cursor"),
+            "next_cursor: None MUST be omitted, not null"
+        );
+    }
+
+    /// BUG-03: a `SearchResult` with no `summary` / `domain` MUST omit
+    /// those keys (`match_summary` types both as bare strings).
+    #[test]
+    fn search_result_omits_none_summary_and_domain() {
+        let r: SearchResult = serde_json::from_value(base_result()).unwrap();
+        assert_eq!(r.summary, None);
+        assert_eq!(r.domain, None);
+        let v = serde_json::to_value(&r).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("summary"),
+            "summary: None MUST be omitted"
+        );
+        assert!(!obj.contains_key("domain"), "domain: None MUST be omitted");
+    }
+
+    /// schema-005: `next_cursor: null` is schema-invalid — `next_cursor`
+    /// is typed as a bare string, so a strict consumer MUST reject it
+    /// rather than coerce `null` to absent.
+    #[test]
+    fn search_response_rejects_null_next_cursor() {
+        let raw = r#"{"matches":[],"total_estimate":0,"next_cursor":null}"#;
+        let parsed: Result<SearchResponse, _> = serde_json::from_str(raw);
+        assert!(
+            parsed.is_err(),
+            "schema-005: next_cursor:null MUST be rejected, got {parsed:?}"
+        );
+    }
+
+    /// schema-006: `summary: null` inside a match_summary is rejected.
+    #[test]
+    fn search_result_rejects_null_summary() {
+        let mut v = base_result();
+        v["summary"] = serde_json::Value::Null;
+        let parsed: Result<SearchResult, _> = serde_json::from_value(v);
+        assert!(
+            parsed.is_err(),
+            "schema-006: summary:null MUST be rejected, got {parsed:?}"
+        );
+    }
+
+    /// schema-007: `domain: null` inside a match_summary is rejected.
+    #[test]
+    fn search_result_rejects_null_domain() {
+        let mut v = base_result();
+        v["domain"] = serde_json::Value::Null;
+        let parsed: Result<SearchResult, _> = serde_json::from_value(v);
+        assert!(
+            parsed.is_err(),
+            "schema-007: domain:null MUST be rejected, got {parsed:?}"
+        );
+    }
+
+    /// Absent optional fields deserialize cleanly to `None`.
+    #[test]
+    fn search_response_accepts_omitted_optionals() {
+        let r: SearchResponse = serde_json::from_str(r#"{"matches":[]}"#).unwrap();
+        assert_eq!(r.total_estimate, None);
+        assert_eq!(r.next_cursor, None);
     }
 }

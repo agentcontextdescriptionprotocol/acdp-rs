@@ -127,7 +127,7 @@ impl std::fmt::Display for ContentHash {
     }
 }
 
-/// A Decentralized Identifier — v0.0.1 mandates `did:web`.
+/// A Decentralized Identifier — v0.1.0 mandates `did:web`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentDid(pub String);
 
@@ -182,12 +182,12 @@ impl AgentDid {
         Ok(Self(s))
     }
 
-    /// Validate and require `did:web:` (RFC-ACDP-0001 §5.4 mandate for v0.0.1).
+    /// Validate and require `did:web:` (RFC-ACDP-0001 §5.4 mandate for v0.1.0).
     pub fn parse_web(s: impl Into<String>) -> Result<Self, AcdpError> {
         let parsed = Self::parse(s)?;
         if !parsed.0.starts_with("did:web:") {
             return Err(AcdpError::SchemaViolation(format!(
-                "v0.0.1 producers MUST use did:web; got: {}",
+                "v0.1.0 producers MUST use did:web; got: {}",
                 parsed.0
             )));
         }
@@ -297,7 +297,7 @@ fn is_namespaced_context_type(s: &str) -> bool {
 /// Registry-derived lifecycle status.
 ///
 /// The schema (`acdp-common.schema.json#/$defs/status`) defines an open
-/// `^[a-z][a-z0-9_]*$` pattern, length 1..=64. v0.0.1 emits `active`,
+/// `^[a-z][a-z0-9_]*$` pattern, length 1..=64. v0.1.0 emits `active`,
 /// `superseded`, `expired`; future versions add `retracted`
 /// (RFC-ACDP-0009 §2.1) and possibly others. Consumers MUST tolerate
 /// unknown values matching the pattern; values that DO NOT match the
@@ -394,7 +394,7 @@ impl Status {
 
     /// Forward-compatible degradation: maps unknown statuses to
     /// [`Status::Active`] for functional decisions, per RFC-ACDP-0004 §4.1
-    /// ("v0.0.1 consumers MUST tolerate unknown status values and SHOULD
+    /// ("v0.1.0 consumers MUST tolerate unknown status values and SHOULD
     /// treat them as 'active' until they upgrade"). Callers MUST log the
     /// original `Other(_)` value so the unknown is observable.
     pub fn known_or_active(&self) -> Status {
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn unknown_status_value_falls_back_to_other() {
-        // RFC-ACDP-0009 §2.1 reserves `retracted` for v0.1+; v0.0.1 consumers
+        // RFC-ACDP-0009 §2.1 reserves `retracted` for v0.1+; v0.1.0 consumers
         // MUST tolerate it without panicking.
         let s: Status = serde_json::from_value(json!("retracted")).unwrap();
         assert_eq!(s.as_other(), Some("retracted"));

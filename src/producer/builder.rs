@@ -314,7 +314,15 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
-    /// ACDP protocol version string (e.g. `"0.0.1"`).
+    /// Set the ACDP protocol version string explicitly (e.g.
+    /// [`crate::ACDP_VERSION`]).
+    ///
+    /// Optional. When left unset the field is omitted from the request,
+    /// and the protocol interprets an absent `acdp_version` as the
+    /// current version (`0.1.0`). Omitting it is the default — it keeps
+    /// the ProducerContent (and therefore `content_hash`) byte-stable
+    /// against the `sig-001` golden vector. Call this only when a
+    /// downstream consumer needs the version stated explicitly.
     pub fn acdp_version(mut self, v: impl Into<String>) -> Self {
         self.acdp_version = Some(v.into());
         self

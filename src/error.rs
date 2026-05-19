@@ -38,6 +38,17 @@ pub enum AcdpError {
     #[error("registry rejected hash_mismatch: {0}")]
     RemoteHashMismatch(String),
 
+    /// Wire code: `data_ref_hash_mismatch`. A DataRef's fetched or decoded
+    /// bytes do not match the producer-declared `data_ref.content_hash`.
+    /// The body itself remains cryptographically valid — only the
+    /// referenced data has diverged. Distinct from
+    /// [`AcdpError::RemoteHashMismatch`] / [`AcdpError::HashMismatch`]
+    /// (body-level ProducerContent failure — the whole body is untrusted)
+    /// and [`AcdpError::InvalidSignature`] (a key / key-binding problem).
+    /// RFC-ACDP-0002 §6.5–6.6, RFC-ACDP-0007 §5.
+    #[error("data_ref hash mismatch: {0}")]
+    DataRefHashMismatch(String),
+
     /// Signature verification failed or signature was malformed.
     /// Wire code: `invalid_signature`.
     #[error("invalid signature: {0}")]
@@ -167,7 +178,7 @@ pub enum SupersessionReason {
     VersionMismatch,
     /// The target has already been superseded by a different version.
     AlreadySuperseded,
-    /// The target lives on a different registry; v0.0.1 only allows
+    /// The target lives on a different registry; v0.1.0 only allows
     /// same-registry supersession.
     CrossRegistrySupersessionUnsupported,
     /// The lineage walk through `supersedes` failed because an
@@ -217,6 +228,7 @@ impl AcdpError {
         match code {
             "invalid_signature" => AcdpError::InvalidSignature(msg),
             "hash_mismatch" => AcdpError::RemoteHashMismatch(msg),
+            "data_ref_hash_mismatch" => AcdpError::DataRefHashMismatch(msg),
             "schema_violation" => AcdpError::SchemaViolation(msg),
             "not_authorized" => AcdpError::NotAuthorized(msg),
             "not_found" => AcdpError::NotFound(msg),
@@ -292,8 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn all_19_wire_codes_round_trip() {
-        // Test-coverage matrix entry: "All 19 error codes parse from WireError".
+    fn all_20_wire_codes_round_trip() {
+        // Test-coverage matrix entry: "All 20 error codes parse from WireError".
         // Every code enumerated by acdp-error.schema.json's enum MUST map to a
         // typed AcdpError variant (or, for `superseded_target` with details,
         // produce the right SupersessionReason).
@@ -304,6 +316,9 @@ mod tests {
             }),
             ("hash_mismatch", |e| {
                 matches!(e, AcdpError::RemoteHashMismatch(_))
+            }),
+            ("data_ref_hash_mismatch", |e| {
+                matches!(e, AcdpError::DataRefHashMismatch(_))
             }),
             ("schema_violation", |e| {
                 matches!(e, AcdpError::SchemaViolation(_))
@@ -351,8 +366,9 @@ mod tests {
                 matches!(e, AcdpError::RegistryInternal(_))
             }),
         ];
-        // Schema enumerates exactly 19 codes (RFC-ACDP-0007 §5).
-        assert_eq!(cases.len(), 19);
+        // Schema enumerates exactly 20 codes (RFC-ACDP-0007 §5,
+        // acdp-error.schema.json `error.code` enum).
+        assert_eq!(cases.len(), 20);
         for (code, expected) in cases {
             let err = AcdpError::from_wire_error(wire(code, "msg", None));
             assert!(
@@ -429,5 +445,9 @@ mod tests {
         assert!(!AcdpError::SchemaViolation("x".into()).is_transient());
         assert!(!AcdpError::InvalidSignature("x".into()).is_transient());
         assert!(!AcdpError::NotFound("x".into()).is_transient());
+        // BUG-02: data-ref hash mismatch is a data-integrity failure;
+        // retrying the SAME publish/fetch will return the same answer.
+        // The spec marks it permanent, not retryable.
+        assert!(!AcdpError::DataRefHashMismatch("x".into()).is_transient());
     }
 }

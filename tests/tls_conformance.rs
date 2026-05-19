@@ -13,8 +13,19 @@ use acdp::crypto::sign::SigningKey;
 use acdp::crypto::verify_publish_request_signature;
 use acdp::did::WebResolver;
 use acdp::producer::Producer;
+use acdp::safe_http::SsrfPolicy;
 use acdp::types::primitives::{AgentDid, ContextType, Visibility};
 use acdp::AcdpError;
+
+/// Test-only resolver constructor: trusts the harness's self-signed
+/// root and opts the SsrfPolicy into loopback so `did:web:localhost…`
+/// resolves against `127.0.0.1`. Default policy still rejects every
+/// other forbidden range — only loopback is permitted.
+fn test_resolver(root_cert_pem: &[u8]) -> WebResolver {
+    WebResolver::with_root_cert_pem(root_cert_pem)
+        .expect("resolver")
+        .with_ssrf_policy(SsrfPolicy::allow_test_loopback())
+}
 
 use common::{did_doc_router, ed25519_did_doc, ed25519_did_doc_without_assertion, TlsTestServer};
 
@@ -46,7 +57,7 @@ async fn pub_001_forged_signature_rejected() {
     let did = server.did();
     let key_id = format!("{did}#key-1");
 
-    let resolver = WebResolver::with_root_cert_pem(&server.root_cert_pem).expect("resolver");
+    let resolver = test_resolver(&server.root_cert_pem);
 
     // Forged: signer is attacker_key, but the publish references the
     // honest DID + its key_id. content_hash is correct; only the
@@ -90,7 +101,7 @@ async fn pub_006_key_not_in_assertion_method() {
     let did = server.did();
     let key_id = format!("{did}#key-1");
 
-    let resolver = WebResolver::with_root_cert_pem(&server.root_cert_pem).expect("resolver");
+    let resolver = test_resolver(&server.root_cert_pem);
 
     let producer = Producer::new(key, AgentDid::new(did.clone()), key_id);
     let req = producer
@@ -128,7 +139,7 @@ async fn tls_resolver_happy_path() {
 
     let did = server.did();
     let key_id = format!("{did}#key-1");
-    let resolver = WebResolver::with_root_cert_pem(&server.root_cert_pem).expect("resolver");
+    let resolver = test_resolver(&server.root_cert_pem);
 
     let producer = Producer::new(key, AgentDid::new(did.clone()), key_id);
     let req = producer
@@ -163,7 +174,7 @@ fn pub_003_supersession_lineage_mismatch() {
     use acdp::types::{CapabilitiesDocument, Limits};
 
     let caps = CapabilitiesDocument {
-        acdp_version: "0.0.1".into(),
+        acdp_version: "0.1.0".into(),
         registry_did: "did:web:registry.example.com".into(),
         supported_signature_algorithms: vec!["ed25519".into()],
         supported_did_methods: vec!["did:web".into()],
@@ -448,6 +459,7 @@ async fn fetch_report_happy_path() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        extensions: Default::default(),
     };
     let full_value = serde_json::to_value(&full).expect("FullContext serializes");
 
@@ -462,7 +474,7 @@ async fn fetch_report_happy_path() {
         .await;
 
     let client = RegistryClient::new(&registry.uri()).expect("client");
-    let resolver = WebResolver::with_root_cert_pem(&tls.root_cert_pem).expect("resolver");
+    let resolver = test_resolver(&tls.root_cert_pem);
 
     let (_verified, report) =
         VerifiedContext::fetch_report(&client, &resolver, &ctx_id, &VerificationPolicy::default())
@@ -566,6 +578,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        extensions: Default::default(),
     })
     .unwrap();
 
@@ -576,7 +589,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
         .mount(&registry)
         .await;
     let client = RegistryClient::new(&registry.uri()).unwrap();
-    let resolver = WebResolver::with_root_cert_pem(&tls.root_cert_pem).unwrap();
+    let resolver = test_resolver(&tls.root_cert_pem);
 
     // Default policy: structural validation enabled → MUST fail.
     match VerifiedContext::fetch_with_policy(
@@ -655,6 +668,7 @@ async fn fetch_report_records_embedded_hash_failure() {
             encoding: EmbeddedEncoding::Utf8,
             content: serde_json::Value::String("hello".into()),
         }),
+        extensions: serde_json::Map::new(),
     };
 
     let ctx_id = CtxId("acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into());
@@ -712,6 +726,7 @@ async fn fetch_report_records_embedded_hash_failure() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        extensions: Default::default(),
     })
     .expect("serialize full context");
 
@@ -722,7 +737,7 @@ async fn fetch_report_records_embedded_hash_failure() {
         .mount(&registry)
         .await;
     let client = RegistryClient::new(&registry.uri()).expect("client");
-    let resolver = WebResolver::with_root_cert_pem(&tls.root_cert_pem).expect("resolver");
+    let resolver = test_resolver(&tls.root_cert_pem);
 
     let (_verified, report) =
         VerifiedContext::fetch_report(&client, &resolver, &ctx_id, &VerificationPolicy::default())
@@ -834,6 +849,7 @@ async fn fetch_report_diagnose_records_forged_signature() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        extensions: Default::default(),
     })
     .unwrap();
 
@@ -844,7 +860,7 @@ async fn fetch_report_diagnose_records_forged_signature() {
         .mount(&registry)
         .await;
     let client = RegistryClient::new(&registry.uri()).unwrap();
-    let resolver = WebResolver::with_root_cert_pem(&tls.root_cert_pem).unwrap();
+    let resolver = test_resolver(&tls.root_cert_pem);
 
     // Diagnose: MUST succeed with a populated report.
     let (verified, report) = VerifiedContext::fetch_report_diagnose(

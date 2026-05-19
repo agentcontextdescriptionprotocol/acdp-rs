@@ -75,7 +75,7 @@ mod tests {
 
     fn caps_with(profiles: Vec<&str>) -> CapabilitiesDocument {
         CapabilitiesDocument {
-            acdp_version: "0.0.1".into(),
+            acdp_version: "0.1.0".into(),
             registry_did: "did:web:r.example.com".into(),
             supported_signature_algorithms: vec!["ed25519".into()],
             supported_did_methods: vec!["did:web".into()],

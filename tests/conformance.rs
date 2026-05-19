@@ -15,20 +15,46 @@ use acdp::types::{
     search::SearchResponse,
 };
 
+/// Locate the ACDP spec checkout.
+///
+/// Normally the conformance tests skip gracefully when the spec is not
+/// co-located, so this crate stays buildable in isolation. When
+/// `ACDP_REQUIRE_CONFORMANCE` is set (IMP-02 — used by the dedicated CI
+/// job), a missing spec is a hard failure instead: a green run then
+/// genuinely proves conformance.
 fn spec_root() -> Option<PathBuf> {
+    let require = std::env::var("ACDP_REQUIRE_CONFORMANCE").is_ok();
+
     if let Ok(env) = std::env::var("ACDP_SPEC_DIR") {
         let p = PathBuf::from(env);
         if p.exists() {
             return Some(p);
         }
+        assert!(
+            !require,
+            "ACDP_REQUIRE_CONFORMANCE is set but ACDP_SPEC_DIR '{}' does not exist",
+            p.display()
+        );
+    } else {
+        assert!(
+            !require,
+            "ACDP_REQUIRE_CONFORMANCE is set but ACDP_SPEC_DIR is not"
+        );
     }
+
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let sibling = manifest_dir
-        .parent()?
-        .join("agentcontextdescriptionprotocol");
-    if sibling.exists() {
-        return Some(sibling);
+    if let Some(sibling) = manifest_dir
+        .parent()
+        .map(|p| p.join("agentcontextdescriptionprotocol"))
+    {
+        if sibling.exists() {
+            return Some(sibling);
+        }
     }
+    assert!(
+        !require,
+        "ACDP_REQUIRE_CONFORMANCE is set but no ACDP spec checkout could be located"
+    );
     None
 }
 
@@ -67,14 +93,15 @@ fn all_conformance_fixtures_parse_as_valid_json() {
         );
         count += 1;
     }
-    // Spec is at round-4 hardening (71 fixtures across `can`, `caps`,
-    // `data-ref`, `err`, `fed`, `idem`, `meta`, `pub`, `rate`, `ret`,
-    // `schema`, `sig`, `status`, `vis` families). Floor at 71 so a
-    // wholesale regression in fixture loading is caught while small
-    // future renames / merges remain accommodatable.
+    // The v0.1.0 Final spec ships 90 conformance fixtures across the
+    // `body`, `can`, `caps`, `cur`, `data-ref`, `did-ssrf`, `err`,
+    // `fed`, `idem`, `lin`, `meta`, `pub`, `rate`, `ret`, `schema`,
+    // `sig`, `status`, `vis` families. Floor at 90 so a wholesale
+    // regression in fixture loading is caught; the spec only ever
+    // grows, so `>=` accommodates future additions.
     assert!(
-        count >= 71,
-        "expected ≥71 fixtures (post round-4 spec), found {count}"
+        count >= 90,
+        "expected ≥90 fixtures (ACDP v0.1.0 Final spec), found {count}"
     );
 }
 
@@ -169,7 +196,15 @@ fn status_conformance_fixtures() {
     assert!(checked >= 1, "expected ≥1 status-* fixture, got {checked}");
 }
 
-/// FEAT-03 — DataRef fixtures (data-ref-001..007).
+/// FEAT-03 — DataRef structural-validation fixtures (data-ref-001..007).
+///
+/// `data-ref-008` is deliberately excluded: it is an *external*
+/// data_ref hash mismatch — a runtime data-integrity failure that can
+/// only be detected after fetching `location`, not by structural
+/// validation. It is bound behaviorally by
+/// `fetch_and_verify_uri_ref_fails_on_hash_mismatch` in
+/// `src/client/data_ref.rs`, which asserts the
+/// [`acdp::AcdpError::DataRefHashMismatch`] outcome (BUG-02).
 #[test]
 fn data_ref_conformance_fixtures() {
     let Some(root) = spec_root() else { return };
@@ -179,6 +214,11 @@ fn data_ref_conformance_fixtures() {
         let path = entry.unwrap().path();
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if !name.starts_with("data-ref-") {
+            continue;
+        }
+        // data-ref-008 — external (fetch-time) hash mismatch; not a
+        // structural-validation case. See the doc comment above.
+        if name.starts_with("data-ref-008") {
             continue;
         }
         let v = read_json(&path);
@@ -296,6 +336,53 @@ fn closed_schema_conformance_fixtures() {
                     if matches!(outcome, "accept" | "success") {
                         assert!(r.is_ok(), "{name}: expected accept");
                     }
+                }
+            }
+            // schema-005/006/007 — `next_cursor` / `summary` / `domain`
+            // are bare strings; a JSON `null` is non-conformant and a
+            // strict consumer MUST reject it (BUG-03).
+            "schema-005-search-response-next-cursor-null.json"
+            | "schema-006-search-result-summary-null.json"
+            | "schema-007-search-result-domain-null.json" => {
+                if let Some(body) = v.pointer("/input/response_body") {
+                    let r: Result<SearchResponse, _> = serde_json::from_value(body.clone());
+                    if matches!(outcome, "reject" | "failure") {
+                        assert!(
+                            r.is_err(),
+                            "{name}: a `null` bare-string field MUST be rejected, got {r:?}"
+                        );
+                    }
+                }
+            }
+            // schema-008 — the `signature` object is a closed wire shape
+            // (deny_unknown_fields, BUG-06).
+            "schema-008-signature-extra-field.json" => {
+                if let Some(sig) = v.pointer("/input/request_body_excerpt/signature") {
+                    let r: Result<acdp::types::body::Signature, _> =
+                        serde_json::from_value(sig.clone());
+                    assert!(
+                        r.is_err(),
+                        "{name}: unknown signature field MUST be rejected"
+                    );
+                }
+            }
+            // schema-009 — `data_period` is a closed wire shape (BUG-06).
+            "schema-009-data-period-extra-field.json" => {
+                if let Some(dp) = v.pointer("/input/request_body_excerpt/data_period") {
+                    let r: Result<acdp::types::body::DataPeriod, _> =
+                        serde_json::from_value(dp.clone());
+                    assert!(
+                        r.is_err(),
+                        "{name}: unknown data_period field MUST be rejected"
+                    );
+                }
+            }
+            // schema-010 — `limits` is a closed sub-object inside the
+            // otherwise-open capabilities document (BUG-06).
+            "schema-010-capabilities-limits-extra-field.json" => {
+                if let Some(limits) = v.pointer("/input/response_body_excerpt/limits") {
+                    let r: Result<acdp::types::Limits, _> = serde_json::from_value(limits.clone());
+                    assert!(r.is_err(), "{name}: unknown limits field MUST be rejected");
                 }
             }
             _ => {}
@@ -980,6 +1067,113 @@ fn schema_003_embedded_extra_field_rejected() {
     );
 }
 
+/// BUG-05 / can-010 — `acdp-data-ref.schema.json` is open at its root.
+/// An unknown producer-controlled field inside a `DataRef` MUST survive
+/// deserialize → serialize verbatim: a `DataRef` lives inside
+/// ProducerContent, so a dropped field would change `content_hash` and
+/// falsely fail verification on a consumer one ACDP minor version behind.
+#[test]
+fn can_010_data_ref_unknown_producer_field_preserved() {
+    let dr_json = serde_json::json!({
+        "type": "raw_data",
+        "location": "https://data.example.com/file.csv",
+        "future_producer_field": "must not be dropped"
+    });
+    let dr: acdp::types::DataRef =
+        serde_json::from_value(dr_json).expect("DataRef must deserialize with extensions");
+    assert_eq!(
+        dr.extensions
+            .get("future_producer_field")
+            .and_then(|v| v.as_str()),
+        Some("must not be dropped"),
+        "can-010: an unknown DataRef field MUST be captured in `extensions`"
+    );
+    let round_tripped = serde_json::to_value(&dr).unwrap();
+    assert_eq!(
+        round_tripped["future_producer_field"], "must not be dropped",
+        "can-010: an unknown DataRef field MUST survive the round-trip"
+    );
+}
+
+/// data-ref-008 — an EXTERNAL data_ref hash mismatch is surfaced as
+/// [`acdp::AcdpError::DataRefHashMismatch`] (BUG-02), never as
+/// `hash_mismatch` (body-level) or `invalid_signature` (key-level).
+/// The body's own integrity is unaffected — only the bytes at
+/// `data_ref.location` have diverged from the producer-declared hash.
+#[cfg(feature = "client")]
+#[tokio::test]
+async fn data_ref_008_external_hash_mismatch_surfaced_as_data_ref_hash_mismatch() {
+    use acdp::client::{fetch_and_verify_data_ref, DataRefFetcher};
+    use acdp::types::data_ref::{DataRefType, Location};
+    use acdp::types::{ContentHash, DataRef};
+
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/data-ref-008-external-data-ref-hash-mismatch.json");
+    if !path.exists() {
+        return;
+    }
+    let fixture = read_json(&path);
+    let dr_value = fixture
+        .pointer("/input/data_ref_under_test")
+        .expect("fixture must expose data_ref_under_test");
+    let declared_hash = dr_value["content_hash"].as_str().unwrap().to_string();
+    let location = dr_value["location"].as_str().unwrap().to_string();
+
+    // The producer signed a body that declares `declared_hash` for the
+    // bytes at `location`. Today those bytes have changed and hash to
+    // something else — modelled here as a stub fetcher returning a
+    // payload whose SHA-256 does not match.
+    let dr = DataRef::uri_verified(DataRefType::RawData, location, ContentHash(declared_hash));
+
+    struct StaleFetcher;
+    impl DataRefFetcher for StaleFetcher {
+        async fn fetch(&self, _location: &Location) -> Result<Vec<u8>, acdp::AcdpError> {
+            Ok(b"data the upstream has since mutated".to_vec())
+        }
+    }
+
+    let err = fetch_and_verify_data_ref(&dr, &StaleFetcher)
+        .await
+        .expect_err("data-ref-008: fetched bytes ≠ declared hash MUST fail");
+    match err {
+        acdp::AcdpError::DataRefHashMismatch(_) => { /* exactly what data-ref-008 requires */ }
+        acdp::AcdpError::HashMismatch { .. } | acdp::AcdpError::RemoteHashMismatch(_) => panic!(
+            "data-ref-008: MUST NOT report body-level hash_mismatch — \
+             the body's content_hash is valid; only the referenced data diverged"
+        ),
+        acdp::AcdpError::InvalidSignature(_) => panic!(
+            "data-ref-008: MUST NOT report invalid_signature — the producer's \
+             signature is valid; only the referenced data diverged"
+        ),
+        other => panic!("data-ref-008: unexpected error variant {other:?}"),
+    }
+}
+
+/// BUG-07 — `acdp-context.schema.json` is `additionalProperties: true`.
+/// An unknown top-level field in a retrieval envelope MUST be preserved
+/// in `FullContext.extensions` and survive a serialize round-trip, so a
+/// v0.1.0 consumer tolerates future top-level registry keys.
+#[test]
+fn full_context_preserves_unknown_top_level_field() {
+    let body = body_with_origin_registry("registry.example.com");
+    let envelope = serde_json::json!({
+        "body": serde_json::to_value(&body).unwrap(),
+        "registry_state": { "status": "active" },
+        "future_registry_field": { "some": "value" }
+    });
+    let ctx: acdp::types::FullContext =
+        serde_json::from_value(envelope).expect("FullContext must deserialize");
+    assert!(
+        ctx.extensions.contains_key("future_registry_field"),
+        "BUG-07: an unknown top-level field MUST land in FullContext.extensions"
+    );
+    let back = serde_json::to_value(&ctx).unwrap();
+    assert_eq!(
+        back["future_registry_field"]["some"], "value",
+        "BUG-07: an unknown top-level field MUST survive the round-trip"
+    );
+}
+
 // ── FEAT-01 / gap #3 — behavioral binding tests ──────────────────────────────
 
 /// pub-002 — a publish request with a tampered `content_hash` MUST be
@@ -1005,7 +1199,7 @@ fn pub_002_hash_mismatch_rejected_by_validator() {
         Err(_) => return, // older fixture format — skip
     };
     let caps = acdp::types::CapabilitiesDocument {
-        acdp_version: "0.0.1".into(),
+        acdp_version: "0.1.0".into(),
         registry_did: "did:web:registry.example.com".into(),
         supported_signature_algorithms: vec!["ed25519".into()],
         supported_did_methods: vec!["did:web".into()],
@@ -1141,7 +1335,7 @@ fn ret_001_and_err_001_present() {
 /// necessarily wrong (RFC-ACDP-0003 §2.2).
 ///
 /// Fixture body uses `did:agent:test` rather than `did:web:…`, so a
-/// strict v0.0.1 validator may surface the agent_id violation first;
+/// strict v0.1.0 validator may surface the agent_id violation first;
 /// either way the outcome MUST be `SchemaViolation` and the publish
 /// MUST NOT be accepted.
 #[test]
@@ -1251,6 +1445,299 @@ fn pub_007_publish_response_shape() {
                 r.is_err(),
                 "pub-007: publish response with forbidden field `{field_name}` \
                  MUST be rejected by deny_unknown_fields, got {r:?}"
+            );
+        }
+    }
+}
+
+// ── FEAT-01/02/03 — vis-009 / vis-008 / ret-002 behavioral bindings ──────────
+//
+// End-to-end `RegistryServer` checks for the scenarios the named fixtures
+// pin. Gated on the `server` feature for `RegistryServer` / `InMemoryStore`.
+#[cfg(feature = "server")]
+mod registry_behavior {
+    use acdp::crypto::SigningKey;
+    use acdp::producer::Producer;
+    use acdp::registry::{InMemoryStore, RegistryServer, RegistryStore};
+    use acdp::types::capabilities::Limits;
+    use acdp::types::primitives::{AgentDid, ContextType, Status, Visibility};
+    use acdp::types::search::SearchParams;
+    use acdp::types::CapabilitiesDocument;
+    use acdp::AcdpError;
+
+    const OWNER: &str = "did:web:agents.example.com:owner";
+    const AUTHORIZED: &str = "did:web:agents.example.com:authorized";
+    const STRANGER: &str = "did:web:agents.example.com:stranger";
+
+    fn caps(anonymous_public_reads: bool) -> CapabilitiesDocument {
+        CapabilitiesDocument {
+            acdp_version: "0.1.0".into(),
+            registry_did: "did:web:registry.example.com".into(),
+            supported_signature_algorithms: vec!["ed25519".into()],
+            supported_did_methods: vec!["did:web".into()],
+            profiles: vec!["acdp-registry-core".into()],
+            limits: Limits {
+                max_payload_bytes: 1_048_576,
+                max_embedded_bytes: 65_536,
+                idempotency_key_ttl_seconds: None,
+            },
+            read_authentication_methods: vec![],
+            anonymous_public_reads,
+            supports_idempotency_key: false,
+            extensions: Default::default(),
+        }
+    }
+
+    fn producer() -> Producer {
+        Producer::new(
+            SigningKey::from_bytes(&[7u8; 32]),
+            AgentDid::new(OWNER),
+            format!("{OWNER}#key-1"),
+        )
+    }
+
+    fn server(anonymous_public_reads: bool) -> RegistryServer<InMemoryStore> {
+        RegistryServer::new(
+            InMemoryStore::new(),
+            caps(anonymous_public_reads),
+            "registry.example.com",
+        )
+    }
+
+    fn search_beta(
+        srv: &RegistryServer<InMemoryStore>,
+        requester: Option<&AgentDid>,
+    ) -> Result<acdp::types::SearchResponse, AcdpError> {
+        srv.search(
+            &SearchParams {
+                q: Some("beta".into()),
+                ..Default::default()
+            },
+            requester,
+        )
+    }
+
+    /// Publish one public + one restricted context, both matching `q=beta`.
+    fn publish_beta_pair(srv: &RegistryServer<InMemoryStore>) {
+        let p = producer();
+        let public = p
+            .publish_request()
+            .title("Public beta")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        srv.publish_unverified_for_tests(&public).unwrap();
+        let restricted = p
+            .publish_request()
+            .title("Restricted beta")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(AUTHORIZED)])
+            .build()
+            .unwrap();
+        srv.publish_unverified_for_tests(&restricted).unwrap();
+    }
+
+    /// FEAT-01 / vis-009 — `anonymous_public_reads` governs keyword search
+    /// exactly as it governs retrieval.
+    #[test]
+    fn vis_009_anonymous_public_reads_search_scoping() {
+        // s1: flag=false + anonymous → 403 not_authorized, no leakage.
+        {
+            let srv = server(false);
+            publish_beta_pair(&srv);
+            let err = search_beta(&srv, None).unwrap_err();
+            assert!(
+                matches!(err, AcdpError::NotAuthorized(_)),
+                "vis-009 s1: anonymous search MUST be NotAuthorized when \
+                 anonymous_public_reads=false; got {err:?}"
+            );
+        }
+        // s2: flag=true + anonymous → 200, public results only.
+        {
+            let srv = server(true);
+            publish_beta_pair(&srv);
+            let resp = search_beta(&srv, None).unwrap();
+            assert_eq!(
+                resp.matches.len(),
+                1,
+                "vis-009 s2: anonymous search sees public contexts only"
+            );
+            assert_eq!(resp.matches[0].title, "Public beta");
+        }
+        // s3: flag=false + authenticated → 200, public only (restricted
+        // excluded — the stranger is in no audience).
+        {
+            let srv = server(false);
+            publish_beta_pair(&srv);
+            let stranger = AgentDid::new(STRANGER);
+            let resp = search_beta(&srv, Some(&stranger)).unwrap();
+            assert_eq!(
+                resp.matches.len(),
+                1,
+                "vis-009 s3: an authenticated non-audience requester sees public only"
+            );
+            assert_eq!(resp.matches[0].title, "Public beta");
+        }
+    }
+
+    /// FEAT-02 / vis-008 — lineage endpoints apply the same per-context
+    /// visibility rules as `GET /contexts/{ctx_id}`. Knowing a
+    /// `lineage_id` MUST NOT grant access ctx_id-level control denies.
+    #[test]
+    fn vis_008_lineage_endpoint_visibility() {
+        let owner = AgentDid::new(OWNER);
+        let audience = AgentDid::new(AUTHORIZED);
+        let stranger = AgentDid::new(STRANGER);
+        let srv = server(true);
+        let p = producer();
+
+        // Restricted lineage: v1 restricted (→ superseded), v2 restricted.
+        let v1 = p
+            .publish_request()
+            .title("restricted v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Restricted)
+            .audience(vec![audience.clone()])
+            .build()
+            .unwrap();
+        let v1_resp = srv.publish_unverified_for_tests(&v1).unwrap();
+        let v2 = p
+            .supersede(v1_resp.ctx_id.clone())
+            .version(2)
+            .title("restricted v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Restricted)
+            .audience(vec![audience.clone()])
+            .build()
+            .unwrap();
+        srv.publish_unverified_for_tests(&v2).unwrap();
+        let restricted_lineage = v1_resp.lineage_id.clone();
+
+        // s1: stranger sees zero versions — empty array, not an error.
+        assert!(
+            srv.lineage(&restricted_lineage, Some(&stranger))
+                .unwrap()
+                .is_empty(),
+            "vis-008 s1: stranger MUST see zero versions of a restricted lineage"
+        );
+        // s2: audience member sees the full restricted history.
+        assert_eq!(
+            srv.lineage(&restricted_lineage, Some(&audience))
+                .unwrap()
+                .len(),
+            2,
+            "vis-008 s2: audience member MUST see every restricted version"
+        );
+
+        // Mixed lineage: v1 public (→ superseded), v2 private.
+        let m1 = p
+            .publish_request()
+            .title("mixed v1 public")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let m1_resp = srv.publish_unverified_for_tests(&m1).unwrap();
+        let m2 = p
+            .supersede(m1_resp.ctx_id.clone())
+            .version(2)
+            .title("mixed v2 private")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Private)
+            .build()
+            .unwrap();
+        let m2_resp = srv.publish_unverified_for_tests(&m2).unwrap();
+        let mixed_lineage = m1_resp.lineage_id.clone();
+
+        // s3: stranger sees only the public v1 — the private v2 is a gap.
+        let stranger_view = srv.lineage(&mixed_lineage, Some(&stranger)).unwrap();
+        assert_eq!(
+            stranger_view.len(),
+            1,
+            "vis-008 s3: stranger sees only the visible subsequence"
+        );
+        assert_eq!(stranger_view[0].body.ctx_id, m1_resp.ctx_id);
+
+        // s4: stranger `current` → None (v2 private, v1 superseded).
+        assert!(
+            srv.current(&mixed_lineage, Some(&stranger))
+                .unwrap()
+                .is_none(),
+            "vis-008 s4: stranger MUST NOT reach the private current head"
+        );
+        // s5: producer `current` → the private v2.
+        let owner_cur = srv
+            .current(&mixed_lineage, Some(&owner))
+            .unwrap()
+            .expect("vis-008 s5: producer sees the private current head");
+        assert_eq!(owner_cur.body.ctx_id, m2_resp.ctx_id);
+    }
+
+    /// FEAT-03 / ret-002 — `current` returns the newest non-superseded
+    /// version: `expired` counts as a valid head, `superseded` never
+    /// does, and an all-superseded lineage resolves to `not_found`.
+    #[test]
+    fn ret_002_lineage_current_semantics() {
+        use chrono::{Duration, Utc};
+        let srv = server(true);
+        let p = producer();
+
+        // All versions superseded → current returns None.
+        {
+            let v1 = p
+                .publish_request()
+                .title("all-superseded v1")
+                .context_type(ContextType::DataSnapshot)
+                .visibility(Visibility::Public)
+                .build()
+                .unwrap();
+            let resp = srv.publish_unverified_for_tests(&v1).unwrap();
+            srv.store().mark_superseded(&resp.ctx_id).unwrap();
+            assert!(
+                srv.current(&resp.lineage_id, None).unwrap().is_none(),
+                "ret-002: an all-superseded lineage MUST resolve to None (RFC-ACDP-0004 §5.2)"
+            );
+        }
+
+        // Active head → current returns it with status active.
+        {
+            let v1 = p
+                .publish_request()
+                .title("active head v1")
+                .context_type(ContextType::DataSnapshot)
+                .visibility(Visibility::Public)
+                .build()
+                .unwrap();
+            let resp = srv.publish_unverified_for_tests(&v1).unwrap();
+            let cur = srv
+                .current(&resp.lineage_id, None)
+                .unwrap()
+                .expect("ret-002: an active head MUST be returned");
+            assert_eq!(cur.registry_state.status, Status::Active);
+        }
+
+        // Expired-but-unreplaced head → current returns it with status
+        // expired. 'current' does not imply 'active'.
+        {
+            let v1 = p
+                .publish_request()
+                .title("expired head v1")
+                .context_type(ContextType::DataSnapshot)
+                .visibility(Visibility::Public)
+                .expires_at(Utc::now() - Duration::days(30))
+                .build()
+                .unwrap();
+            let resp = srv.publish_unverified_for_tests(&v1).unwrap();
+            let cur = srv
+                .current(&resp.lineage_id, None)
+                .unwrap()
+                .expect("ret-002: an expired-but-unreplaced head IS a valid current head");
+            assert_eq!(
+                cur.registry_state.status,
+                Status::Expired,
+                "ret-002: current MUST carry status=expired so the consumer knows it lapsed"
             );
         }
     }

@@ -122,12 +122,12 @@ async fn verify_signature_envelope(
         AcdpError::KeyResolution(format!("signature.key_id '{key_id}' has no '#fragment'"))
     })?;
 
-    // Step 1.5: `key_id` DID portion MUST be did:web for v0.0.1
+    // Step 1.5: `key_id` DID portion MUST be did:web for v0.1.0
     // (RFC-ACDP-0001 §5.4). A key_id pointing to e.g. did:key would mean
     // the resolver path could not even find the key.
     if !did_part.starts_with("did:web:") {
         return Err(AcdpError::KeyNotAuthorized(format!(
-            "v0.0.1 signatures require did:web key_id; got '{did_part}'"
+            "v0.1.0 signatures require did:web key_id; got '{did_part}'"
         )));
     }
 

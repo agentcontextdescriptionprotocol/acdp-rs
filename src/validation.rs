@@ -11,7 +11,7 @@
 //!   structured-locator scheme pattern, embedded size cap, embedded
 //!   `content` typing per encoding
 //! - `metadata` runtime depth / JCS-size / property-count caps
-//! - `agent_id` DID pattern + `did:web` enforcement (v0.0.1)
+//! - `agent_id` DID pattern + `did:web` enforcement (v0.1.0)
 //! - Signature value length per algorithm
 //! - Embedded `content_hash` computation and verification
 //! - Identifier pattern validation (`ctx_id`, `lineage_id`, `content_hash`)
@@ -59,7 +59,7 @@ const ECDSA_P256_SIG_B64_LEN: usize = 88;
 /// constraints the schema cannot express:
 ///
 /// 1. `acdp_version` matches `^\d+\.\d+\.\d+$`.
-/// 2. `registry_did` is a v0.0.1 `did:web` DID.
+/// 2. `registry_did` is a v0.1.0 `did:web` DID.
 /// 3. `supported_signature_algorithms` MUST contain `"ed25519"`.
 /// 4. `supported_did_methods` MUST contain `"did:web"`.
 /// 5. `profiles` MUST contain `"acdp-registry-core"`.
@@ -76,7 +76,7 @@ pub fn validate_capabilities(caps: &crate::types::CapabilitiesDocument) -> Resul
 
     AgentDid::parse_web(caps.registry_did.as_str()).map_err(|e| {
         AcdpError::SchemaViolation(format!(
-            "capabilities.registry_did must be did:web for v0.0.1: {e}"
+            "capabilities.registry_did must be did:web for v0.1.0: {e}"
         ))
     })?;
 
@@ -543,16 +543,23 @@ pub fn compute_embedded_hash(emb: &EmbeddedContent) -> Result<ContentHash, AcdpE
 
 /// Verify a [`DataRef`]'s declared `content_hash` against its embedded payload.
 /// Does nothing if the ref has no `content_hash` or no `embedded`.
+///
+/// BUG-02: a mismatch is a *data-reference-level* integrity failure
+/// ([`AcdpError::DataRefHashMismatch`], wire code `data_ref_hash_mismatch`)
+/// — the embedded bytes diverged from the producer-declared hash, but the
+/// body's own `content_hash` / signature are unaffected. It is NOT the
+/// body-level [`AcdpError::HashMismatch`] (RFC-ACDP-0007 §5, data-ref-007).
 pub fn verify_embedded_hash(dr: &DataRef) -> Result<(), AcdpError> {
     let (Some(emb), Some(stored)) = (&dr.embedded, &dr.content_hash) else {
         return Ok(());
     };
     let recomputed = compute_embedded_hash(emb)?;
     if &recomputed != stored {
-        return Err(AcdpError::HashMismatch {
-            stored: stored.clone(),
-            recomputed,
-        });
+        return Err(AcdpError::DataRefHashMismatch(format!(
+            "embedded content_hash mismatch: declared {}, computed {}",
+            stored.as_str(),
+            recomputed.as_str()
+        )));
     }
     Ok(())
 }
@@ -717,7 +724,7 @@ fn validate_tag(tag: &str) -> Result<(), AcdpError> {
 
 /// Validate a DID used as `agent_id`.
 ///
-/// RFC-ACDP-0001 §5.4 mandates `did:web` for v0.0.1 producers. Earlier
+/// RFC-ACDP-0001 §5.4 mandates `did:web` for v0.1.0 producers. Earlier
 /// revisions accepted any method; this closes a silent acceptance bug
 /// for `did:key`-signed publications.
 fn validate_agent_did(did: &AgentDid) -> Result<(), AcdpError> {
@@ -762,7 +769,7 @@ fn validate_origin_registry(s: &str) -> Result<(), AcdpError> {
 /// Per the spec plan's RFC-FIX-11 method-scope table:
 /// - contributors[] SHOULD be `did:web` (attribution; no key resolution),
 /// - audience[] MAY be any DID method (authorization list; not resolved
-///   in v0.0.1).
+///   in v0.1.0).
 ///
 /// This helper enforces only the loose `did:` syntax (no method
 /// constraint) so other-method contributors are accepted.
@@ -877,6 +884,7 @@ mod tests {
             content_hash: None,
             location: None,
             embedded: None,
+            extensions: serde_json::Map::new(),
         };
         assert!(matches!(
             validate_data_ref(&dr),
@@ -895,6 +903,7 @@ mod tests {
             content_hash: None,
             location: Some(Location::Uri("https://x/y".into())),
             embedded: Some(embedded_json(json!({"a": 1}))),
+            extensions: serde_json::Map::new(),
         };
         assert!(matches!(
             validate_data_ref(&dr),
@@ -947,6 +956,7 @@ mod tests {
             content_hash: None,
             location: Some(Location::Structured(map)),
             embedded: None,
+            extensions: serde_json::Map::new(),
         };
         assert!(matches!(
             validate_data_ref(&dr),
@@ -980,6 +990,7 @@ mod tests {
             content_hash: None,
             location: Some(Location::Structured(bad)),
             embedded: None,
+            extensions: serde_json::Map::new(),
         };
         assert!(matches!(
             validate_data_ref(&dr),
@@ -1011,6 +1022,7 @@ mod tests {
                 encoding: EmbeddedEncoding::Utf8,
                 content: json!(42),
             }),
+            extensions: serde_json::Map::new(),
         };
         assert!(matches!(
             validate_data_ref(&dr),
@@ -1079,10 +1091,11 @@ mod tests {
             content_hash: Some(ContentHash("sha256:0000".into())),
             location: None,
             embedded: Some(emb),
+            extensions: serde_json::Map::new(),
         };
         assert!(matches!(
             verify_embedded_hash(&dr),
-            Err(AcdpError::HashMismatch { .. })
+            Err(AcdpError::DataRefHashMismatch(_))
         ));
     }
 
@@ -1231,9 +1244,9 @@ mod tests {
     /// T8 — `acdp_version` semver pattern is enforced.
     #[test]
     fn acdp_version_pattern_rejects_non_semver() {
-        validate_semver_pattern("acdp_version", "0.0.1").unwrap();
+        validate_semver_pattern("acdp_version", "0.1.0").unwrap();
         validate_semver_pattern("acdp_version", "10.20.30").unwrap();
-        assert!(validate_semver_pattern("acdp_version", "0.0.1-rc.1").is_err());
+        assert!(validate_semver_pattern("acdp_version", "0.1.0-rc.1").is_err());
         assert!(validate_semver_pattern("acdp_version", "0.0").is_err());
         assert!(validate_semver_pattern("acdp_version", "vee.zero.zero").is_err());
     }
@@ -1277,10 +1290,11 @@ mod tests {
                 encoding: EmbeddedEncoding::Json,
                 content: json!({"x": 1}),
             }),
+            extensions: serde_json::Map::new(),
         };
         assert!(matches!(
             verify_embedded_hash(&dr),
-            Err(AcdpError::HashMismatch { .. })
+            Err(AcdpError::DataRefHashMismatch(_))
         ));
     }
 

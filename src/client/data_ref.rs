@@ -208,14 +208,16 @@ fn check_sha256(bytes: &[u8], declared: &ContentHash) -> Result<(), AcdpError> {
     };
     let got = format!("{:x}", Sha256::digest(bytes));
     if got != declared_hex {
-        // BUG-07: a content-hash mismatch on external data is a data-
-        // integrity failure, not a cryptographic signature failure.
-        // `InvalidSignature` implies the producer's Ed25519 signature
-        // didn't verify, which is a key/key-binding problem — distinct
-        // from "the bytes the URL returned today aren't the bytes the
-        // producer hashed". `RemoteHashMismatch` is the correct shape.
-        return Err(AcdpError::RemoteHashMismatch(format!(
-            "data_ref content_hash mismatch: declared sha256:{declared_hex}, got sha256:{got}"
+        // BUG-02: a content-hash mismatch on external data is a
+        // data-reference-level integrity failure, not a body-level hash
+        // failure and not a signature failure. `invalid_signature`
+        // implies the producer's Ed25519 signature didn't verify (a
+        // key/key-binding problem); `hash_mismatch` implies the whole
+        // body is unverifiable. Neither is true here — the body is
+        // fine, only the bytes at this one location have diverged
+        // (RFC-ACDP-0007 §5 "Distinguishing hash failures", data-ref-008).
+        return Err(AcdpError::DataRefHashMismatch(format!(
+            "data_ref content_hash mismatch: declared sha256:{declared_hex}, computed sha256:{got}"
         )));
     }
     Ok(())
@@ -273,12 +275,12 @@ mod tests {
         )
         .await
         .unwrap_err();
-        // BUG-07: data-ref hash mismatch is a data-integrity failure,
-        // not a signature failure. `RemoteHashMismatch` is the correct
-        // variant; the old code mistakenly used `InvalidSignature`.
+        // BUG-02: data-ref hash mismatch is a data-reference-level
+        // integrity failure — `data_ref_hash_mismatch`, distinct from
+        // body-level `hash_mismatch` and from `invalid_signature`.
         assert!(
-            matches!(err, AcdpError::RemoteHashMismatch(_)),
-            "expected RemoteHashMismatch, got {err:?}"
+            matches!(err, AcdpError::DataRefHashMismatch(_)),
+            "expected DataRefHashMismatch, got {err:?}"
         );
     }
 
@@ -313,6 +315,7 @@ mod tests {
                 encoding: EmbeddedEncoding::Base64,
                 content: serde_json::json!(encoded),
             }),
+            extensions: serde_json::Map::new(),
         };
         let got = fetch_and_verify_data_ref(&dr, &StubFetcher { bytes: vec![] })
             .await
