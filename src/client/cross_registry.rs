@@ -80,7 +80,12 @@ pub struct CrossRegistryResolver {
     // the immutable `&self` API surface; contention is low since
     // authorities are few per walk.
     client_cache: Mutex<HashMap<String, RegistryClient>>,
-    caps_cache: Mutex<HashMap<String, (CapabilitiesDocument, Instant)>>,
+    /// Per-authority capabilities cache. The `Duration` is the
+    /// per-response TTL parsed from `Cache-Control: max-age=N` (capped
+    /// at 3600s per RFC-ACDP-0006 §4.2). Replaces an earlier shape
+    /// that used the resolver-wide `capabilities_ttl` for every entry,
+    /// ignoring the registry's own cache hint (BUG-09).
+    caps_cache: Mutex<HashMap<String, (CapabilitiesDocument, Instant, Duration)>>,
 }
 
 impl Default for CrossRegistryResolver {
@@ -327,32 +332,45 @@ impl CrossRegistryResolver {
         Ok(client)
     }
 
-    /// Return the cached capabilities for `authority`, fetching when the
-    /// cache is empty or stale per `ResolverOptions::capabilities_ttl`.
+    /// Return the cached capabilities for `authority`, fetching when
+    /// the entry is missing or its per-response TTL has elapsed.
+    ///
+    /// BUG-09: TTL comes from the response's `Cache-Control: max-age=N`
+    /// (clamped to `[1s, ResolverOptions::capabilities_ttl]` so the
+    /// resolver-wide ceiling still applies) rather than a fixed value.
+    /// A registry serving `Cache-Control: max-age=60` is honored; one
+    /// serving no `Cache-Control` falls back to the
+    /// [`RegistryClient::capabilities_with_ttl`] default (300s).
     async fn capabilities_for(
         &self,
         authority: &str,
         registry: &RegistryClient,
     ) -> Result<CapabilitiesDocument, AcdpError> {
-        // Fast path: cache hit + within TTL.
+        // Fast path: cache hit + within per-response TTL.
         {
             let cache = self.caps_cache.lock().unwrap();
-            if let Some((caps, fetched_at)) = cache.get(authority) {
-                if fetched_at.elapsed() < self.options.capabilities_ttl {
+            if let Some((caps, fetched_at, ttl)) = cache.get(authority) {
+                if fetched_at.elapsed() < *ttl {
                     return Ok(caps.clone());
                 }
             }
         }
-        let caps = registry.capabilities().await.map_err(|e| match e {
-            AcdpError::Http(_) | AcdpError::KeyResolutionUnreachable(_) => {
-                AcdpError::CrossRegistryResolutionFailed(format!(
-                    "could not reach registry '{authority}': {e}"
-                ))
-            }
-            other => other,
-        })?;
+        let (caps, response_ttl) = registry
+            .capabilities_with_ttl()
+            .await
+            .map_err(|e| match e {
+                AcdpError::Http(_) | AcdpError::KeyResolutionUnreachable(_) => {
+                    AcdpError::CrossRegistryResolutionFailed(format!(
+                        "could not reach registry '{authority}': {e}"
+                    ))
+                }
+                other => other,
+            })?;
+        // Clamp to the resolver-wide ceiling so a registry advertising
+        // an absurd `max-age` can't pin a stale doc indefinitely.
+        let ttl = response_ttl.min(self.options.capabilities_ttl);
         let mut cache = self.caps_cache.lock().unwrap();
-        cache.insert(authority.to_string(), (caps.clone(), Instant::now()));
+        cache.insert(authority.to_string(), (caps.clone(), Instant::now(), ttl));
         Ok(caps)
     }
 }

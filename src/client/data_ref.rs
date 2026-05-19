@@ -205,7 +205,13 @@ fn check_sha256(bytes: &[u8], declared: &ContentHash) -> Result<(), AcdpError> {
     };
     let got = format!("{:x}", Sha256::digest(bytes));
     if got != declared_hex {
-        return Err(AcdpError::InvalidSignature(format!(
+        // BUG-07: a content-hash mismatch on external data is a data-
+        // integrity failure, not a cryptographic signature failure.
+        // `InvalidSignature` implies the producer's Ed25519 signature
+        // didn't verify, which is a key/key-binding problem — distinct
+        // from "the bytes the URL returned today aren't the bytes the
+        // producer hashed". `RemoteHashMismatch` is the correct shape.
+        return Err(AcdpError::RemoteHashMismatch(format!(
             "data_ref content_hash mismatch: declared sha256:{declared_hex}, got sha256:{got}"
         )));
     }
@@ -264,7 +270,13 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, AcdpError::InvalidSignature(_)));
+        // BUG-07: data-ref hash mismatch is a data-integrity failure,
+        // not a signature failure. `RemoteHashMismatch` is the correct
+        // variant; the old code mistakenly used `InvalidSignature`.
+        assert!(
+            matches!(err, AcdpError::RemoteHashMismatch(_)),
+            "expected RemoteHashMismatch, got {err:?}"
+        );
     }
 
     #[tokio::test]

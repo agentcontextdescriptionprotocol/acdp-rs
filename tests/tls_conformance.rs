@@ -488,6 +488,124 @@ async fn fetch_report_happy_path() {
     );
 }
 
+/// BUG-05 — `VerificationPolicy::validate_body_schema = false` MUST
+/// actually skip the structural validator. Previously `verify_body`
+/// re-ran `validate_body` unconditionally so the knob was a no-op.
+///
+/// Construction: a body whose `summary` exceeds the 1000-char cap is
+/// structurally invalid but cryptographically sound. With the policy
+/// flag off, `fetch_with_policy` MUST succeed; with it on (the
+/// default), the same body MUST fail with `SchemaViolation`.
+#[tokio::test]
+async fn verification_policy_validate_body_schema_off_skips_structural_check() {
+    use acdp::client::{RegistryClient, VerificationPolicy, VerifiedContext};
+    use acdp::crypto::{compute_content_hash, derive_lineage_id};
+    use acdp::types::body::{Body, FullContext, RegistryState, Signature};
+    use acdp::types::primitives::{CtxId, Status};
+    use chrono::{TimeZone, Utc};
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let key = SigningKey::generate();
+    let pub_bytes = key.verifying_key_bytes();
+    let tls = TlsTestServer::start_with(|port| {
+        let did = format!("did:web:localhost%3A{port}");
+        did_doc_router(ed25519_did_doc(&did, "key-1", &pub_bytes))
+    })
+    .await;
+    let did = tls.did();
+    let key_id = format!("{did}#key-1");
+
+    let ctx_id = CtxId("acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into());
+    let lineage_id = derive_lineage_id(&ctx_id);
+    let created_at = Utc.with_ymd_and_hms(2026, 5, 18, 0, 0, 0).unwrap();
+
+    // Oversize summary: 1001 chars > MAX_SUMMARY_LEN. The body still
+    // hashes and signs correctly — the offense is purely structural.
+    let oversize_summary = "x".repeat(1001);
+    let mut body = Body {
+        ctx_id: ctx_id.clone(),
+        lineage_id,
+        origin_registry: "registry.example.com".into(),
+        created_at,
+        content_hash: acdp::types::ContentHash(String::new()),
+        signature: Signature {
+            algorithm: "ed25519".into(),
+            key_id: key_id.clone(),
+            value: String::new(),
+        },
+        version: 1,
+        supersedes: None,
+        agent_id: AgentDid::new(did.clone()),
+        contributors: vec![],
+        title: "BUG-05 fixture".into(),
+        context_type: ContextType::DataSnapshot,
+        data_refs: vec![],
+        derived_from: vec![],
+        visibility: Visibility::Public,
+        audience: None,
+        acdp_version: None,
+        description: None,
+        summary: Some(oversize_summary),
+        tags: None,
+        domain: None,
+        expires_at: None,
+        data_period: None,
+        metadata: None,
+        schema_uri: None,
+        extensions: Default::default(),
+    };
+    let body_value = serde_json::to_value(&body).unwrap();
+    body.content_hash = compute_content_hash(&body_value).unwrap();
+    body.signature.value = key.sign_content_hash(&body.content_hash);
+
+    let full_value = serde_json::to_value(FullContext {
+        body,
+        registry_state: RegistryState {
+            status: Status::Active,
+            extensions: Default::default(),
+        },
+        registry_receipt: None,
+    })
+    .unwrap();
+
+    let registry = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/contexts/.+"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(full_value))
+        .mount(&registry)
+        .await;
+    let client = RegistryClient::new(&registry.uri()).unwrap();
+    let resolver = WebResolver::with_root_cert_pem(&tls.root_cert_pem).unwrap();
+
+    // Default policy: structural validation enabled → MUST fail.
+    match VerifiedContext::fetch_with_policy(
+        &client,
+        &resolver,
+        &ctx_id,
+        &VerificationPolicy::default(),
+    )
+    .await
+    {
+        Ok(_) => panic!("default policy MUST reject oversize summary"),
+        Err(AcdpError::SchemaViolation(_)) => {}
+        Err(other) => panic!("default policy MUST surface SchemaViolation, got {other:?}"),
+    }
+
+    // Schema off: structural check skipped → MUST succeed (the
+    // signature and hash still verify).
+    let relaxed = VerificationPolicy {
+        validate_body_schema: false,
+        ..VerificationPolicy::default()
+    };
+    VerifiedContext::fetch_with_policy(&client, &resolver, &ctx_id, &relaxed)
+        .await
+        .expect(
+            "policy.validate_body_schema=false MUST skip structural validation \
+             (BUG-05 regression)",
+        );
+}
+
 /// FEAT-06 follow-up — when an embedded `DataRef`'s declared
 /// `content_hash` does NOT match the embedded payload, the report
 /// MUST record the mismatch in `data_ref_embedded[i]` instead of
