@@ -17,6 +17,7 @@ use crate::error::AcdpError;
 use crate::types::{
     body::{Body, FullContext, RegistryState},
     primitives::{AgentDid, CtxId, LineageId, Status, Visibility},
+    publish::{PublishRequest, PublishResponse},
     search::{SearchParams, SearchResponse, SearchResult},
 };
 
@@ -115,6 +116,70 @@ pub trait RegistryStore: Send + Sync {
     ) -> Result<(), AcdpError> {
         Ok(())
     }
+
+    // ── Atomic publish commit (FEAT-01) ────────────────────────────────
+
+    /// Atomically commit a publish: idempotency lookup, supersession
+    /// validation, body insertion, predecessor supersession marking,
+    /// and idempotency record write — all under a single critical
+    /// section so two concurrent publishes targeting the same
+    /// `supersedes` (or sharing an `idempotency_key`) cannot both
+    /// succeed.
+    ///
+    /// Eliminates the TOCTOU races that the old
+    /// `put → mark_superseded → idempotency_record` sequence allowed.
+    /// Returns:
+    /// - `Inserted(response)` — the body was newly persisted.
+    /// - `IdempotentReplay(response)` — a prior record with the same
+    ///   `(agent_id, key, content_hash)` was found and its response is
+    ///   replayed verbatim (idem-002).
+    ///
+    /// On supersession contention (predecessor already marked
+    /// `Superseded`, lineage mismatch, etc.) returns
+    /// `AcdpError::SupersededTarget { reason, … }`. On idempotency-key
+    /// collision with a different `content_hash` returns
+    /// `AcdpError::DuplicatePublish` (idem-003).
+    fn commit_publish(&self, commit: PublishCommit<'_>) -> Result<PublishCommitOutcome, AcdpError>;
+}
+
+/// Single-shot atomic publish input (FEAT-01).
+///
+/// Passed to [`RegistryStore::commit_publish`] so the predecessor
+/// lookup, supersession check, body insertion, predecessor
+/// supersession marking, and idempotency record are all done under one
+/// critical section. Eliminates TOCTOU races between two concurrent
+/// publishes that target the same `supersedes` ctx_id or share an
+/// `idempotency_key`.
+pub struct PublishCommit<'a> {
+    /// The validated, signature-verified publish request.
+    pub req: &'a PublishRequest,
+    /// The hostname the registry serves — used to mint `ctx_id`s and
+    /// stored verbatim into `body.origin_registry` (BUG-01).
+    pub authority: &'a str,
+    /// Idempotency wiring, present iff the registry advertises
+    /// `caps.supports_idempotency_key` and the request carries an
+    /// `Idempotency-Key`.
+    pub idempotency: Option<PendingIdempotencyCommit<'a>>,
+}
+
+/// Idempotency parameters threaded through [`PublishCommit`].
+pub struct PendingIdempotencyCommit<'a> {
+    /// The key the producer supplied in the `Idempotency-Key` header.
+    pub key: &'a str,
+    /// TTL after which the idempotency record may be evicted (typically
+    /// `caps.limits.idempotency_key_ttl_seconds`).
+    pub ttl: chrono::Duration,
+}
+
+/// Outcome of an atomic [`RegistryStore::commit_publish`].
+#[derive(Debug)]
+pub enum PublishCommitOutcome {
+    /// Fresh publish — the body was newly persisted and the response
+    /// describes the just-assigned identifiers.
+    Inserted(PublishResponse),
+    /// `(agent_id, idempotency_key)` had a prior record with the same
+    /// `content_hash` — return the original response per idem-002.
+    IdempotentReplay(PublishResponse),
 }
 
 /// Cached publish response keyed by `(agent_id, idempotency_key)`
@@ -355,6 +420,187 @@ impl RegistryStore for InMemoryStore {
         let mut g = self.lock();
         g.idempotency.retain(|_, r| r.expires_at > now);
         Ok(())
+    }
+
+    fn commit_publish(&self, commit: PublishCommit<'_>) -> Result<PublishCommitOutcome, AcdpError> {
+        use crate::registry::validator::assign_identifiers;
+
+        let PublishCommit {
+            req,
+            authority,
+            idempotency,
+        } = commit;
+        let now = chrono::Utc::now();
+        let mut g = self.lock();
+
+        // ── 1. Idempotency replay / collision ────────────────────────
+        if let Some(idem) = &idempotency {
+            let idem_key = (req.agent_id.as_str().to_string(), idem.key.to_string());
+            if let Some(prior) = g.idempotency.get(&idem_key) {
+                if prior.expires_at > now {
+                    return if prior.content_hash == req.content_hash {
+                        // idem-002: same key + same hash → replay.
+                        Ok(PublishCommitOutcome::IdempotentReplay(
+                            prior.response.clone(),
+                        ))
+                    } else {
+                        // idem-003: same key + different hash → duplicate_publish.
+                        Err(AcdpError::DuplicatePublish(format!(
+                            "Idempotency-Key '{}' was previously used by '{}' \
+                             with a different content_hash",
+                            idem.key, req.agent_id
+                        )))
+                    };
+                }
+                // Expired record — fall through and overwrite below.
+            }
+        }
+
+        // ── 2. Supersession lookups + coherence checks ──────────────
+        let first_v1 = if let Some(prev) = &req.supersedes {
+            let prev_full = g.by_ctx.get(prev.as_str()).cloned().ok_or_else(|| {
+                AcdpError::SupersededTarget {
+                    reason: crate::error::SupersessionReason::NotFound,
+                    message: format!("supersedes target '{prev}' not found in this registry"),
+                }
+            })?;
+
+            // Lineage coherence — when the producer self-verifies.
+            if let Some(declared) = &req.lineage_id {
+                if declared != &prev_full.body.lineage_id {
+                    return Err(AcdpError::SupersededTarget {
+                        reason: crate::error::SupersessionReason::LineageMismatch,
+                        message: format!(
+                            "declared lineage_id '{declared}' ≠ predecessor's '{}'",
+                            prev_full.body.lineage_id
+                        ),
+                    });
+                }
+            }
+            // Version coherence: new.version MUST be predecessor.version + 1.
+            if req.version != prev_full.body.version + 1 {
+                return Err(AcdpError::SupersededTarget {
+                    reason: crate::error::SupersessionReason::VersionMismatch,
+                    message: format!(
+                        "version {} ≠ predecessor.version + 1 ({})",
+                        req.version,
+                        prev_full.body.version + 1
+                    ),
+                });
+            }
+            // FEAT-01 atomicity: the check that previously raced with
+            // another concurrent publish. Now under the same lock as
+            // the insert below — exactly one of two contenders succeeds.
+            if matches!(prev_full.registry_state.status, Status::Superseded) {
+                return Err(AcdpError::SupersededTarget {
+                    reason: crate::error::SupersessionReason::AlreadySuperseded,
+                    message: format!("supersedes target '{prev}' has already been superseded"),
+                });
+            }
+
+            // Derive the v1 ctx_id from the predecessor's lineage —
+            // same logic as `first_version_ctx_id`, inlined to stay
+            // under the existing lock.
+            g.lineages
+                .get(prev_full.body.lineage_id.as_str())
+                .and_then(|ids| ids.first().cloned())
+                .map(CtxId)
+        } else {
+            None
+        };
+
+        // ── 3. Identifier assignment ────────────────────────────────
+        let validated = crate::registry::validator::ValidatedPublish {
+            recomputed_hash: req.content_hash.clone(),
+        };
+        let (ctx_id, lineage_id) =
+            assign_identifiers(authority, &req.supersedes, first_v1.as_ref(), &validated)?;
+
+        // ── 4. Build the stored Body ────────────────────────────────
+        let created_at = crate::time::trunc_ms(now);
+        let body = Body {
+            ctx_id: ctx_id.clone(),
+            lineage_id: lineage_id.clone(),
+            origin_registry: authority.to_string(),
+            created_at,
+            content_hash: req.content_hash.clone(),
+            signature: req.signature.clone(),
+            version: req.version,
+            supersedes: req.supersedes.clone(),
+            agent_id: req.agent_id.clone(),
+            contributors: req.contributors.clone(),
+            title: req.title.clone(),
+            context_type: req.context_type.clone(),
+            data_refs: req.data_refs.clone(),
+            derived_from: req.derived_from.clone(),
+            visibility: req.visibility.clone(),
+            audience: req.audience.clone(),
+            acdp_version: req.acdp_version.clone(),
+            description: req.description.clone(),
+            summary: req.summary.clone(),
+            tags: req.tags.clone(),
+            domain: req.domain.clone(),
+            expires_at: req.expires_at,
+            data_period: req.data_period.clone(),
+            metadata: req.metadata.clone(),
+            schema_uri: req.schema_uri.clone(),
+            extensions: Default::default(),
+        };
+
+        // ── 5. Insert (mirrors `put` but inline so we keep the lock) ─
+        let ctx_id_str = body.ctx_id.0.clone();
+        let lineage_id_str = body.lineage_id.0.clone();
+        if g.by_ctx.contains_key(&ctx_id_str) {
+            // UUID collision is astronomically unlikely but we still
+            // surface it as a SchemaViolation rather than silently
+            // overwriting.
+            return Err(AcdpError::SchemaViolation(format!(
+                "ctx_id collision: '{ctx_id_str}' already exists"
+            )));
+        }
+        let stored = FullContext {
+            body,
+            registry_state: RegistryState {
+                status: Status::Active,
+                extensions: Default::default(),
+            },
+            registry_receipt: None,
+        };
+        g.by_ctx.insert(ctx_id_str.clone(), stored);
+        g.lineages
+            .entry(lineage_id_str)
+            .or_default()
+            .push(ctx_id_str);
+
+        // ── 6. Mark predecessor superseded ──────────────────────────
+        if let Some(prev) = &req.supersedes {
+            if let Some(prev_ctx) = g.by_ctx.get_mut(prev.as_str()) {
+                prev_ctx.registry_state.status = Status::Superseded;
+            }
+        }
+
+        let response = PublishResponse {
+            ctx_id,
+            lineage_id,
+            version: req.version,
+            created_at,
+            status: Status::Active,
+        };
+
+        // ── 7. Idempotency record ───────────────────────────────────
+        if let Some(idem) = idempotency {
+            let expires_at = now + idem.ttl;
+            g.idempotency.insert(
+                (req.agent_id.as_str().to_string(), idem.key.to_string()),
+                IdempotencyRecord {
+                    content_hash: req.content_hash.clone(),
+                    response: response.clone(),
+                    expires_at,
+                },
+            );
+        }
+
+        Ok(PublishCommitOutcome::Inserted(response))
     }
 
     fn search(

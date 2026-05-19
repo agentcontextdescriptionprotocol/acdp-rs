@@ -30,7 +30,7 @@
 use crate::error::AcdpError;
 use crate::registry::rate_limit::{NoopRateLimiter, RateLimiter};
 use crate::registry::store::RegistryStore;
-use crate::registry::validator::{assign_identifiers, PublishValidator};
+use crate::registry::validator::PublishValidator;
 use crate::types::{
     body::{Body, FullContext},
     capabilities::CapabilitiesDocument,
@@ -146,52 +146,19 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
 
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
-        let validated = validator.validate_post_schema(req, raw_bytes)?;
-
-        // RFC-ACDP-0003 §6 — Idempotency-Key handling.
-        // idem-005: registries that don't support the header MUST ignore it.
-        if self.caps.supports_idempotency_key {
-            if let Some(key) = idempotency_key {
-                if let Some(prior) = self.store.idempotency_lookup(&req.agent_id, key)? {
-                    if prior.content_hash == req.content_hash {
-                        // idem-002: replay returns the original response unchanged.
-                        return Ok(prior.response);
-                    }
-                    // idem-003: same key, different hash → duplicate_publish.
-                    return Err(AcdpError::DuplicatePublish(format!(
-                        "Idempotency-Key '{key}' was previously used by '{}' \
-                         with a different content_hash",
-                        req.agent_id
-                    )));
-                }
-            }
-        }
+        let _validated = validator.validate_post_schema(req, raw_bytes)?;
 
         // Steps 7–8: DID resolution + signature verification.
         crate::crypto::verify::verify_publish_request_signature(req, resolver).await?;
 
-        // Steps 9–11: assign identifiers, enforce lineage coherence, persist.
-        let response = self.persist_validated(req, validated)?;
-
-        // Persist idempotency record AFTER successful publish (idem-001).
-        if self.caps.supports_idempotency_key {
-            if let Some(key) = idempotency_key {
-                let ttl_secs = self
-                    .caps
-                    .limits
-                    .idempotency_key_ttl_seconds
-                    .unwrap_or(86_400);
-                let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
-                self.store.idempotency_record(
-                    &req.agent_id,
-                    key,
-                    &req.content_hash,
-                    &response,
-                    expires_at,
-                )?;
-            }
-        }
-        Ok(response)
+        // FEAT-01: hand the rest of the pipeline to the store as a
+        // single atomic commit. Idempotency lookup, predecessor
+        // verification, body insertion, predecessor supersession
+        // marking, and idempotency record writing all happen under one
+        // critical section. Two concurrent publishes against the same
+        // `supersedes` (or the same `Idempotency-Key`) can no longer
+        // both succeed.
+        self.commit_via_store(req, idempotency_key)
     }
 
     /// **NOT RFC-conformant.** Skips DID resolution and signature
@@ -212,119 +179,42 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
 
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
-        let validated = validator.validate_post_schema(req, raw_bytes)?;
-        self.persist_validated(req, validated)
+        let _validated = validator.validate_post_schema(req, raw_bytes)?;
+        self.commit_via_store(req, None)
     }
 
-    /// Steps 9–11 in isolation: assumes the request has already been
-    /// validated and (where appropriate) signature-verified.
-    fn persist_validated(
+    /// Drive `RegistryStore::commit_publish` from a validated request.
+    /// Unwraps `PublishCommitOutcome::Inserted` and `IdempotentReplay`
+    /// to the same `PublishResponse` for the caller (the distinction
+    /// only matters internally for logging/tracing).
+    fn commit_via_store(
         &self,
         req: &PublishRequest,
-        validated: crate::registry::validator::ValidatedPublish,
+        idempotency_key: Option<&str>,
     ) -> Result<PublishResponse, AcdpError> {
-        // Determine the v1 ctx_id for lineage derivation on supersession.
-        let first_v1 = if let Some(prev) = &req.supersedes {
-            let prev_full = self
-                .store
-                .get(prev)?
-                .ok_or_else(|| AcdpError::SupersededTarget {
-                    reason: crate::error::SupersessionReason::NotFound,
-                    message: format!("supersedes target '{prev}' not found in this registry"),
-                })?;
-
-            // Lineage coherence: the new request's lineage_id (when
-            // declared) MUST match the predecessor's lineage_id.
-            if let Some(declared) = &req.lineage_id {
-                if declared != &prev_full.body.lineage_id {
-                    return Err(AcdpError::SupersededTarget {
-                        reason: crate::error::SupersessionReason::LineageMismatch,
-                        message: format!(
-                            "declared lineage_id '{declared}' ≠ predecessor's '{}'",
-                            prev_full.body.lineage_id
-                        ),
-                    });
-                }
-            }
-            // Version coherence: new.version MUST be predecessor.version + 1.
-            if req.version != prev_full.body.version + 1 {
-                return Err(AcdpError::SupersededTarget {
-                    reason: crate::error::SupersessionReason::VersionMismatch,
-                    message: format!(
-                        "version {} ≠ predecessor.version + 1 ({})",
-                        req.version,
-                        prev_full.body.version + 1
-                    ),
-                });
-            }
-            // Already-superseded check.
-            if matches!(prev_full.registry_state.status, Status::Superseded) {
-                return Err(AcdpError::SupersededTarget {
-                    reason: crate::error::SupersessionReason::AlreadySuperseded,
-                    message: format!("supersedes target '{prev}' has already been superseded"),
-                });
-            }
-
-            self.store
-                .first_version_ctx_id(&prev_full.body.lineage_id)?
+        let idempotency = if self.caps.supports_idempotency_key {
+            idempotency_key.map(|key| crate::registry::store::PendingIdempotencyCommit {
+                key,
+                ttl: chrono::Duration::seconds(
+                    self.caps
+                        .limits
+                        .idempotency_key_ttl_seconds
+                        .unwrap_or(86_400) as i64,
+                ),
+            })
         } else {
             None
         };
-
-        let (ctx_id, lineage_id) = assign_identifiers(
-            &self.authority,
-            &req.supersedes,
-            first_v1.as_ref(),
-            &validated,
-        )?;
-
-        // Build the stored Body from the request + registry-assigned fields.
-        // RFC-ACDP-0001 §5.3 requires millisecond precision on stored timestamps.
-        let created_at = crate::time::trunc_ms(chrono::Utc::now());
-        let body = Body {
-            ctx_id: ctx_id.clone(),
-            lineage_id: lineage_id.clone(),
-            // BUG-01: origin_registry MUST be a bare DNS hostname per
-            // acdp-context-body.schema.json #/$defs/hostname — not a
-            // `did:web:` URI. capabilities.registry_did carries the
-            // did:web form; body.origin_registry carries the hostname.
-            origin_registry: self.authority.clone(),
-            created_at,
-            content_hash: req.content_hash.clone(),
-            signature: req.signature.clone(),
-            version: req.version,
-            supersedes: req.supersedes.clone(),
-            agent_id: req.agent_id.clone(),
-            contributors: req.contributors.clone(),
-            title: req.title.clone(),
-            context_type: req.context_type.clone(),
-            data_refs: req.data_refs.clone(),
-            derived_from: req.derived_from.clone(),
-            visibility: req.visibility.clone(),
-            audience: req.audience.clone(),
-            acdp_version: req.acdp_version.clone(),
-            description: req.description.clone(),
-            summary: req.summary.clone(),
-            tags: req.tags.clone(),
-            domain: req.domain.clone(),
-            expires_at: req.expires_at,
-            data_period: req.data_period.clone(),
-            metadata: req.metadata.clone(),
-            schema_uri: req.schema_uri.clone(),
-            extensions: Default::default(),
-        };
-
-        self.store.put(body)?;
-        if let Some(prev) = &req.supersedes {
-            self.store.mark_superseded(prev)?;
-        }
-
-        Ok(PublishResponse {
-            ctx_id,
-            lineage_id,
-            version: req.version,
-            created_at,
-            status: Status::Active,
+        let outcome = self
+            .store
+            .commit_publish(crate::registry::store::PublishCommit {
+                req,
+                authority: &self.authority,
+                idempotency,
+            })?;
+        Ok(match outcome {
+            crate::registry::store::PublishCommitOutcome::Inserted(r)
+            | crate::registry::store::PublishCommitOutcome::IdempotentReplay(r) => r,
         })
     }
 
@@ -541,6 +431,82 @@ mod tests {
         // Current resolves to v2
         let cur = server.current(&v1.lineage_id, None).unwrap().unwrap();
         assert_eq!(cur.body.ctx_id, v2.ctx_id);
+    }
+
+    /// FEAT-01: two concurrent publishes that both supersede the same
+    /// v1 MUST resolve to exactly one success + one
+    /// `SupersededTarget { AlreadySuperseded }`. The race was possible
+    /// when the supersedes check, body insert, and predecessor mark
+    /// lived in separate mutex acquisitions; `commit_publish` puts
+    /// them under one critical section so only one of two contenders
+    /// wins (RFC-ACDP-0003 §6).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_supersession_exactly_one_succeeds() {
+        use std::sync::Arc;
+        let server = Arc::new(RegistryServer::new(
+            InMemoryStore::new(),
+            caps(),
+            "registry.example.com",
+        ));
+        let p = producer();
+        let v1_req = p
+            .publish_request()
+            .title("v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let v1 = server.publish_unverified_for_tests(&v1_req).unwrap();
+
+        // Pre-build BOTH v2 requests up front, then fire them in
+        // parallel on a multi-threaded runtime. With the prior
+        // non-atomic sequence the test would fail intermittently;
+        // with `commit_publish` it's deterministic.
+        let v2a_req = p
+            .supersede(v1.ctx_id.clone())
+            .version(2)
+            .title("v2-A")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let v2b_req = p
+            .supersede(v1.ctx_id.clone())
+            .version(2)
+            .title("v2-B")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let s1 = Arc::clone(&server);
+        let s2 = Arc::clone(&server);
+        let h1 = tokio::task::spawn_blocking(move || s1.publish_unverified_for_tests(&v2a_req));
+        let h2 = tokio::task::spawn_blocking(move || s2.publish_unverified_for_tests(&v2b_req));
+        let (r1, r2) = (h1.await.unwrap(), h2.await.unwrap());
+
+        let outcomes = [r1, r2];
+        let successes = outcomes.iter().filter(|r| r.is_ok()).count();
+        let failures = outcomes.iter().filter(|r| r.is_err()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent supersession MUST succeed; got {successes} successes / {failures} failures"
+        );
+        assert_eq!(failures, 1);
+        // The loser MUST get AlreadySuperseded — the predecessor was
+        // marked under the same lock the winner used.
+        for r in &outcomes {
+            if let Err(e) = r {
+                match e {
+                    AcdpError::SupersededTarget { reason, .. } => assert_eq!(
+                        *reason,
+                        crate::error::SupersessionReason::AlreadySuperseded,
+                        "concurrent loser MUST be AlreadySuperseded"
+                    ),
+                    other => panic!("concurrent loser had wrong error: {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]
