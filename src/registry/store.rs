@@ -56,17 +56,18 @@ pub trait RegistryStore: Send + Sync {
     /// | `restricted` | producer (`agent_id`) **or** any DID in `audience` |
     /// | `private`    | producer (`agent_id`) only — audience members must already know the ctx_id |
     ///
-    /// `requester == None` represents an anonymous caller; only `Public`
-    /// contexts may surface, and the implementation MAY further restrict
-    /// based on `capabilities.anonymous_public_reads` (that flag lives in
-    /// [`RegistryServer`](super::server::RegistryServer); the store
-    /// itself does not see it).
+    /// `requester == None` represents an anonymous caller. Public
+    /// contexts surface only when `anonymous_public_reads` is true (the
+    /// capability flag from [`RegistryServer`](super::server::RegistryServer));
+    /// the store implements the same predicate as `RegistryServer::retrieve`
+    /// so the two endpoints stay symmetric (RFC-ACDP-0008 §4.5).
     ///
     /// Projection follows RFC-ACDP-0005 §2.2 `match_summary`.
     fn search(
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
     ) -> Result<SearchResponse, AcdpError>;
 
     // ── Idempotency (RFC-ACDP-0003 §6) ─────────────────────────────────
@@ -196,9 +197,20 @@ pub(crate) fn project_context(
 /// Note the asymmetry vs retrieval: a `Private` context surfaces in search
 /// **only** to its producer — audience members must already know the
 /// `ctx_id` to fetch it. `Restricted` surfaces to producer + audience.
-fn can_surface_in_search(body: &Body, requester: Option<&AgentDid>) -> bool {
+///
+/// `anonymous_public_reads` mirrors the capability advertisement
+/// (RFC-ACDP-0008 §4.5): a registry that does NOT permit anonymous
+/// public reads MUST suppress public contexts for unauthenticated
+/// callers in both `retrieve` and `search`. The retrieval helper
+/// already consults this flag; this function pulls it through to the
+/// store-side search path (BUG-02).
+fn can_surface_in_search(
+    body: &Body,
+    requester: Option<&AgentDid>,
+    anonymous_public_reads: bool,
+) -> bool {
     match body.visibility {
-        Visibility::Public => true,
+        Visibility::Public => anonymous_public_reads || requester.is_some(),
         Visibility::Restricted => match requester {
             None => false,
             Some(r) => {
@@ -264,20 +276,26 @@ impl RegistryStore for InMemoryStore {
         let Some(ids) = g.lineages.get(lineage_id.as_str()) else {
             return Ok(None);
         };
-        // Prefer the last `Active` (after projection); fall back to the
-        // last entry projected. An expired predecessor is not "current".
+        // RFC-ACDP-0004 §5: "Returns the unique version that has no
+        // successor. If no such version exists, returns not_found."
+        // Walk newest-to-oldest and return the first non-`Superseded`
+        // version. Both `Active` and `Expired` count — an expired
+        // body that hasn't been replaced is still the latest, and the
+        // consumer needs to see it (with status=Expired) to know it
+        // has lapsed.
+        //
+        // BUG-04: an earlier fallback returned the last entry even when
+        // every version was `Superseded`; that's a protocol violation.
+        // Now we return `None` instead.
         for id in ids.iter().rev() {
             if let Some(ctx) = g.by_ctx.get(id) {
                 let projected = project_context(ctx.clone(), now);
-                if matches!(projected.registry_state.status, Status::Active) {
+                if !matches!(projected.registry_state.status, Status::Superseded) {
                     return Ok(Some(projected));
                 }
             }
         }
-        Ok(ids
-            .last()
-            .and_then(|id| g.by_ctx.get(id).cloned())
-            .map(|c| project_context(c, now)))
+        Ok(None)
     }
 
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
@@ -343,6 +361,7 @@ impl RegistryStore for InMemoryStore {
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
     ) -> Result<SearchResponse, AcdpError> {
         let g = self.lock();
         let now = chrono::Utc::now();
@@ -378,7 +397,7 @@ impl RegistryStore for InMemoryStore {
                 // RFC-ACDP-0008 §4.5 search-disclosure gate (note the
                 // private/restricted asymmetry: private contexts surface
                 // in search only to their producer).
-                if !can_surface_in_search(body, requester) {
+                if !can_surface_in_search(body, requester, anonymous_public_reads) {
                     return false;
                 }
 
@@ -723,7 +742,7 @@ mod tests {
             chrono::Utc::now() - Duration::hours(1),
         ))
         .unwrap();
-        let resp = s.search(&SearchParams::default(), None).unwrap();
+        let resp = s.search(&SearchParams::default(), None, true).unwrap();
         assert!(
             resp.matches.is_empty(),
             "expired must not surface under status=active default"
@@ -736,6 +755,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
@@ -763,6 +783,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 0);
@@ -774,6 +795,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
@@ -789,6 +811,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
@@ -819,6 +842,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(p1.matches.len(), 2);
@@ -831,6 +855,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(p2.matches.len(), 2);
@@ -853,6 +878,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap_err();
         assert!(matches!(err, AcdpError::InvalidCursor(_)));
@@ -874,6 +900,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         // Only `active` matches — superseded "old" filtered out.
@@ -885,6 +912,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
