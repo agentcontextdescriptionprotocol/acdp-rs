@@ -328,7 +328,7 @@ fn validate_body_inner(body: &Body, check_embedded_hashes: bool) -> Result<(), A
     }
 
     let _ = &body.created_at; // schema-derived; serde already enforces RFC 3339
-    let _ = &body.origin_registry;
+    validate_origin_registry(&body.origin_registry)?;
 
     // Avoid unused-import warnings on Status / Visibility
     let _ = std::any::type_name::<Status>();
@@ -722,6 +722,38 @@ fn validate_tag(tag: &str) -> Result<(), AcdpError> {
 /// for `did:key`-signed publications.
 fn validate_agent_did(did: &AgentDid) -> Result<(), AcdpError> {
     AgentDid::parse_web(did.as_str())?;
+    Ok(())
+}
+
+/// Validate `body.origin_registry` per `acdp-context-body.schema.json`
+/// (RFC-ACDP-0002 §3.1, fixture body-001/body-002).
+///
+/// MUST be a bare DNS hostname — NOT a `did:web:` URI, NOT a URL.
+/// `capabilities.registry_did` carries the `did:web` encoding; the
+/// stored body carries the hostname encoding. Storing either form in
+/// the other field is a conformance violation.
+fn validate_origin_registry(s: &str) -> Result<(), AcdpError> {
+    if s.is_empty() {
+        return Err(AcdpError::SchemaViolation(
+            "origin_registry must be a non-empty DNS hostname".into(),
+        ));
+    }
+    if s.starts_with("did:") {
+        return Err(AcdpError::SchemaViolation(format!(
+            "origin_registry must be a DNS hostname, not a DID URI (got '{s}'); \
+             use the bare authority — capabilities.registry_did carries the did:web form"
+        )));
+    }
+    if s.contains("://") {
+        return Err(AcdpError::SchemaViolation(format!(
+            "origin_registry must be a DNS hostname, not a URL (got '{s}')"
+        )));
+    }
+    if s.ends_with('.') || s.starts_with('.') {
+        return Err(AcdpError::SchemaViolation(format!(
+            "origin_registry must be a syntactically valid DNS hostname (got '{s}')"
+        )));
+    }
     Ok(())
 }
 

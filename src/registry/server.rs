@@ -78,7 +78,9 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
     ) -> Result<Self, AcdpError> {
         let authority = authority.into();
         crate::validation::validate_capabilities(&caps)?;
-        let expected_did = format!("did:web:{authority}");
+        // BUG-06: percent-encode `:` in `host:port` authorities — the
+        // colon is a structural separator in did:web.
+        let expected_did = crate::did::authority_to_did_web(&authority);
         if caps.registry_did != expected_did {
             return Err(AcdpError::SchemaViolation(format!(
                 "capabilities.registry_did '{}' does not match expected '{expected_did}' \
@@ -282,7 +284,11 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         let body = Body {
             ctx_id: ctx_id.clone(),
             lineage_id: lineage_id.clone(),
-            origin_registry: format!("did:web:{}", self.authority),
+            // BUG-01: origin_registry MUST be a bare DNS hostname per
+            // acdp-context-body.schema.json #/$defs/hostname — not a
+            // `did:web:` URI. capabilities.registry_did carries the
+            // did:web form; body.origin_registry carries the hostname.
+            origin_registry: self.authority.clone(),
             created_at,
             content_hash: req.content_hash.clone(),
             signature: req.signature.clone(),
@@ -358,13 +364,48 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
     }
 
     /// `GET /lineages/{lineage_id}`.
-    pub fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
-        self.store.lineage(lineage_id)
+    ///
+    /// BUG-03: applies the same visibility filter as `retrieve`. A
+    /// caller who knows or guesses a `lineage_id` must not be able to
+    /// surface restricted or private bodies through the lineage
+    /// endpoint when `retrieve(ctx_id, requester)` would deny them.
+    pub fn lineage(
+        &self,
+        lineage_id: &LineageId,
+        requester: Option<&AgentDid>,
+    ) -> Result<Vec<FullContext>, AcdpError> {
+        let all = self.store.lineage(lineage_id)?;
+        Ok(all
+            .into_iter()
+            .filter(|ctx| can_retrieve(&ctx.body, requester, &self.caps))
+            .collect())
     }
 
     /// `GET /lineages/{lineage_id}/current`.
-    pub fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
-        self.store.current(lineage_id)
+    ///
+    /// BUG-03 + BUG-04: returns the newest non-`Superseded` version
+    /// visible to the requester. `None` when the lineage is unknown,
+    /// when every version is superseded (RFC-ACDP-0004 §5), or when no
+    /// visible version exists.
+    pub fn current(
+        &self,
+        lineage_id: &LineageId,
+        requester: Option<&AgentDid>,
+    ) -> Result<Option<FullContext>, AcdpError> {
+        let all = self.store.lineage(lineage_id)?;
+        // `lineage` returns versions ordered from v1 → vN; iterate in
+        // reverse to find the newest non-superseded version. `Active`
+        // and `Expired` both qualify as valid current heads (a body
+        // that expired without being superseded is still the latest
+        // and the consumer needs to see it to know it has lapsed).
+        for ctx in all.into_iter().rev() {
+            if !matches!(ctx.registry_state.status, Status::Superseded)
+                && can_retrieve(&ctx.body, requester, &self.caps)
+            {
+                return Ok(Some(ctx));
+            }
+        }
+        Ok(None)
     }
 
     /// `GET /contexts/search`.
@@ -377,7 +418,12 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         params: &SearchParams,
         requester: Option<&AgentDid>,
     ) -> Result<SearchResponse, AcdpError> {
-        self.store.search(params, requester)
+        // BUG-02: pass `anonymous_public_reads` to the store so search
+        // and retrieve agree. A registry advertising the flag as false
+        // MUST suppress public contexts for anonymous callers in BOTH
+        // endpoints (RFC-ACDP-0008 §4.5).
+        self.store
+            .search(params, requester, self.caps.anonymous_public_reads)
     }
 }
 
@@ -454,10 +500,10 @@ mod tests {
         let ctx = server.retrieve(&resp.ctx_id, None).unwrap().unwrap();
         assert_eq!(ctx.body.title, "v1");
         // Lineage round-trip
-        let lineage = server.lineage(&resp.lineage_id).unwrap();
+        let lineage = server.lineage(&resp.lineage_id, None).unwrap();
         assert_eq!(lineage.len(), 1);
         // Current points at the same record
-        let cur = server.current(&resp.lineage_id).unwrap().unwrap();
+        let cur = server.current(&resp.lineage_id, None).unwrap().unwrap();
         assert_eq!(cur.body.ctx_id, resp.ctx_id);
     }
 
@@ -493,7 +539,7 @@ mod tests {
         // Same lineage
         assert_eq!(v1.lineage_id, v2.lineage_id);
         // Current resolves to v2
-        let cur = server.current(&v1.lineage_id).unwrap().unwrap();
+        let cur = server.current(&v1.lineage_id, None).unwrap().unwrap();
         assert_eq!(cur.body.ctx_id, v2.ctx_id);
     }
 
@@ -573,6 +619,165 @@ mod tests {
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
         assert_eq!(resp.matches[0].title, "Q1 portfolio risk");
+    }
+
+    // ── BUG-03 — lineage/current visibility filtering ──────────────────
+
+    /// BUG-03: a stranger calling `lineage()` MUST NOT see restricted
+    /// bodies they aren't on the audience for. The retrieval predicate
+    /// is now mirrored here.
+    #[test]
+    fn lineage_filters_restricted_for_stranger() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let audience = AgentDid::new("did:web:audience.example.com:reader");
+        let req = p
+            .publish_request()
+            .title("restricted v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Restricted)
+            .audience(vec![audience.clone()])
+            .build()
+            .unwrap();
+        let resp = server.publish_unverified_for_tests(&req).unwrap();
+
+        let stranger = AgentDid::new("did:web:other.example.com:reader");
+        let stranger_view = server.lineage(&resp.lineage_id, Some(&stranger)).unwrap();
+        assert!(
+            stranger_view.is_empty(),
+            "stranger MUST NOT see restricted bodies via lineage(); got {} entries",
+            stranger_view.len()
+        );
+
+        let audience_view = server.lineage(&resp.lineage_id, Some(&audience)).unwrap();
+        assert_eq!(
+            audience_view.len(),
+            1,
+            "audience member MUST see the restricted body via lineage()"
+        );
+    }
+
+    /// BUG-03: `current()` also filters by requester visibility.
+    /// A stranger gets `None` for a private lineage.
+    #[test]
+    fn current_filters_private_for_stranger() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("private v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Private)
+            .build()
+            .unwrap();
+        let resp = server.publish_unverified_for_tests(&req).unwrap();
+
+        let stranger = AgentDid::new("did:web:other.example.com:reader");
+        assert!(
+            server
+                .current(&resp.lineage_id, Some(&stranger))
+                .unwrap()
+                .is_none(),
+            "stranger MUST NOT see private contexts via current()"
+        );
+
+        let producer_did = AgentDid::new("did:web:agents.example.com:test");
+        assert!(
+            server
+                .current(&resp.lineage_id, Some(&producer_did))
+                .unwrap()
+                .is_some(),
+            "producer MUST see private contexts via current()"
+        );
+    }
+
+    // ── BUG-04 — current() superseded fallback ─────────────────────────
+
+    /// BUG-04: when every version of a lineage is `Superseded`,
+    /// `current()` MUST return `None`. Previously the fallback returned
+    /// the last entry projected, which is a protocol violation
+    /// (RFC-ACDP-0004 §5: "If no such version exists, returns not_found").
+    ///
+    /// Constructing an all-superseded lineage requires a direct store
+    /// mark — there's no publish path that produces this state today,
+    /// but the registry's `current()` MUST not implicitly fall through.
+    #[test]
+    fn current_returns_none_when_all_superseded() {
+        use crate::registry::store::RegistryStore;
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let resp = server.publish_unverified_for_tests(&req).unwrap();
+        // Force the only version into Superseded directly.
+        server.store().mark_superseded(&resp.ctx_id).unwrap();
+
+        let cur = server.current(&resp.lineage_id, None).unwrap();
+        assert!(
+            cur.is_none(),
+            "all-superseded lineage MUST resolve to None per RFC-ACDP-0004 §5; got {cur:?}"
+        );
+    }
+
+    // ── BUG-02 — search honors anonymous_public_reads ──────────────────
+
+    /// BUG-02: a registry advertising `anonymous_public_reads: false`
+    /// MUST suppress public contexts from anonymous search results
+    /// (matching the behavior of `retrieve`). Same context surfaces
+    /// once the requester authenticates.
+    #[test]
+    fn search_suppresses_public_when_anonymous_public_reads_false() {
+        let mut c = caps();
+        c.anonymous_public_reads = false;
+        let server = RegistryServer::new(InMemoryStore::new(), c, "registry.example.com");
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("public-but-flag-off")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        server.publish_unverified_for_tests(&req).unwrap();
+
+        // Anonymous: must NOT see the public context (capability says so).
+        let anon = server
+            .search(
+                &SearchParams {
+                    q: Some("public-but-flag-off".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert!(
+            anon.matches.is_empty(),
+            "anonymous search MUST be empty when anonymous_public_reads=false; got {} matches",
+            anon.matches.len()
+        );
+
+        // Authenticated requester (any DID — public is universally visible
+        // once authenticated): MUST see the context.
+        let stranger = AgentDid::new("did:web:other.example.com:reader");
+        let authed = server
+            .search(
+                &SearchParams {
+                    q: Some("public-but-flag-off".into()),
+                    ..Default::default()
+                },
+                Some(&stranger),
+            )
+            .unwrap();
+        assert_eq!(
+            authed.matches.len(),
+            1,
+            "authenticated search MUST see public contexts regardless of anonymous_public_reads"
+        );
     }
 
     // ── try_new validation tests ────────────────────────────────────────

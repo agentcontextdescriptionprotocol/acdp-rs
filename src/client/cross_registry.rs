@@ -193,7 +193,9 @@ impl CrossRegistryResolver {
         let caps = self.capabilities_for(&authority, &registry).await?;
 
         // Step 3a: capabilities.registry_did MUST be `did:web:<authority>`.
-        let expected_did = format!("did:web:{authority}");
+        // BUG-06: percent-encode `:` for host:port authorities so the
+        // expected DID round-trips with `authority_to_did_web`.
+        let expected_did = crate::did::authority_to_did_web(&authority);
         if caps.registry_did != expected_did {
             return Err(AcdpError::CrossRegistryResolutionFailed(format!(
                 "registry DID '{}' does not match expected '{expected_did}'",

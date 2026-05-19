@@ -412,7 +412,7 @@ async fn fetch_report_happy_path() {
     let body = Body {
         ctx_id: ctx_id.clone(),
         lineage_id,
-        origin_registry: "did:web:registry.example.com".into(),
+        origin_registry: "registry.example.com".into(),
         created_at: Utc.with_ymd_and_hms(2026, 5, 10, 0, 0, 0).unwrap(),
         content_hash: req.content_hash.clone(),
         signature: Signature {
@@ -549,7 +549,7 @@ async fn fetch_report_records_embedded_hash_failure() {
     let mut body = Body {
         ctx_id: ctx_id.clone(),
         lineage_id,
-        origin_registry: "did:web:registry.example.com".into(),
+        origin_registry: "registry.example.com".into(),
         created_at,
         // placeholder — recomputed below
         content_hash: ContentHash(String::new()),
