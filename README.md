@@ -4,9 +4,9 @@
 [![Crates.io](https://img.shields.io/crates/v/acdp.svg)](https://crates.io/crates/acdp)
 [![docs.rs](https://img.shields.io/docsrs/acdp)](https://docs.rs/acdp)
 [![License](https://img.shields.io/crates/l/acdp.svg)](#license)
-[![MSRV](https://img.shields.io/badge/MSRV-1.75-blue)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
+[![MSRV](https://img.shields.io/badge/MSRV-1.86-blue)](https://blog.rust-lang.org/2025/04/03/Rust-1.86.0.html)
 
-Rust library for the **Agent Context Description Protocol (ACDP v0.0.1)**.
+Rust library for the **Agent Context Description Protocol (ACDP v0.1.0)**.
 
 ACDP lets agents publish immutable, producer-signed context descriptors,
 retrieve and verify them locally, discover them by keyword, and follow signed
@@ -47,13 +47,13 @@ registry implementers compose into `acdp-registry-core` /
   signs ProducerContent; the SHA-256 of its JCS-canonicalized bytes
   is the body's `content_hash`.
 - **RegistryState** — the mutable, registry-derived state (`status` in
-  v0.0.1) returned alongside the Body on retrieval.
+  v0.1.0) returned alongside the Body on retrieval.
 - **Lineage** — a chain of contexts representing successive versions of
   the same logical work, identified by a stable `lineage_id` derived
   from the v1 ctx_id.
 - **JCS** — JSON Canonicalization Scheme (RFC 8785). The deterministic
   serialization used as the SHA-256 input for `content_hash`.
-- **DID** — Decentralized Identifier (W3C). v0.0.1 producers MUST use
+- **DID** — Decentralized Identifier (W3C). v0.1.0 producers MUST use
   `did:web` so their keys can be resolved over HTTPS.
 
 ## Features

@@ -6,6 +6,7 @@ use crate::error::AcdpError;
 use {
     super::document::DidDocument,
     crate::limits::{CONNECT_TIMEOUT, MAX_METADATA_BYTES, MAX_REDIRECTS, REQUEST_TIMEOUT},
+    crate::safe_http::SsrfPolicy,
     lru::LruCache,
     reqwest::redirect,
     std::num::NonZeroUsize,
@@ -29,10 +30,23 @@ struct CacheEntry {
 /// Caches resolved documents for 5–24 hours per §5.11 guidance, evicting
 /// the least-recently-used entry once the cache reaches the configured
 /// capacity (default 1000).
+///
+/// Every resolution URL passes the [`SsrfPolicy`] gate before any socket
+/// activity: a producer-controlled `did:web` authority is an SSRF vector
+/// identical to a cross-registry reference (RFC-ACDP-0008 §4.8). The
+/// default policy refuses IP-literal authorities and non-HTTPS schemes,
+/// so `did:web:127.0.0.1` / `did:web:169.254.169.254` cannot turn a
+/// registry verifying a publish — or a consumer verifying a retrieved
+/// context — into an SSRF proxy against process-internal listeners.
 #[cfg(feature = "client")]
 pub struct WebResolver {
     http: reqwest::Client,
     cache: Arc<Mutex<LruCache<String, CacheEntry>>>,
+    ssrf_policy: SsrfPolicy,
+    // Stored verbatim so [`Self::with_ssrf_policy`] can rebuild the
+    // HTTP client (the DNS resolver is wired in at builder time, so a
+    // policy swap requires rebuilding).
+    root_cert_pem: Option<Vec<u8>>,
 }
 
 #[cfg(feature = "client")]
@@ -49,8 +63,8 @@ impl WebResolver {
     /// Panics if `capacity == 0`. Use a positive capacity; the LRU
     /// model has no semantically valid empty configuration.
     pub fn with_capacity(capacity: usize) -> Self {
-        let http = build_http_client(None).expect("failed to build HTTP client for DID resolver");
-        Self::from_parts(http, capacity)
+        Self::from_parts(capacity, SsrfPolicy::default(), None)
+            .expect("failed to build HTTP client for DID resolver")
     }
 
     /// Build a resolver that trusts the given PEM-encoded root certificate
@@ -63,22 +77,54 @@ impl WebResolver {
     /// callers on corporate intranets MAY also use this to trust a
     /// private CA.
     pub fn with_root_cert_pem(pem: &[u8]) -> Result<Self, AcdpError> {
-        let http = build_http_client(Some(pem))?;
-        Ok(Self::from_parts(http, DEFAULT_CACHE_CAPACITY))
+        Self::from_parts(
+            DEFAULT_CACHE_CAPACITY,
+            SsrfPolicy::default(),
+            Some(pem.to_vec()),
+        )
     }
 
     /// Build a resolver with a custom LRU capacity AND a custom root cert.
     pub fn with_capacity_and_root_cert_pem(capacity: usize, pem: &[u8]) -> Result<Self, AcdpError> {
-        let http = build_http_client(Some(pem))?;
-        Ok(Self::from_parts(http, capacity))
+        Self::from_parts(capacity, SsrfPolicy::default(), Some(pem.to_vec()))
     }
 
-    fn from_parts(http: reqwest::Client, capacity: usize) -> Self {
+    fn from_parts(
+        capacity: usize,
+        ssrf_policy: SsrfPolicy,
+        root_cert_pem: Option<Vec<u8>>,
+    ) -> Result<Self, AcdpError> {
         let cap = NonZeroUsize::new(capacity).expect("WebResolver capacity must be > 0");
-        Self {
+        let http = build_http_client(root_cert_pem.as_deref(), &ssrf_policy)?;
+        Ok(Self {
             http,
             cache: Arc::new(Mutex::new(LruCache::new(cap))),
-        }
+            ssrf_policy,
+            root_cert_pem,
+        })
+    }
+
+    /// Override the [`SsrfPolicy`] applied to `did:web` resolution.
+    ///
+    /// The policy gates both the URL stage (refusing IP-literal
+    /// authorities and non-HTTPS schemes — fixtures did-ssrf-001/002/003)
+    /// **and** the DNS resolution stage (filtering hostnames that resolve
+    /// into forbidden ranges — RFC-ACDP-0008 §4.8 DNS-rebinding
+    /// protection). Calling this rebuilds the underlying HTTP client so
+    /// the DNS resolver hook reflects the new policy.
+    ///
+    /// Relax the policy **only** in a test harness that resolves
+    /// `did:web:localhost…` against an in-process loopback server.
+    /// Production callers MUST keep the default.
+    pub fn with_ssrf_policy(mut self, policy: SsrfPolicy) -> Self {
+        // Rebuild the HTTP client so the DNS resolver hook carries the
+        // new policy. `build_http_client` is fallible only on bad cert
+        // PEM input; we already validated it at construction time.
+        let http = build_http_client(self.root_cert_pem.as_deref(), &policy)
+            .expect("rebuild HTTP client for DID resolver");
+        self.http = http;
+        self.ssrf_policy = policy;
+        self
     }
 
     /// Resolve a `did:web:…` DID to a DID document.
@@ -98,19 +144,25 @@ impl WebResolver {
         }
 
         let url = did_web_to_url(did)?;
+
+        // RFC-ACDP-0008 §4.8: a producer-controlled did:web authority is
+        // an SSRF vector. Refuse loopback / link-local / IMDS / private-
+        // range targets before issuing any request. The refusal is
+        // policy-driven and producer-caused, so it maps to
+        // `key_resolution_failed` (HTTP 400, permanent) — NOT
+        // `key_resolution_unreachable` (HTTP 502, retryable). See
+        // fixtures did-ssrf-001 / did-ssrf-002 / did-ssrf-003.
+        self.ssrf_policy.check_url(&url).map_err(|e| {
+            AcdpError::KeyResolution(format!("SSRF policy blocked did:web resolution: {e}"))
+        })?;
+
         let mut resp = self
             .http
             .get(&url)
             .header("Accept", "application/did+json, application/json")
             .send()
             .await
-            .map_err(|e| {
-                if e.is_timeout() || e.is_connect() {
-                    AcdpError::KeyResolutionUnreachable(e.to_string())
-                } else {
-                    AcdpError::KeyResolution(e.to_string())
-                }
-            })?;
+            .map_err(|e| classify_reqwest_error(&e))?;
 
         if !resp.status().is_success() {
             return Err(AcdpError::KeyResolution(format!(
@@ -174,10 +226,21 @@ impl Default for WebResolver {
 /// Build the `reqwest::Client` used by `WebResolver`, optionally trusting
 /// an additional PEM-encoded root certificate.
 ///
-/// Encapsulates the redirect policy and timeouts so the no-cert and
-/// with-cert constructors stay byte-for-byte identical on TLS posture.
+/// Encapsulates the redirect policy, timeouts, and the DNS-rebinding
+/// filter so the no-cert and with-cert constructors stay byte-for-byte
+/// identical on TLS posture.
+///
+/// `ssrf_policy` is plumbed into reqwest's `dns_resolver` hook via
+/// [`crate::safe_http::SafeDnsResolver`]: every resolved IP is filtered
+/// against the policy before reqwest connects, so a hostname whose DNS
+/// answers fall in forbidden ranges (loopback, RFC 1918, link-local,
+/// IMDS, ULA, …) is refused at connect time, defeating DNS rebinding
+/// (RFC-ACDP-0008 §4.8).
 #[cfg(feature = "client")]
-fn build_http_client(extra_root_pem: Option<&[u8]>) -> Result<reqwest::Client, AcdpError> {
+fn build_http_client(
+    extra_root_pem: Option<&[u8]>,
+    ssrf_policy: &SsrfPolicy,
+) -> Result<reqwest::Client, AcdpError> {
     let policy = redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= MAX_REDIRECTS {
             return attempt.error(format!("DID resolver: exceeded {MAX_REDIRECTS} redirects"));
@@ -203,7 +266,8 @@ fn build_http_client(extra_root_pem: Option<&[u8]>) -> Result<reqwest::Client, A
         .use_rustls_tls()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
-        .redirect(policy);
+        .redirect(policy)
+        .dns_resolver(crate::safe_http::SafeDnsResolver::arc(ssrf_policy.clone()));
 
     if let Some(pem) = extra_root_pem {
         let cert = reqwest::Certificate::from_pem(pem)
@@ -214,6 +278,33 @@ fn build_http_client(extra_root_pem: Option<&[u8]>) -> Result<reqwest::Client, A
     builder
         .build()
         .map_err(|e| AcdpError::Http(format!("DID resolver client build: {e}")))
+}
+
+/// Translate a `reqwest::Error` into the right [`AcdpError`] variant.
+///
+/// Walks the error's `source()` chain so the SafeDnsResolver's refusal
+/// message ("SSRF policy refused all N DNS answer(s) …") survives
+/// reqwest's wrapping. An SSRF-refused DNS lookup is policy-driven and
+/// permanent — it maps to `key_resolution_failed` (HTTP 400), NOT
+/// `key_resolution_unreachable` (502, retryable) that
+/// `reqwest::Error::is_connect()` would suggest by default
+/// (RFC-ACDP-0008 §4.8, fixtures did-ssrf-001/002/003).
+#[cfg(feature = "client")]
+fn classify_reqwest_error(e: &reqwest::Error) -> AcdpError {
+    let mut chain = e.to_string();
+    let mut src: Option<&dyn std::error::Error> = std::error::Error::source(e);
+    while let Some(s) = src {
+        chain = format!("{chain}: {s}");
+        src = s.source();
+    }
+    if chain.contains("SSRF policy") {
+        return AcdpError::KeyResolution(chain);
+    }
+    if e.is_timeout() || e.is_connect() {
+        AcdpError::KeyResolutionUnreachable(chain)
+    } else {
+        AcdpError::KeyResolution(chain)
+    }
 }
 
 /// Convert a `did:web:…` DID to its HTTPS URL per the `did:web` spec.
@@ -321,5 +412,89 @@ mod tests {
         let did = authority_to_did_web("localhost:8443");
         let url = did_web_to_url(&did).unwrap();
         assert_eq!(url, "https://localhost:8443/.well-known/did.json");
+    }
+
+    // ── BUG-04 — WebResolver SSRF policy (did-ssrf-001/002/003) ─────────
+
+    /// did-ssrf-001 — a `did:web` authority that is a loopback IP literal
+    /// is refused by the default resolver before any socket activity.
+    /// The error is `key_resolution_failed` (permanent), not
+    /// `key_resolution_unreachable` (retryable).
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn did_resolver_rejects_loopback_did() {
+        let resolver = WebResolver::new();
+        let err = resolver.resolve("did:web:127.0.0.1").await.unwrap_err();
+        assert!(
+            matches!(err, AcdpError::KeyResolution(_)),
+            "did-ssrf-001: loopback did:web MUST be blocked by SSRF policy, got {err:?}"
+        );
+    }
+
+    /// did-ssrf-002 — a `did:web` authority pointing at the cloud-metadata
+    /// endpoint (169.254.169.254) is refused.
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn did_resolver_rejects_imds_did() {
+        let resolver = WebResolver::new();
+        let err = resolver
+            .resolve("did:web:169.254.169.254")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcdpError::KeyResolution(_)),
+            "did-ssrf-002: IMDS did:web MUST be blocked by SSRF policy, got {err:?}"
+        );
+    }
+
+    /// did-ssrf-003 — a `did:web` authority in an RFC 1918 private range
+    /// is refused.
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn did_resolver_rejects_private_range_did() {
+        let resolver = WebResolver::new();
+        for did in [
+            "did:web:192.168.1.1",
+            "did:web:10.0.0.1",
+            "did:web:172.16.0.1",
+        ] {
+            let err = resolver.resolve(did).await.unwrap_err();
+            assert!(
+                matches!(err, AcdpError::KeyResolution(_)),
+                "did-ssrf-003: private-range did:web '{did}' MUST be blocked, got {err:?}"
+            );
+        }
+    }
+
+    /// RFC-ACDP-0008 §4.8 DNS-rebinding protection — a hostname whose
+    /// DNS answers fall in forbidden ranges is refused at the DNS step,
+    /// before any TCP connect. `localhost` is a perfectly valid DNS
+    /// name (it passes `check_url`), but it resolves to `127.0.0.1` —
+    /// which the default policy MUST refuse via the `SafeDnsResolver`
+    /// hook on reqwest's `dns_resolver`. The error message MUST
+    /// identify the SSRF policy so operators can tell the refusal
+    /// apart from a generic connection failure.
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn did_resolver_rejects_hostname_resolving_to_loopback() {
+        let resolver = WebResolver::new();
+        let err = resolver
+            .resolve("did:web:localhost%3A12345")
+            .await
+            .expect_err("DNS-rebinding protection MUST refuse localhost under default policy");
+        let msg = format!("{err}");
+        // SSRF-refused DNS is policy-driven and permanent — it maps to
+        // `KeyResolution` (HTTP 400), NOT `KeyResolutionUnreachable`
+        // (HTTP 502, retryable). The retry-aware client MUST NOT retry.
+        assert!(
+            matches!(err, AcdpError::KeyResolution(_)),
+            "DNS-rebinding refusal MUST be permanent KeyResolution, got {err:?}"
+        );
+        assert!(
+            msg.contains("SSRF policy"),
+            "DNS-rebinding refusal MUST identify the SSRF policy in its message; got: {msg}"
+        );
+        // And `is_transient` MUST return false so retry loops don't loop.
+        assert!(!err.is_transient(), "SSRF refusal MUST NOT be transient");
     }
 }

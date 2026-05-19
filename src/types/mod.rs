@@ -4,6 +4,7 @@ pub mod data_ref;
 pub mod primitives;
 pub mod publish;
 pub mod search;
+pub(crate) mod serde_helpers;
 
 pub use body::{Body, DataPeriod, FullContext, RegistryState, Signature};
 pub use capabilities::{CapabilitiesDocument, Limits};
