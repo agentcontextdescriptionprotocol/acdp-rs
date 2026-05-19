@@ -10,6 +10,7 @@
 //!                                   [--tags A,B] [--domain D] [--status S]
 //!                                   [--agent-id DID] [--cursor C]
 //! acdp publish      <registry-url> --key-seed <64-hex>
+//!                                   [--key-algorithm ed25519|ecdsa-p256]
 //!                                   --agent-id <DID> --key-id <DID-URL>
 //!                                   [--title T] [--type CT] [--domain D]
 //!                                   [--visibility V] [--audience DID,DID]
@@ -60,6 +61,7 @@ fn print_usage() {
          \t                                  [--tags A,B] [--domain D] [--status S]\n\
          \t                                  [--agent-id DID] [--cursor C]\n\
          \tacdp publish      <registry-url> --key-seed <64-hex>\n\
+         \t                                  [--key-algorithm ed25519|ecdsa-p256]\n\
          \t                                  --agent-id <DID> --key-id <DID-URL>\n\
          \t                                  [--title T] [--type CT] [--domain D]\n\
          \t                                  [--visibility V] [--audience DID,DID]\n\
@@ -397,6 +399,7 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("`publish` requires <registry-url>".into()))?;
 
     let mut key_seed: Option<String> = None;
+    let mut key_algorithm: Option<String> = None;
     let mut agent_id: Option<String> = None;
     let mut key_id: Option<String> = None;
     let mut idempotency_key: Option<String> = None;
@@ -419,6 +422,10 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
         match rest[i].as_str() {
             "--key-seed" => {
                 key_seed = Some(take("--key-seed", i, rest)?);
+                i += 2;
+            }
+            "--key-algorithm" => {
+                key_algorithm = Some(take("--key-algorithm", i, rest)?);
                 i += 2;
             }
             "--agent-id" => {
@@ -480,9 +487,29 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
         .map_err(|v: Vec<u8>| {
             CliError::Usage(format!("--key-seed must be 32 bytes, got {}", v.len()))
         })?;
-    let key = SigningKey::from_bytes(&seed_bytes);
 
-    let producer = Producer::new(key, AgentDid::new(agent_id), key_id);
+    // FEAT-02: select signing algorithm. Default `ed25519` matches the
+    // historical CLI behavior; `ecdsa-p256` is the interop algorithm
+    // in the ACDP signature-algorithms registry.
+    let algorithm = key_algorithm.as_deref().unwrap_or("ed25519");
+    let producer = match algorithm {
+        "ed25519" => Producer::new_ed25519(
+            SigningKey::from_bytes(&seed_bytes),
+            AgentDid::new(agent_id),
+            key_id,
+        ),
+        "ecdsa-p256" => {
+            let p256_key = acdp::crypto::P256SigningKey::from_bytes(&seed_bytes)
+                .map_err(|e| CliError::Usage(format!("invalid p256 key seed: {e}")))?;
+            Producer::new_p256(p256_key, AgentDid::new(agent_id), key_id)
+        }
+        other => {
+            return Err(CliError::Usage(format!(
+                "--key-algorithm '{other}' not supported; use 'ed25519' or 'ecdsa-p256'"
+            )));
+        }
+    };
+
     let mut builder = producer.publish_request();
 
     // ProducerContent JSON overlay from stdin lets users supply the

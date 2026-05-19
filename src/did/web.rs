@@ -237,6 +237,37 @@ pub fn did_web_to_url(did: &str) -> Result<String, AcdpError> {
     }
 }
 
+/// Convert a registry authority (DNS hostname, optionally with a port)
+/// to its `did:web` form per the did:web method spec.
+///
+/// The `:` between host and port is a structural delimiter in did:web
+/// — it splits the DID into colon-separated path components — so a
+/// `host:port` authority must percent-encode the colon as `%3A` to
+/// keep the port in the authority segment.
+///
+/// Examples:
+/// - `"registry.example.com"`  → `"did:web:registry.example.com"`
+/// - `"localhost:8443"`        → `"did:web:localhost%3A8443"`
+pub fn authority_to_did_web(authority: &str) -> String {
+    let encoded = authority.replace(':', "%3A");
+    format!("did:web:{encoded}")
+}
+
+/// Reverse of [`authority_to_did_web`]: strip the `did:web:` prefix
+/// and decode `%3A` back to `:`. Returns `None` for non-`did:web` input.
+///
+/// Used in `RegistryServer::try_new` and `CrossRegistryResolver::resolve`
+/// to compare a capabilities-advertised DID against the authority the
+/// consumer connected to. Round-trips with `authority_to_did_web`.
+pub fn did_web_to_authority(did: &str) -> Option<String> {
+    let rest = did.strip_prefix("did:web:")?;
+    // Only the first segment carries the authority; further segments
+    // are path components and don't get colon-decoded.
+    let mut parts = rest.splitn(2, ':');
+    let authority = parts.next()?;
+    Some(authority.replace("%3A", ":"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +282,44 @@ mod tests {
     fn path_authority() {
         let url = did_web_to_url("did:web:example.com:users:alice").unwrap();
         assert_eq!(url, "https://example.com/users/alice/did.json");
+    }
+
+    /// BUG-06: bare DNS hostname maps to the plain did:web form.
+    #[test]
+    fn authority_to_did_web_bare_hostname() {
+        assert_eq!(
+            authority_to_did_web("registry.example.com"),
+            "did:web:registry.example.com"
+        );
+    }
+
+    /// BUG-06: `host:port` authority percent-encodes the colon.
+    #[test]
+    fn authority_to_did_web_with_port() {
+        assert_eq!(
+            authority_to_did_web("localhost:8443"),
+            "did:web:localhost%3A8443"
+        );
+    }
+
+    /// BUG-06: reverse helper strips prefix and decodes the colon.
+    #[test]
+    fn did_web_to_authority_round_trips() {
+        for authority in ["registry.example.com", "localhost:8443", "127.0.0.1:9000"] {
+            let did = authority_to_did_web(authority);
+            let back = did_web_to_authority(&did)
+                .unwrap_or_else(|| panic!("did_web_to_authority returned None for '{did}'"));
+            assert_eq!(back, authority, "round-trip for '{authority}' failed");
+        }
+    }
+
+    /// `did_web_to_url` already URL-decodes the authority — confirm
+    /// that `authority_to_did_web("localhost:8443")` produces a DID
+    /// that resolves to `https://localhost:8443/.well-known/did.json`.
+    #[test]
+    fn authority_to_did_web_then_to_url_keeps_port() {
+        let did = authority_to_did_web("localhost:8443");
+        let url = did_web_to_url(&did).unwrap();
+        assert_eq!(url, "https://localhost:8443/.well-known/did.json");
     }
 }

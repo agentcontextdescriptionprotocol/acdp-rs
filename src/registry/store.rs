@@ -17,6 +17,7 @@ use crate::error::AcdpError;
 use crate::types::{
     body::{Body, FullContext, RegistryState},
     primitives::{AgentDid, CtxId, LineageId, Status, Visibility},
+    publish::{PublishRequest, PublishResponse},
     search::{SearchParams, SearchResponse, SearchResult},
 };
 
@@ -56,17 +57,18 @@ pub trait RegistryStore: Send + Sync {
     /// | `restricted` | producer (`agent_id`) **or** any DID in `audience` |
     /// | `private`    | producer (`agent_id`) only — audience members must already know the ctx_id |
     ///
-    /// `requester == None` represents an anonymous caller; only `Public`
-    /// contexts may surface, and the implementation MAY further restrict
-    /// based on `capabilities.anonymous_public_reads` (that flag lives in
-    /// [`RegistryServer`](super::server::RegistryServer); the store
-    /// itself does not see it).
+    /// `requester == None` represents an anonymous caller. Public
+    /// contexts surface only when `anonymous_public_reads` is true (the
+    /// capability flag from [`RegistryServer`](super::server::RegistryServer));
+    /// the store implements the same predicate as `RegistryServer::retrieve`
+    /// so the two endpoints stay symmetric (RFC-ACDP-0008 §4.5).
     ///
     /// Projection follows RFC-ACDP-0005 §2.2 `match_summary`.
     fn search(
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
     ) -> Result<SearchResponse, AcdpError>;
 
     // ── Idempotency (RFC-ACDP-0003 §6) ─────────────────────────────────
@@ -114,6 +116,70 @@ pub trait RegistryStore: Send + Sync {
     ) -> Result<(), AcdpError> {
         Ok(())
     }
+
+    // ── Atomic publish commit (FEAT-01) ────────────────────────────────
+
+    /// Atomically commit a publish: idempotency lookup, supersession
+    /// validation, body insertion, predecessor supersession marking,
+    /// and idempotency record write — all under a single critical
+    /// section so two concurrent publishes targeting the same
+    /// `supersedes` (or sharing an `idempotency_key`) cannot both
+    /// succeed.
+    ///
+    /// Eliminates the TOCTOU races that the old
+    /// `put → mark_superseded → idempotency_record` sequence allowed.
+    /// Returns:
+    /// - `Inserted(response)` — the body was newly persisted.
+    /// - `IdempotentReplay(response)` — a prior record with the same
+    ///   `(agent_id, key, content_hash)` was found and its response is
+    ///   replayed verbatim (idem-002).
+    ///
+    /// On supersession contention (predecessor already marked
+    /// `Superseded`, lineage mismatch, etc.) returns
+    /// `AcdpError::SupersededTarget { reason, … }`. On idempotency-key
+    /// collision with a different `content_hash` returns
+    /// `AcdpError::DuplicatePublish` (idem-003).
+    fn commit_publish(&self, commit: PublishCommit<'_>) -> Result<PublishCommitOutcome, AcdpError>;
+}
+
+/// Single-shot atomic publish input (FEAT-01).
+///
+/// Passed to [`RegistryStore::commit_publish`] so the predecessor
+/// lookup, supersession check, body insertion, predecessor
+/// supersession marking, and idempotency record are all done under one
+/// critical section. Eliminates TOCTOU races between two concurrent
+/// publishes that target the same `supersedes` ctx_id or share an
+/// `idempotency_key`.
+pub struct PublishCommit<'a> {
+    /// The validated, signature-verified publish request.
+    pub req: &'a PublishRequest,
+    /// The hostname the registry serves — used to mint `ctx_id`s and
+    /// stored verbatim into `body.origin_registry` (BUG-01).
+    pub authority: &'a str,
+    /// Idempotency wiring, present iff the registry advertises
+    /// `caps.supports_idempotency_key` and the request carries an
+    /// `Idempotency-Key`.
+    pub idempotency: Option<PendingIdempotencyCommit<'a>>,
+}
+
+/// Idempotency parameters threaded through [`PublishCommit`].
+pub struct PendingIdempotencyCommit<'a> {
+    /// The key the producer supplied in the `Idempotency-Key` header.
+    pub key: &'a str,
+    /// TTL after which the idempotency record may be evicted (typically
+    /// `caps.limits.idempotency_key_ttl_seconds`).
+    pub ttl: chrono::Duration,
+}
+
+/// Outcome of an atomic [`RegistryStore::commit_publish`].
+#[derive(Debug)]
+pub enum PublishCommitOutcome {
+    /// Fresh publish — the body was newly persisted and the response
+    /// describes the just-assigned identifiers.
+    Inserted(PublishResponse),
+    /// `(agent_id, idempotency_key)` had a prior record with the same
+    /// `content_hash` — return the original response per idem-002.
+    IdempotentReplay(PublishResponse),
 }
 
 /// Cached publish response keyed by `(agent_id, idempotency_key)`
@@ -196,9 +262,20 @@ pub(crate) fn project_context(
 /// Note the asymmetry vs retrieval: a `Private` context surfaces in search
 /// **only** to its producer — audience members must already know the
 /// `ctx_id` to fetch it. `Restricted` surfaces to producer + audience.
-fn can_surface_in_search(body: &Body, requester: Option<&AgentDid>) -> bool {
+///
+/// `anonymous_public_reads` mirrors the capability advertisement
+/// (RFC-ACDP-0008 §4.5): a registry that does NOT permit anonymous
+/// public reads MUST suppress public contexts for unauthenticated
+/// callers in both `retrieve` and `search`. The retrieval helper
+/// already consults this flag; this function pulls it through to the
+/// store-side search path (BUG-02).
+fn can_surface_in_search(
+    body: &Body,
+    requester: Option<&AgentDid>,
+    anonymous_public_reads: bool,
+) -> bool {
     match body.visibility {
-        Visibility::Public => true,
+        Visibility::Public => anonymous_public_reads || requester.is_some(),
         Visibility::Restricted => match requester {
             None => false,
             Some(r) => {
@@ -264,20 +341,26 @@ impl RegistryStore for InMemoryStore {
         let Some(ids) = g.lineages.get(lineage_id.as_str()) else {
             return Ok(None);
         };
-        // Prefer the last `Active` (after projection); fall back to the
-        // last entry projected. An expired predecessor is not "current".
+        // RFC-ACDP-0004 §5: "Returns the unique version that has no
+        // successor. If no such version exists, returns not_found."
+        // Walk newest-to-oldest and return the first non-`Superseded`
+        // version. Both `Active` and `Expired` count — an expired
+        // body that hasn't been replaced is still the latest, and the
+        // consumer needs to see it (with status=Expired) to know it
+        // has lapsed.
+        //
+        // BUG-04: an earlier fallback returned the last entry even when
+        // every version was `Superseded`; that's a protocol violation.
+        // Now we return `None` instead.
         for id in ids.iter().rev() {
             if let Some(ctx) = g.by_ctx.get(id) {
                 let projected = project_context(ctx.clone(), now);
-                if matches!(projected.registry_state.status, Status::Active) {
+                if !matches!(projected.registry_state.status, Status::Superseded) {
                     return Ok(Some(projected));
                 }
             }
         }
-        Ok(ids
-            .last()
-            .and_then(|id| g.by_ctx.get(id).cloned())
-            .map(|c| project_context(c, now)))
+        Ok(None)
     }
 
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
@@ -339,10 +422,192 @@ impl RegistryStore for InMemoryStore {
         Ok(())
     }
 
+    fn commit_publish(&self, commit: PublishCommit<'_>) -> Result<PublishCommitOutcome, AcdpError> {
+        use crate::registry::validator::assign_identifiers;
+
+        let PublishCommit {
+            req,
+            authority,
+            idempotency,
+        } = commit;
+        let now = chrono::Utc::now();
+        let mut g = self.lock();
+
+        // ── 1. Idempotency replay / collision ────────────────────────
+        if let Some(idem) = &idempotency {
+            let idem_key = (req.agent_id.as_str().to_string(), idem.key.to_string());
+            if let Some(prior) = g.idempotency.get(&idem_key) {
+                if prior.expires_at > now {
+                    return if prior.content_hash == req.content_hash {
+                        // idem-002: same key + same hash → replay.
+                        Ok(PublishCommitOutcome::IdempotentReplay(
+                            prior.response.clone(),
+                        ))
+                    } else {
+                        // idem-003: same key + different hash → duplicate_publish.
+                        Err(AcdpError::DuplicatePublish(format!(
+                            "Idempotency-Key '{}' was previously used by '{}' \
+                             with a different content_hash",
+                            idem.key, req.agent_id
+                        )))
+                    };
+                }
+                // Expired record — fall through and overwrite below.
+            }
+        }
+
+        // ── 2. Supersession lookups + coherence checks ──────────────
+        let first_v1 = if let Some(prev) = &req.supersedes {
+            let prev_full = g.by_ctx.get(prev.as_str()).cloned().ok_or_else(|| {
+                AcdpError::SupersededTarget {
+                    reason: crate::error::SupersessionReason::NotFound,
+                    message: format!("supersedes target '{prev}' not found in this registry"),
+                }
+            })?;
+
+            // Lineage coherence — when the producer self-verifies.
+            if let Some(declared) = &req.lineage_id {
+                if declared != &prev_full.body.lineage_id {
+                    return Err(AcdpError::SupersededTarget {
+                        reason: crate::error::SupersessionReason::LineageMismatch,
+                        message: format!(
+                            "declared lineage_id '{declared}' ≠ predecessor's '{}'",
+                            prev_full.body.lineage_id
+                        ),
+                    });
+                }
+            }
+            // Version coherence: new.version MUST be predecessor.version + 1.
+            if req.version != prev_full.body.version + 1 {
+                return Err(AcdpError::SupersededTarget {
+                    reason: crate::error::SupersessionReason::VersionMismatch,
+                    message: format!(
+                        "version {} ≠ predecessor.version + 1 ({})",
+                        req.version,
+                        prev_full.body.version + 1
+                    ),
+                });
+            }
+            // FEAT-01 atomicity: the check that previously raced with
+            // another concurrent publish. Now under the same lock as
+            // the insert below — exactly one of two contenders succeeds.
+            if matches!(prev_full.registry_state.status, Status::Superseded) {
+                return Err(AcdpError::SupersededTarget {
+                    reason: crate::error::SupersessionReason::AlreadySuperseded,
+                    message: format!("supersedes target '{prev}' has already been superseded"),
+                });
+            }
+
+            // Derive the v1 ctx_id from the predecessor's lineage —
+            // same logic as `first_version_ctx_id`, inlined to stay
+            // under the existing lock.
+            g.lineages
+                .get(prev_full.body.lineage_id.as_str())
+                .and_then(|ids| ids.first().cloned())
+                .map(CtxId)
+        } else {
+            None
+        };
+
+        // ── 3. Identifier assignment ────────────────────────────────
+        let validated = crate::registry::validator::ValidatedPublish {
+            recomputed_hash: req.content_hash.clone(),
+        };
+        let (ctx_id, lineage_id) =
+            assign_identifiers(authority, &req.supersedes, first_v1.as_ref(), &validated)?;
+
+        // ── 4. Build the stored Body ────────────────────────────────
+        let created_at = crate::time::trunc_ms(now);
+        let body = Body {
+            ctx_id: ctx_id.clone(),
+            lineage_id: lineage_id.clone(),
+            origin_registry: authority.to_string(),
+            created_at,
+            content_hash: req.content_hash.clone(),
+            signature: req.signature.clone(),
+            version: req.version,
+            supersedes: req.supersedes.clone(),
+            agent_id: req.agent_id.clone(),
+            contributors: req.contributors.clone(),
+            title: req.title.clone(),
+            context_type: req.context_type.clone(),
+            data_refs: req.data_refs.clone(),
+            derived_from: req.derived_from.clone(),
+            visibility: req.visibility.clone(),
+            audience: req.audience.clone(),
+            acdp_version: req.acdp_version.clone(),
+            description: req.description.clone(),
+            summary: req.summary.clone(),
+            tags: req.tags.clone(),
+            domain: req.domain.clone(),
+            expires_at: req.expires_at,
+            data_period: req.data_period.clone(),
+            metadata: req.metadata.clone(),
+            schema_uri: req.schema_uri.clone(),
+            extensions: Default::default(),
+        };
+
+        // ── 5. Insert (mirrors `put` but inline so we keep the lock) ─
+        let ctx_id_str = body.ctx_id.0.clone();
+        let lineage_id_str = body.lineage_id.0.clone();
+        if g.by_ctx.contains_key(&ctx_id_str) {
+            // UUID collision is astronomically unlikely but we still
+            // surface it as a SchemaViolation rather than silently
+            // overwriting.
+            return Err(AcdpError::SchemaViolation(format!(
+                "ctx_id collision: '{ctx_id_str}' already exists"
+            )));
+        }
+        let stored = FullContext {
+            body,
+            registry_state: RegistryState {
+                status: Status::Active,
+                extensions: Default::default(),
+            },
+            registry_receipt: None,
+        };
+        g.by_ctx.insert(ctx_id_str.clone(), stored);
+        g.lineages
+            .entry(lineage_id_str)
+            .or_default()
+            .push(ctx_id_str);
+
+        // ── 6. Mark predecessor superseded ──────────────────────────
+        if let Some(prev) = &req.supersedes {
+            if let Some(prev_ctx) = g.by_ctx.get_mut(prev.as_str()) {
+                prev_ctx.registry_state.status = Status::Superseded;
+            }
+        }
+
+        let response = PublishResponse {
+            ctx_id,
+            lineage_id,
+            version: req.version,
+            created_at,
+            status: Status::Active,
+        };
+
+        // ── 7. Idempotency record ───────────────────────────────────
+        if let Some(idem) = idempotency {
+            let expires_at = now + idem.ttl;
+            g.idempotency.insert(
+                (req.agent_id.as_str().to_string(), idem.key.to_string()),
+                IdempotencyRecord {
+                    content_hash: req.content_hash.clone(),
+                    response: response.clone(),
+                    expires_at,
+                },
+            );
+        }
+
+        Ok(PublishCommitOutcome::Inserted(response))
+    }
+
     fn search(
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
+        anonymous_public_reads: bool,
     ) -> Result<SearchResponse, AcdpError> {
         let g = self.lock();
         let now = chrono::Utc::now();
@@ -378,7 +643,7 @@ impl RegistryStore for InMemoryStore {
                 // RFC-ACDP-0008 §4.5 search-disclosure gate (note the
                 // private/restricted asymmetry: private contexts surface
                 // in search only to their producer).
-                if !can_surface_in_search(body, requester) {
+                if !can_surface_in_search(body, requester, anonymous_public_reads) {
                     return false;
                 }
 
@@ -487,6 +752,13 @@ impl RegistryStore for InMemoryStore {
                 .then_with(|| a.body.ctx_id.as_str().cmp(b.body.ctx_id.as_str()))
         });
 
+        // BUG-08: capture `total_estimate` BEFORE cursor filtering so
+        // it represents the total count across all pages (RFC-ACDP-0005
+        // §3 — clients use this for "page 1 of N" UIs). If we captured
+        // it after `retain`, page 2 would show "80 matches" for a
+        // 100-item search, page 3 "60", and so on.
+        let total_estimate = Some(matches.len() as u64);
+
         // BUG-10 cursor: opaque base64 of "<created_at_ms>:<ctx_id>".
         // ≥1h validity is implicit — cursors do not embed a timestamp,
         // so they remain valid until the underlying context is deleted.
@@ -511,7 +783,6 @@ impl RegistryStore for InMemoryStore {
         } else {
             None
         };
-        let total_estimate = Some(matches.len() as u64);
 
         let projected: Vec<SearchResult> = matches
             .iter()
@@ -556,11 +827,22 @@ fn parse_opt_rfc3339(
     Ok(Some(dt.with_timezone(&chrono::Utc)))
 }
 
-/// Opaque cursor encoding — base64 of `<created_at_millis>:<ctx_id>`.
-/// Plain `STANDARD` engine so cursors are stable across machines.
+/// Cursor TTL — clients SHOULD re-fetch after this window.
+/// RFC-ACDP-0005 §3 leaves the exact value to implementations; 1 hour
+/// matches the common "≥1h" cursor-validity expectation.
+const CURSOR_TTL: chrono::Duration = chrono::Duration::seconds(3600);
+
+/// Opaque cursor encoding — base64 of
+/// `<mint_unix_ms>:<created_at_millis>:<ctx_id>`.
+///
+/// The `mint_unix_ms` prefix lets [`decode_cursor`] enforce the
+/// `CURSOR_TTL` window and surface `AcdpError::CursorExpired` rather
+/// than silently accepting an ancient cursor (FEAT-04). Plain
+/// `STANDARD` engine so cursors are stable across machines.
 fn encode_cursor(created_at_ms: i64, ctx_id: &str) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    STANDARD.encode(format!("{created_at_ms}:{ctx_id}"))
+    let mint_ms = chrono::Utc::now().timestamp_millis();
+    STANDARD.encode(format!("{mint_ms}:{created_at_ms}:{ctx_id}"))
 }
 
 fn decode_cursor(s: &str) -> Result<Option<(i64, String)>, AcdpError> {
@@ -570,13 +852,39 @@ fn decode_cursor(s: &str) -> Result<Option<(i64, String)>, AcdpError> {
         .map_err(|_| AcdpError::InvalidCursor("cursor is not valid base64".into()))?;
     let decoded = String::from_utf8(bytes)
         .map_err(|_| AcdpError::InvalidCursor("cursor is not utf-8".into()))?;
-    let (ms_str, id) = decoded
-        .split_once(':')
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ':' separator".into()))?;
-    let ms: i64 = ms_str
+    // Format: "<mint_ms>:<anchor_ms>:<ctx_id>". The mint timestamp
+    // prefix is FEAT-04 expiry tracking.
+    let mut parts = decoded.splitn(3, ':');
+    let mint_str = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing mint timestamp".into()))?;
+    let anchor_str = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing anchor timestamp".into()))?;
+    let ctx_id = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ctx_id".into()))?;
+    let mint_ms: i64 = mint_str
+        .parse()
+        .map_err(|_| AcdpError::InvalidCursor("cursor mint millis is not an integer".into()))?;
+    let anchor_ms: i64 = anchor_str
         .parse()
         .map_err(|_| AcdpError::InvalidCursor("cursor anchor millis is not an integer".into()))?;
-    Ok(Some((ms, id.to_string())))
+
+    // FEAT-04: reject cursors older than CURSOR_TTL with the
+    // dedicated `cursor_expired` wire code so clients can distinguish
+    // "you typo'd the cursor" (InvalidCursor) from "your cursor aged
+    // out, restart the scan from page 1" (CursorExpired).
+    let now = chrono::Utc::now().timestamp_millis();
+    let age_ms = now.saturating_sub(mint_ms);
+    if age_ms > CURSOR_TTL.num_milliseconds() {
+        // CursorExpired is a unit variant in the wire-error mapping;
+        // the diagnostic ("aged Xms ago") is intentionally surfaced
+        // via Display rather than a payload so it round-trips through
+        // `AcdpError::from_wire_error`.
+        return Err(AcdpError::CursorExpired);
+    }
+    Ok(Some((anchor_ms, ctx_id.to_string())))
 }
 
 #[cfg(test)]
@@ -723,7 +1031,7 @@ mod tests {
             chrono::Utc::now() - Duration::hours(1),
         ))
         .unwrap();
-        let resp = s.search(&SearchParams::default(), None).unwrap();
+        let resp = s.search(&SearchParams::default(), None, true).unwrap();
         assert!(
             resp.matches.is_empty(),
             "expired must not surface under status=active default"
@@ -736,6 +1044,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
@@ -763,6 +1072,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 0);
@@ -774,6 +1084,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
@@ -789,6 +1100,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
@@ -819,6 +1131,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(p1.matches.len(), 2);
@@ -831,6 +1144,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(p2.matches.len(), 2);
@@ -841,6 +1155,21 @@ mod tests {
                 "page 2 overlapped page 1"
             );
         }
+        // BUG-08: total_estimate MUST be stable across pages — captured
+        // BEFORE cursor filtering. Before the fix, page 2 reported a
+        // smaller total than page 1 (the remaining-from-cursor count).
+        assert_eq!(
+            p1.total_estimate, p2.total_estimate,
+            "total_estimate MUST be stable across pages (BUG-08); \
+             p1={:?}, p2={:?}",
+            p1.total_estimate, p2.total_estimate
+        );
+        assert_eq!(
+            p1.total_estimate,
+            Some(5),
+            "total_estimate MUST reflect total matches across all pages, got {:?}",
+            p1.total_estimate
+        );
     }
 
     #[test]
@@ -853,9 +1182,39 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap_err();
         assert!(matches!(err, AcdpError::InvalidCursor(_)));
+    }
+
+    /// FEAT-04: a cursor whose embedded mint timestamp is older than
+    /// `CURSOR_TTL` MUST surface as `CursorExpired`, not `InvalidCursor`.
+    /// Clients distinguish "you typo'd the cursor" from "your cursor
+    /// aged out, restart the scan from page 1".
+    #[test]
+    fn search_aged_cursor_rejected_as_cursor_expired() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let s = InMemoryStore::new();
+        // Mint a cursor 7200s in the past — twice the 3600s TTL.
+        let stale_mint_ms = chrono::Utc::now().timestamp_millis() - 7200 * 1000;
+        let aged = STANDARD.encode(format!(
+            "{stale_mint_ms}:0:acdp://r/12345678-1234-4321-8123-1234567812aa"
+        ));
+        let err = s
+            .search(
+                &SearchParams {
+                    cursor: Some(aged),
+                    ..Default::default()
+                },
+                None,
+                true,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, AcdpError::CursorExpired),
+            "expired cursor MUST surface CursorExpired, got {err:?}"
+        );
     }
 
     #[test]
@@ -874,6 +1233,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         // Only `active` matches — superseded "old" filtered out.
@@ -885,6 +1245,7 @@ mod tests {
                     ..Default::default()
                 },
                 None,
+                true,
             )
             .unwrap();
         assert_eq!(resp.matches.len(), 1);

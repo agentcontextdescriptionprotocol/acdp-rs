@@ -30,7 +30,7 @@
 use crate::error::AcdpError;
 use crate::registry::rate_limit::{NoopRateLimiter, RateLimiter};
 use crate::registry::store::RegistryStore;
-use crate::registry::validator::{assign_identifiers, PublishValidator};
+use crate::registry::validator::PublishValidator;
 use crate::types::{
     body::{Body, FullContext},
     capabilities::CapabilitiesDocument,
@@ -78,7 +78,9 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
     ) -> Result<Self, AcdpError> {
         let authority = authority.into();
         crate::validation::validate_capabilities(&caps)?;
-        let expected_did = format!("did:web:{authority}");
+        // BUG-06: percent-encode `:` in `host:port` authorities — the
+        // colon is a structural separator in did:web.
+        let expected_did = crate::did::authority_to_did_web(&authority);
         if caps.registry_did != expected_did {
             return Err(AcdpError::SchemaViolation(format!(
                 "capabilities.registry_did '{}' does not match expected '{expected_did}' \
@@ -144,52 +146,19 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
 
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
-        let validated = validator.validate_post_schema(req, raw_bytes)?;
-
-        // RFC-ACDP-0003 §6 — Idempotency-Key handling.
-        // idem-005: registries that don't support the header MUST ignore it.
-        if self.caps.supports_idempotency_key {
-            if let Some(key) = idempotency_key {
-                if let Some(prior) = self.store.idempotency_lookup(&req.agent_id, key)? {
-                    if prior.content_hash == req.content_hash {
-                        // idem-002: replay returns the original response unchanged.
-                        return Ok(prior.response);
-                    }
-                    // idem-003: same key, different hash → duplicate_publish.
-                    return Err(AcdpError::DuplicatePublish(format!(
-                        "Idempotency-Key '{key}' was previously used by '{}' \
-                         with a different content_hash",
-                        req.agent_id
-                    )));
-                }
-            }
-        }
+        let _validated = validator.validate_post_schema(req, raw_bytes)?;
 
         // Steps 7–8: DID resolution + signature verification.
         crate::crypto::verify::verify_publish_request_signature(req, resolver).await?;
 
-        // Steps 9–11: assign identifiers, enforce lineage coherence, persist.
-        let response = self.persist_validated(req, validated)?;
-
-        // Persist idempotency record AFTER successful publish (idem-001).
-        if self.caps.supports_idempotency_key {
-            if let Some(key) = idempotency_key {
-                let ttl_secs = self
-                    .caps
-                    .limits
-                    .idempotency_key_ttl_seconds
-                    .unwrap_or(86_400);
-                let expires_at = chrono::Utc::now() + chrono::Duration::seconds(ttl_secs as i64);
-                self.store.idempotency_record(
-                    &req.agent_id,
-                    key,
-                    &req.content_hash,
-                    &response,
-                    expires_at,
-                )?;
-            }
-        }
-        Ok(response)
+        // FEAT-01: hand the rest of the pipeline to the store as a
+        // single atomic commit. Idempotency lookup, predecessor
+        // verification, body insertion, predecessor supersession
+        // marking, and idempotency record writing all happen under one
+        // critical section. Two concurrent publishes against the same
+        // `supersedes` (or the same `Idempotency-Key`) can no longer
+        // both succeed.
+        self.commit_via_store(req, idempotency_key)
     }
 
     /// **NOT RFC-conformant.** Skips DID resolution and signature
@@ -210,115 +179,42 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
 
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
-        let validated = validator.validate_post_schema(req, raw_bytes)?;
-        self.persist_validated(req, validated)
+        let _validated = validator.validate_post_schema(req, raw_bytes)?;
+        self.commit_via_store(req, None)
     }
 
-    /// Steps 9–11 in isolation: assumes the request has already been
-    /// validated and (where appropriate) signature-verified.
-    fn persist_validated(
+    /// Drive `RegistryStore::commit_publish` from a validated request.
+    /// Unwraps `PublishCommitOutcome::Inserted` and `IdempotentReplay`
+    /// to the same `PublishResponse` for the caller (the distinction
+    /// only matters internally for logging/tracing).
+    fn commit_via_store(
         &self,
         req: &PublishRequest,
-        validated: crate::registry::validator::ValidatedPublish,
+        idempotency_key: Option<&str>,
     ) -> Result<PublishResponse, AcdpError> {
-        // Determine the v1 ctx_id for lineage derivation on supersession.
-        let first_v1 = if let Some(prev) = &req.supersedes {
-            let prev_full = self
-                .store
-                .get(prev)?
-                .ok_or_else(|| AcdpError::SupersededTarget {
-                    reason: crate::error::SupersessionReason::NotFound,
-                    message: format!("supersedes target '{prev}' not found in this registry"),
-                })?;
-
-            // Lineage coherence: the new request's lineage_id (when
-            // declared) MUST match the predecessor's lineage_id.
-            if let Some(declared) = &req.lineage_id {
-                if declared != &prev_full.body.lineage_id {
-                    return Err(AcdpError::SupersededTarget {
-                        reason: crate::error::SupersessionReason::LineageMismatch,
-                        message: format!(
-                            "declared lineage_id '{declared}' ≠ predecessor's '{}'",
-                            prev_full.body.lineage_id
-                        ),
-                    });
-                }
-            }
-            // Version coherence: new.version MUST be predecessor.version + 1.
-            if req.version != prev_full.body.version + 1 {
-                return Err(AcdpError::SupersededTarget {
-                    reason: crate::error::SupersessionReason::VersionMismatch,
-                    message: format!(
-                        "version {} ≠ predecessor.version + 1 ({})",
-                        req.version,
-                        prev_full.body.version + 1
-                    ),
-                });
-            }
-            // Already-superseded check.
-            if matches!(prev_full.registry_state.status, Status::Superseded) {
-                return Err(AcdpError::SupersededTarget {
-                    reason: crate::error::SupersessionReason::AlreadySuperseded,
-                    message: format!("supersedes target '{prev}' has already been superseded"),
-                });
-            }
-
-            self.store
-                .first_version_ctx_id(&prev_full.body.lineage_id)?
+        let idempotency = if self.caps.supports_idempotency_key {
+            idempotency_key.map(|key| crate::registry::store::PendingIdempotencyCommit {
+                key,
+                ttl: chrono::Duration::seconds(
+                    self.caps
+                        .limits
+                        .idempotency_key_ttl_seconds
+                        .unwrap_or(86_400) as i64,
+                ),
+            })
         } else {
             None
         };
-
-        let (ctx_id, lineage_id) = assign_identifiers(
-            &self.authority,
-            &req.supersedes,
-            first_v1.as_ref(),
-            &validated,
-        )?;
-
-        // Build the stored Body from the request + registry-assigned fields.
-        // RFC-ACDP-0001 §5.3 requires millisecond precision on stored timestamps.
-        let created_at = crate::time::trunc_ms(chrono::Utc::now());
-        let body = Body {
-            ctx_id: ctx_id.clone(),
-            lineage_id: lineage_id.clone(),
-            origin_registry: format!("did:web:{}", self.authority),
-            created_at,
-            content_hash: req.content_hash.clone(),
-            signature: req.signature.clone(),
-            version: req.version,
-            supersedes: req.supersedes.clone(),
-            agent_id: req.agent_id.clone(),
-            contributors: req.contributors.clone(),
-            title: req.title.clone(),
-            context_type: req.context_type.clone(),
-            data_refs: req.data_refs.clone(),
-            derived_from: req.derived_from.clone(),
-            visibility: req.visibility.clone(),
-            audience: req.audience.clone(),
-            acdp_version: req.acdp_version.clone(),
-            description: req.description.clone(),
-            summary: req.summary.clone(),
-            tags: req.tags.clone(),
-            domain: req.domain.clone(),
-            expires_at: req.expires_at,
-            data_period: req.data_period.clone(),
-            metadata: req.metadata.clone(),
-            schema_uri: req.schema_uri.clone(),
-            extensions: Default::default(),
-        };
-
-        self.store.put(body)?;
-        if let Some(prev) = &req.supersedes {
-            self.store.mark_superseded(prev)?;
-        }
-
-        Ok(PublishResponse {
-            ctx_id,
-            lineage_id,
-            version: req.version,
-            created_at,
-            status: Status::Active,
+        let outcome = self
+            .store
+            .commit_publish(crate::registry::store::PublishCommit {
+                req,
+                authority: &self.authority,
+                idempotency,
+            })?;
+        Ok(match outcome {
+            crate::registry::store::PublishCommitOutcome::Inserted(r)
+            | crate::registry::store::PublishCommitOutcome::IdempotentReplay(r) => r,
         })
     }
 
@@ -358,13 +254,48 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
     }
 
     /// `GET /lineages/{lineage_id}`.
-    pub fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError> {
-        self.store.lineage(lineage_id)
+    ///
+    /// BUG-03: applies the same visibility filter as `retrieve`. A
+    /// caller who knows or guesses a `lineage_id` must not be able to
+    /// surface restricted or private bodies through the lineage
+    /// endpoint when `retrieve(ctx_id, requester)` would deny them.
+    pub fn lineage(
+        &self,
+        lineage_id: &LineageId,
+        requester: Option<&AgentDid>,
+    ) -> Result<Vec<FullContext>, AcdpError> {
+        let all = self.store.lineage(lineage_id)?;
+        Ok(all
+            .into_iter()
+            .filter(|ctx| can_retrieve(&ctx.body, requester, &self.caps))
+            .collect())
     }
 
     /// `GET /lineages/{lineage_id}/current`.
-    pub fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError> {
-        self.store.current(lineage_id)
+    ///
+    /// BUG-03 + BUG-04: returns the newest non-`Superseded` version
+    /// visible to the requester. `None` when the lineage is unknown,
+    /// when every version is superseded (RFC-ACDP-0004 §5), or when no
+    /// visible version exists.
+    pub fn current(
+        &self,
+        lineage_id: &LineageId,
+        requester: Option<&AgentDid>,
+    ) -> Result<Option<FullContext>, AcdpError> {
+        let all = self.store.lineage(lineage_id)?;
+        // `lineage` returns versions ordered from v1 → vN; iterate in
+        // reverse to find the newest non-superseded version. `Active`
+        // and `Expired` both qualify as valid current heads (a body
+        // that expired without being superseded is still the latest
+        // and the consumer needs to see it to know it has lapsed).
+        for ctx in all.into_iter().rev() {
+            if !matches!(ctx.registry_state.status, Status::Superseded)
+                && can_retrieve(&ctx.body, requester, &self.caps)
+            {
+                return Ok(Some(ctx));
+            }
+        }
+        Ok(None)
     }
 
     /// `GET /contexts/search`.
@@ -377,7 +308,12 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         params: &SearchParams,
         requester: Option<&AgentDid>,
     ) -> Result<SearchResponse, AcdpError> {
-        self.store.search(params, requester)
+        // BUG-02: pass `anonymous_public_reads` to the store so search
+        // and retrieve agree. A registry advertising the flag as false
+        // MUST suppress public contexts for anonymous callers in BOTH
+        // endpoints (RFC-ACDP-0008 §4.5).
+        self.store
+            .search(params, requester, self.caps.anonymous_public_reads)
     }
 }
 
@@ -454,10 +390,10 @@ mod tests {
         let ctx = server.retrieve(&resp.ctx_id, None).unwrap().unwrap();
         assert_eq!(ctx.body.title, "v1");
         // Lineage round-trip
-        let lineage = server.lineage(&resp.lineage_id).unwrap();
+        let lineage = server.lineage(&resp.lineage_id, None).unwrap();
         assert_eq!(lineage.len(), 1);
         // Current points at the same record
-        let cur = server.current(&resp.lineage_id).unwrap().unwrap();
+        let cur = server.current(&resp.lineage_id, None).unwrap().unwrap();
         assert_eq!(cur.body.ctx_id, resp.ctx_id);
     }
 
@@ -493,8 +429,84 @@ mod tests {
         // Same lineage
         assert_eq!(v1.lineage_id, v2.lineage_id);
         // Current resolves to v2
-        let cur = server.current(&v1.lineage_id).unwrap().unwrap();
+        let cur = server.current(&v1.lineage_id, None).unwrap().unwrap();
         assert_eq!(cur.body.ctx_id, v2.ctx_id);
+    }
+
+    /// FEAT-01: two concurrent publishes that both supersede the same
+    /// v1 MUST resolve to exactly one success + one
+    /// `SupersededTarget { AlreadySuperseded }`. The race was possible
+    /// when the supersedes check, body insert, and predecessor mark
+    /// lived in separate mutex acquisitions; `commit_publish` puts
+    /// them under one critical section so only one of two contenders
+    /// wins (RFC-ACDP-0003 §6).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_supersession_exactly_one_succeeds() {
+        use std::sync::Arc;
+        let server = Arc::new(RegistryServer::new(
+            InMemoryStore::new(),
+            caps(),
+            "registry.example.com",
+        ));
+        let p = producer();
+        let v1_req = p
+            .publish_request()
+            .title("v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let v1 = server.publish_unverified_for_tests(&v1_req).unwrap();
+
+        // Pre-build BOTH v2 requests up front, then fire them in
+        // parallel on a multi-threaded runtime. With the prior
+        // non-atomic sequence the test would fail intermittently;
+        // with `commit_publish` it's deterministic.
+        let v2a_req = p
+            .supersede(v1.ctx_id.clone())
+            .version(2)
+            .title("v2-A")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let v2b_req = p
+            .supersede(v1.ctx_id.clone())
+            .version(2)
+            .title("v2-B")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let s1 = Arc::clone(&server);
+        let s2 = Arc::clone(&server);
+        let h1 = tokio::task::spawn_blocking(move || s1.publish_unverified_for_tests(&v2a_req));
+        let h2 = tokio::task::spawn_blocking(move || s2.publish_unverified_for_tests(&v2b_req));
+        let (r1, r2) = (h1.await.unwrap(), h2.await.unwrap());
+
+        let outcomes = [r1, r2];
+        let successes = outcomes.iter().filter(|r| r.is_ok()).count();
+        let failures = outcomes.iter().filter(|r| r.is_err()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent supersession MUST succeed; got {successes} successes / {failures} failures"
+        );
+        assert_eq!(failures, 1);
+        // The loser MUST get AlreadySuperseded — the predecessor was
+        // marked under the same lock the winner used.
+        for r in &outcomes {
+            if let Err(e) = r {
+                match e {
+                    AcdpError::SupersededTarget { reason, .. } => assert_eq!(
+                        *reason,
+                        crate::error::SupersessionReason::AlreadySuperseded,
+                        "concurrent loser MUST be AlreadySuperseded"
+                    ),
+                    other => panic!("concurrent loser had wrong error: {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -573,6 +585,165 @@ mod tests {
             .unwrap();
         assert_eq!(resp.matches.len(), 1);
         assert_eq!(resp.matches[0].title, "Q1 portfolio risk");
+    }
+
+    // ── BUG-03 — lineage/current visibility filtering ──────────────────
+
+    /// BUG-03: a stranger calling `lineage()` MUST NOT see restricted
+    /// bodies they aren't on the audience for. The retrieval predicate
+    /// is now mirrored here.
+    #[test]
+    fn lineage_filters_restricted_for_stranger() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let audience = AgentDid::new("did:web:audience.example.com:reader");
+        let req = p
+            .publish_request()
+            .title("restricted v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Restricted)
+            .audience(vec![audience.clone()])
+            .build()
+            .unwrap();
+        let resp = server.publish_unverified_for_tests(&req).unwrap();
+
+        let stranger = AgentDid::new("did:web:other.example.com:reader");
+        let stranger_view = server.lineage(&resp.lineage_id, Some(&stranger)).unwrap();
+        assert!(
+            stranger_view.is_empty(),
+            "stranger MUST NOT see restricted bodies via lineage(); got {} entries",
+            stranger_view.len()
+        );
+
+        let audience_view = server.lineage(&resp.lineage_id, Some(&audience)).unwrap();
+        assert_eq!(
+            audience_view.len(),
+            1,
+            "audience member MUST see the restricted body via lineage()"
+        );
+    }
+
+    /// BUG-03: `current()` also filters by requester visibility.
+    /// A stranger gets `None` for a private lineage.
+    #[test]
+    fn current_filters_private_for_stranger() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("private v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Private)
+            .build()
+            .unwrap();
+        let resp = server.publish_unverified_for_tests(&req).unwrap();
+
+        let stranger = AgentDid::new("did:web:other.example.com:reader");
+        assert!(
+            server
+                .current(&resp.lineage_id, Some(&stranger))
+                .unwrap()
+                .is_none(),
+            "stranger MUST NOT see private contexts via current()"
+        );
+
+        let producer_did = AgentDid::new("did:web:agents.example.com:test");
+        assert!(
+            server
+                .current(&resp.lineage_id, Some(&producer_did))
+                .unwrap()
+                .is_some(),
+            "producer MUST see private contexts via current()"
+        );
+    }
+
+    // ── BUG-04 — current() superseded fallback ─────────────────────────
+
+    /// BUG-04: when every version of a lineage is `Superseded`,
+    /// `current()` MUST return `None`. Previously the fallback returned
+    /// the last entry projected, which is a protocol violation
+    /// (RFC-ACDP-0004 §5: "If no such version exists, returns not_found").
+    ///
+    /// Constructing an all-superseded lineage requires a direct store
+    /// mark — there's no publish path that produces this state today,
+    /// but the registry's `current()` MUST not implicitly fall through.
+    #[test]
+    fn current_returns_none_when_all_superseded() {
+        use crate::registry::store::RegistryStore;
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let resp = server.publish_unverified_for_tests(&req).unwrap();
+        // Force the only version into Superseded directly.
+        server.store().mark_superseded(&resp.ctx_id).unwrap();
+
+        let cur = server.current(&resp.lineage_id, None).unwrap();
+        assert!(
+            cur.is_none(),
+            "all-superseded lineage MUST resolve to None per RFC-ACDP-0004 §5; got {cur:?}"
+        );
+    }
+
+    // ── BUG-02 — search honors anonymous_public_reads ──────────────────
+
+    /// BUG-02: a registry advertising `anonymous_public_reads: false`
+    /// MUST suppress public contexts from anonymous search results
+    /// (matching the behavior of `retrieve`). Same context surfaces
+    /// once the requester authenticates.
+    #[test]
+    fn search_suppresses_public_when_anonymous_public_reads_false() {
+        let mut c = caps();
+        c.anonymous_public_reads = false;
+        let server = RegistryServer::new(InMemoryStore::new(), c, "registry.example.com");
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("public-but-flag-off")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        server.publish_unverified_for_tests(&req).unwrap();
+
+        // Anonymous: must NOT see the public context (capability says so).
+        let anon = server
+            .search(
+                &SearchParams {
+                    q: Some("public-but-flag-off".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert!(
+            anon.matches.is_empty(),
+            "anonymous search MUST be empty when anonymous_public_reads=false; got {} matches",
+            anon.matches.len()
+        );
+
+        // Authenticated requester (any DID — public is universally visible
+        // once authenticated): MUST see the context.
+        let stranger = AgentDid::new("did:web:other.example.com:reader");
+        let authed = server
+            .search(
+                &SearchParams {
+                    q: Some("public-but-flag-off".into()),
+                    ..Default::default()
+                },
+                Some(&stranger),
+            )
+            .unwrap();
+        assert_eq!(
+            authed.matches.len(),
+            1,
+            "authenticated search MUST see public contexts regardless of anonymous_public_reads"
+        );
     }
 
     // ── try_new validation tests ────────────────────────────────────────
