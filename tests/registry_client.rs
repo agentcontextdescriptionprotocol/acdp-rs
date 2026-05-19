@@ -489,3 +489,88 @@ async fn trailing_slash_is_normalized() {
     let client = RegistryClient::new(&with_slash).unwrap();
     client.capabilities().await.unwrap();
 }
+
+/// BUG-09 — `capabilities_with_ttl` parses `Cache-Control: max-age=N`
+/// and uses it as the cache TTL. A registry serving max-age=60 means
+/// the resolver MUST honor that hint and refetch after 60s.
+#[tokio::test]
+async fn capabilities_ttl_reflects_cache_control_max_age() {
+    let server = MockServer::start().await;
+    let caps_body = json!({
+        "acdp_version": "0.0.1",
+        "registry_did": "did:web:registry.example.com",
+        "supported_signature_algorithms": ["ed25519"],
+        "supported_did_methods": ["did:web"],
+        "profiles": ["acdp-registry-core"],
+        "limits": { "max_payload_bytes": 1024, "max_embedded_bytes": 65536 }
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/.well-known/acdp.json"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Cache-Control", "max-age=60")
+                .set_body_json(caps_body),
+        )
+        .mount(&server)
+        .await;
+
+    let client = RegistryClient::new(&server.uri()).unwrap();
+    let (_caps, ttl) = client.capabilities_with_ttl().await.unwrap();
+    assert_eq!(
+        ttl,
+        std::time::Duration::from_secs(60),
+        "TTL MUST be the parsed max-age value (BUG-09 regression)"
+    );
+}
+
+/// BUG-09 — absurdly large `max-age` is clamped to the 3600s ceiling
+/// per RFC-ACDP-0006 §4.2.
+#[tokio::test]
+async fn capabilities_ttl_clamps_to_3600_ceiling() {
+    let server = MockServer::start().await;
+    let caps_body = json!({
+        "acdp_version": "0.0.1",
+        "registry_did": "did:web:registry.example.com",
+        "supported_signature_algorithms": ["ed25519"],
+        "supported_did_methods": ["did:web"],
+        "profiles": ["acdp-registry-core"],
+        "limits": { "max_payload_bytes": 1024, "max_embedded_bytes": 65536 }
+    });
+    Mock::given(method("GET"))
+        .and(path("/.well-known/acdp.json"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Cache-Control", "max-age=999999")
+                .set_body_json(caps_body),
+        )
+        .mount(&server)
+        .await;
+    let client = RegistryClient::new(&server.uri()).unwrap();
+    let (_caps, ttl) = client.capabilities_with_ttl().await.unwrap();
+    assert_eq!(ttl, std::time::Duration::from_secs(3600));
+}
+
+/// BUG-09 — no `Cache-Control` header falls back to the 300s default
+/// (matches the prior resolver-wide TTL so behavior is unchanged on
+/// silent registries).
+#[tokio::test]
+async fn capabilities_ttl_default_when_cache_control_absent() {
+    let server = MockServer::start().await;
+    let caps_body = json!({
+        "acdp_version": "0.0.1",
+        "registry_did": "did:web:registry.example.com",
+        "supported_signature_algorithms": ["ed25519"],
+        "supported_did_methods": ["did:web"],
+        "profiles": ["acdp-registry-core"],
+        "limits": { "max_payload_bytes": 1024, "max_embedded_bytes": 65536 }
+    });
+    Mock::given(method("GET"))
+        .and(path("/.well-known/acdp.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(caps_body))
+        .mount(&server)
+        .await;
+    let client = RegistryClient::new(&server.uri()).unwrap();
+    let (_caps, ttl) = client.capabilities_with_ttl().await.unwrap();
+    assert_eq!(ttl, std::time::Duration::from_secs(300));
+}

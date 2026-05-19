@@ -101,8 +101,14 @@ impl VerifiedContext {
             )));
         }
 
+        // BUG-05: use `verify_body_signed` (hash + signature only) so
+        // the schema / embedded-hash / did-web checks above stay
+        // policy-controlled. Calling `verify_body` here re-runs
+        // `validate_body` unconditionally — which previously made
+        // `policy.validate_body_schema = false`, `require_did_web =
+        // false`, and `verify_embedded_hashes = false` no-ops.
         let verifier = Verifier::new(resolver);
-        verifier.verify_body(&ctx.body).await?;
+        verifier.verify_body_signed(&ctx.body).await?;
 
         if !policy.allow_unknown_status {
             if let Some(other) = ctx.registry_state.status.as_other() {

@@ -506,6 +506,13 @@ impl RegistryStore for InMemoryStore {
                 .then_with(|| a.body.ctx_id.as_str().cmp(b.body.ctx_id.as_str()))
         });
 
+        // BUG-08: capture `total_estimate` BEFORE cursor filtering so
+        // it represents the total count across all pages (RFC-ACDP-0005
+        // §3 — clients use this for "page 1 of N" UIs). If we captured
+        // it after `retain`, page 2 would show "80 matches" for a
+        // 100-item search, page 3 "60", and so on.
+        let total_estimate = Some(matches.len() as u64);
+
         // BUG-10 cursor: opaque base64 of "<created_at_ms>:<ctx_id>".
         // ≥1h validity is implicit — cursors do not embed a timestamp,
         // so they remain valid until the underlying context is deleted.
@@ -530,7 +537,6 @@ impl RegistryStore for InMemoryStore {
         } else {
             None
         };
-        let total_estimate = Some(matches.len() as u64);
 
         let projected: Vec<SearchResult> = matches
             .iter()
@@ -866,6 +872,21 @@ mod tests {
                 "page 2 overlapped page 1"
             );
         }
+        // BUG-08: total_estimate MUST be stable across pages — captured
+        // BEFORE cursor filtering. Before the fix, page 2 reported a
+        // smaller total than page 1 (the remaining-from-cursor count).
+        assert_eq!(
+            p1.total_estimate, p2.total_estimate,
+            "total_estimate MUST be stable across pages (BUG-08); \
+             p1={:?}, p2={:?}",
+            p1.total_estimate, p2.total_estimate
+        );
+        assert_eq!(
+            p1.total_estimate,
+            Some(5),
+            "total_estimate MUST reflect total matches across all pages, got {:?}",
+            p1.total_estimate
+        );
     }
 
     #[test]
