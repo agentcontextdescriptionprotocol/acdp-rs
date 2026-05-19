@@ -96,6 +96,12 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2025-0134: rustls-pemfile is "unmaintained" (folded
+          # into rustls-pki-types upstream). Pulled in transitively by
+          # axum-server's tls-rustls feature, which we use only in the
+          # dev-dependency test harness — never propagated to consumers.
+          # Mirrors the same ignore in deny.toml.
+          ignore: RUSTSEC-2025-0134
 
   coverage:
     name: coverage (llvm-cov)

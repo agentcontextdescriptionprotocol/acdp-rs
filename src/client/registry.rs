@@ -205,11 +205,27 @@ impl RegistryClient {
     /// Body capped at 64 KB per RFC-ACDP-0006 §7.3.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn capabilities(&self) -> Result<CapabilitiesDocument, AcdpError> {
+        Ok(self.capabilities_with_ttl().await?.0)
+    }
+
+    /// Like [`Self::capabilities`] but also returns the cache TTL
+    /// derived from the response's `Cache-Control: max-age=N` header.
+    ///
+    /// Per RFC-ACDP-0006 §4.2, consumers SHOULD cache the capabilities
+    /// document for `min(max-age, 3600s)` seconds. When no
+    /// `Cache-Control` (or no parseable `max-age`) is returned, the
+    /// fallback is `300s` — a conservative middle-ground that matches
+    /// [`crate::client::ResolverOptions::capabilities_ttl`]'s default.
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
+    pub async fn capabilities_with_ttl(
+        &self,
+    ) -> Result<(CapabilitiesDocument, std::time::Duration), AcdpError> {
         let url = format!("{}/.well-known/acdp.json", self.base);
         let resp = self.http.get(&url).send().await?;
+        let ttl = cache_ttl_from_response(&resp);
         let caps: CapabilitiesDocument = self.parse_success(resp, MAX_METADATA_BYTES).await?;
         crate::validation::validate_capabilities(&caps)?;
-        Ok(caps)
+        Ok((caps, ttl))
     }
 
     // ── Publish ─────────────────────────────────────────────────────────────
@@ -510,6 +526,38 @@ impl RegistryClient {
             Err(AcdpError::from_wire_error(wire))
         }
     }
+}
+
+/// Extract the cache TTL for a capabilities response per
+/// RFC-ACDP-0006 §4.2 — `min(Cache-Control: max-age=N, 3600s)`.
+///
+/// Falls back to a conservative 300s when no parseable `max-age`
+/// directive is present (matches [`crate::client::ResolverOptions::capabilities_ttl`]'s
+/// default so behavior is identical to the pre-BUG-09 code path on
+/// silent registries).
+fn cache_ttl_from_response(resp: &reqwest::Response) -> std::time::Duration {
+    const MAX_CAPS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+    const DEFAULT_CAPS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+    let Some(cc) = resp
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return DEFAULT_CAPS_CACHE_TTL;
+    };
+    for directive in cc.split(',') {
+        let directive = directive.trim();
+        if let Some(value) = directive
+            .strip_prefix("max-age=")
+            .or_else(|| directive.strip_prefix("s-maxage="))
+        {
+            if let Ok(secs) = value.parse::<u64>() {
+                return std::time::Duration::from_secs(secs).min(MAX_CAPS_CACHE_TTL);
+            }
+        }
+    }
+    DEFAULT_CAPS_CACHE_TTL
 }
 
 fn parse_retrieval_metadata(resp: &reqwest::Response) -> RetrievalMetadata {

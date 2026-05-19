@@ -431,14 +431,106 @@ fn retrieval_examples_deserialize_as_body() {
         }
         let v = read_json(&path);
         // Some examples are full ACDP "context" envelopes (body+registry_state)
-        // others are just bodies. Try both.
-        if v.get("body").is_some() {
-            let _: acdp::types::body::FullContext = serde_json::from_value(v)
+        // others are just bodies. Try both, then run validate_body so we
+        // catch any regressions in field-shape rules (BUG-01: hostname
+        // form for `origin_registry`, etc.).
+        let body: Body = if v.get("body").is_some() {
+            let ctx: acdp::types::body::FullContext = serde_json::from_value(v)
                 .unwrap_or_else(|e| panic!("{}: not FullContext: {e}", path.display()));
+            ctx.body
         } else {
-            let _: Body = serde_json::from_value(v)
-                .unwrap_or_else(|e| panic!("{}: not Body: {e}", path.display()));
-        }
+            serde_json::from_value(v)
+                .unwrap_or_else(|e| panic!("{}: not Body: {e}", path.display()))
+        };
+        acdp::validation::validate_body(&body).unwrap_or_else(|e| {
+            panic!(
+                "{} failed validate_body — example must be schema-conformant: {e}",
+                path.display()
+            )
+        });
+    }
+}
+
+// ── body-001 / body-002 — origin_registry hostname vs DID (BUG-01) ──────────
+
+/// body-001 — `origin_registry` is a bare DNS hostname. The fixture's
+/// `body_fields_under_test.origin_registry` MUST pass our validator.
+#[test]
+fn body_001_origin_registry_hostname_accepted() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/body-001-origin-registry-hostname.json");
+    if !path.exists() {
+        return;
+    }
+    let v = read_json(&path);
+    let hostname = v["input"]["body_fields_under_test"]["origin_registry"]
+        .as_str()
+        .expect("fixture must expose origin_registry");
+    assert_eq!(hostname, "registry.example.com");
+    // Compose a minimal Body around this value and assert validate_body
+    // accepts it. (Schema validation against the hostname `$defs` is
+    // implicitly covered by the validate_body call once it includes
+    // validate_origin_registry — see body-002 for the negative case.)
+    let body = body_with_origin_registry(hostname);
+    acdp::validation::validate_body(&body)
+        .expect("body-001: hostname origin_registry MUST be accepted");
+}
+
+/// body-002 — `origin_registry` set to a `did:web:` URI MUST be rejected.
+/// Pins the BUG-01 fix.
+#[test]
+fn body_002_origin_registry_did_rejected() {
+    let body = body_with_origin_registry("did:web:registry.example.com");
+    let err = acdp::validation::validate_body(&body)
+        .expect_err("body-002: did:web origin_registry MUST be rejected");
+    assert!(
+        matches!(err, acdp::AcdpError::SchemaViolation(_)),
+        "body-002: error MUST be SchemaViolation, got {err:?}"
+    );
+}
+
+fn body_with_origin_registry(origin_registry: &str) -> Body {
+    use acdp::types::body::Signature;
+    use acdp::types::primitives::{
+        AgentDid, ContentHash, ContextType, CtxId, LineageId, Status, Visibility,
+    };
+    use chrono::{TimeZone, Utc};
+    let _ = Status::Active; // silence unused-import on no-default builds
+    Body {
+        ctx_id: CtxId("acdp://registry.example.com/00000000-0000-4000-8000-000000000001".into()),
+        lineage_id: LineageId(
+            "lin:sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
+        origin_registry: origin_registry.into(),
+        created_at: Utc.with_ymd_and_hms(2026, 5, 18, 0, 0, 0).unwrap(),
+        content_hash: ContentHash(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
+        signature: Signature {
+            algorithm: "ed25519".into(),
+            key_id: "did:web:agents.example.com:test#key-1".into(),
+            value: "A".repeat(86) + "==",
+        },
+        version: 1,
+        supersedes: None,
+        agent_id: AgentDid::new("did:web:agents.example.com:test"),
+        contributors: vec![],
+        title: "body-001/002 fixture body".into(),
+        context_type: ContextType::DataSnapshot,
+        data_refs: vec![],
+        derived_from: vec![],
+        visibility: Visibility::Public,
+        audience: None,
+        acdp_version: None,
+        description: None,
+        summary: None,
+        tags: None,
+        domain: None,
+        expires_at: None,
+        data_period: None,
+        metadata: None,
+        schema_uri: None,
+        extensions: Default::default(),
     }
 }
 

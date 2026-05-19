@@ -144,6 +144,52 @@ impl P256SigningKey {
             .as_bytes()
             .to_vec()
     }
+
+    /// Return the public key as a P-256 JWK object suitable for
+    /// embedding in a `did:web` verification method's `publicKeyJwk`
+    /// field:
+    ///
+    /// ```json
+    /// { "kty": "EC", "crv": "P-256",
+    ///   "x": "<base64url-no-pad x>",
+    ///   "y": "<base64url-no-pad y>" }
+    /// ```
+    ///
+    /// FEAT-03: lets producers wire a published key into a DID
+    /// document without manually splitting the SEC1 point and
+    /// base64url-encoding each half.
+    pub fn verifying_key_jwk(&self) -> serde_json::Value {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let sec1 = self.verifying_key_sec1();
+        // SEC1 uncompressed = 0x04 || X(32) || Y(32) — slice off the
+        // tag, split into halves, base64url-no-pad each.
+        let x_b64 = URL_SAFE_NO_PAD.encode(&sec1[1..33]);
+        let y_b64 = URL_SAFE_NO_PAD.encode(&sec1[33..65]);
+        serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": x_b64,
+            "y": y_b64,
+        })
+    }
+
+    /// Compose a complete `verificationMethod` entry for a `did:web`
+    /// DID document. `method_id` is the full DID URL (e.g.
+    /// `did:web:agents.example.com:alice#key-1`); `controller` is the
+    /// containing DID (without fragment).
+    ///
+    /// Output uses the `JsonWebKey2020` type so consumers can resolve
+    /// the algorithm via
+    /// [`crate::did::document::VerificationMethod::declared_algorithm`]
+    /// (RFC-ACDP-0008 §3.9 algorithm-downgrade rejection).
+    pub fn did_verification_method(&self, method_id: &str, controller: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": method_id,
+            "type": "JsonWebKey2020",
+            "controller": controller,
+            "publicKeyJwk": self.verifying_key_jwk(),
+        })
+    }
 }
 
 impl std::fmt::Debug for P256SigningKey {
@@ -246,6 +292,55 @@ mod tests {
         let pub_sec1 = key.verifying_key_sec1();
         verify_ecdsa_p256(&pub_sec1, &sig, hash.as_str())
             .expect("round-trip p256 signature must verify");
+    }
+
+    /// FEAT-03: `verifying_key_jwk` produces an `EC/P-256` JWK whose
+    /// `x`/`y` coordinates round-trip back to the SEC1 public key via
+    /// `VerificationMethod::ecdsa_p256_public_key_sec1`. Pins the
+    /// publish-side helper against the resolver-side extractor so a
+    /// DID document populated via this helper verifies cleanly.
+    #[test]
+    fn p256_verifying_key_jwk_round_trips_to_sec1() {
+        use crate::did::document::VerificationMethod;
+        let key = P256SigningKey::generate();
+        let jwk = key.verifying_key_jwk();
+        assert_eq!(jwk["kty"], "EC");
+        assert_eq!(jwk["crv"], "P-256");
+
+        // Build a VerificationMethod with this JWK and ask the extractor
+        // for the SEC1 form — MUST equal what verifying_key_sec1
+        // produced directly.
+        let vm = VerificationMethod {
+            id: "did:web:agents.example.com:test#key-1".into(),
+            method_type: "JsonWebKey2020".into(),
+            controller: "did:web:agents.example.com:test".into(),
+            public_key_jwk: Some(jwk),
+            public_key_multibase: None,
+        };
+        let sec1_via_jwk = vm.ecdsa_p256_public_key_sec1().unwrap();
+        assert_eq!(sec1_via_jwk, key.verifying_key_sec1());
+        assert_eq!(vm.declared_algorithm(), Some("ecdsa-p256"));
+    }
+
+    /// FEAT-03: `did_verification_method` assembles a complete VM
+    /// suitable for embedding in a DID document's `verificationMethod`
+    /// array. Verifies the assembled object deserializes as
+    /// `VerificationMethod` and exposes the right algorithm declaration.
+    #[test]
+    fn p256_did_verification_method_assembles() {
+        use crate::did::document::VerificationMethod;
+        let key = P256SigningKey::generate();
+        let vm_value = key.did_verification_method(
+            "did:web:agents.example.com:alice#key-1",
+            "did:web:agents.example.com:alice",
+        );
+        assert_eq!(vm_value["type"], "JsonWebKey2020");
+        let vm: VerificationMethod = serde_json::from_value(vm_value).unwrap();
+        assert_eq!(vm.id, "did:web:agents.example.com:alice#key-1");
+        assert_eq!(vm.declared_algorithm(), Some("ecdsa-p256"));
+        // Round-trip through the resolver-side extractor.
+        let sec1 = vm.ecdsa_p256_public_key_sec1().unwrap();
+        assert_eq!(sec1, key.verifying_key_sec1());
     }
 
     #[test]
