@@ -57,11 +57,24 @@ impl<'a> Verifier<'a> {
     /// structural part itself and records per-`DataRef` outcomes
     /// individually.
     pub async fn verify_body_signed(&self, body: &Body) -> Result<(), AcdpError> {
-        // Step 0: recompute content_hash over ProducerContent
-        let body_val = serde_json::to_value(body)?;
-        verify_content_hash(&body_val, &body.content_hash)?;
+        self.verify_body_hash(body)?;
+        self.verify_body_signature(body).await
+    }
 
-        // Steps 1–7: shared signature-envelope verification.
+    /// Step 0 only — recompute the `content_hash` over ProducerContent
+    /// and compare against `body.content_hash`. Lets diagnostic
+    /// callers record hash-pass/fail independently of the signature
+    /// stage (FEAT-05).
+    pub fn verify_body_hash(&self, body: &Body) -> Result<(), AcdpError> {
+        let body_val = serde_json::to_value(body)?;
+        verify_content_hash(&body_val, &body.content_hash)
+    }
+
+    /// Steps 1–7 only — resolve the producer's DID, find the signing
+    /// key, verify the signature over the (already-stored)
+    /// `body.content_hash`. Assumes [`Self::verify_body_hash`] (or an
+    /// equivalent check) has already run.
+    pub async fn verify_body_signature(&self, body: &Body) -> Result<(), AcdpError> {
         verify_signature_envelope(
             &body.agent_id,
             &body.signature,

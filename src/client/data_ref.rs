@@ -10,10 +10,13 @@
 //!   async-fn-in-trait, so `impl DataRefFetcher` works directly in
 //!   generic positions. Wrap a custom impl in `Box<dyn …>` only if your
 //!   call site needs dynamic dispatch.
-//! - [`HttpsDataRefFetcher`] — concrete fetcher for `https://…` and
-//!   `http://…` URIs. Enforces an [`crate::safe_http::SsrfPolicy`] before
-//!   the request, caps response size, and has its own timeout. Structured
-//!   locators are NOT handled — they need protocol-specific knowledge.
+//! - [`HttpsDataRefFetcher`] — concrete fetcher for `https://…` URIs.
+//!   The default [`crate::safe_http::SsrfPolicy`] is HTTPS-only;
+//!   `http://` is rejected at the URL boundary before any socket
+//!   activity. A test SSRF policy with `allow_http: true` may relax
+//!   this. Caps response size at 16 MiB and has a 30 s timeout.
+//!   Structured locators are NOT handled — they need protocol-specific
+//!   knowledge.
 //! - [`fetch_and_verify_data_ref`] — convenience helper that wires a
 //!   fetcher to the declared `content_hash`, returning bytes only after
 //!   the SHA-256 matches.

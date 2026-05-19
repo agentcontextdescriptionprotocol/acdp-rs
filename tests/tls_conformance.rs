@@ -758,6 +758,128 @@ async fn fetch_report_records_embedded_hash_failure() {
     );
 }
 
+/// FEAT-05 — `fetch_report_diagnose` populates the report even when a
+/// top-level check fails. A forged signature (signer key ≠ DID-resolved
+/// key) MUST surface as `(None, report)` with `body_hash_ok = true`,
+/// `signature_ok = false`, `schema_ok = true`. The default
+/// `fetch_report` would have returned `Err(InvalidSignature)` with no
+/// report.
+#[tokio::test]
+async fn fetch_report_diagnose_records_forged_signature() {
+    use acdp::client::{RegistryClient, VerificationPolicy, VerifiedContext};
+    use acdp::crypto::{compute_content_hash, derive_lineage_id};
+    use acdp::types::body::{Body, FullContext, RegistryState, Signature};
+    use acdp::types::primitives::{CtxId, Status};
+    use chrono::{TimeZone, Utc};
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let honest_key = SigningKey::generate();
+    let attacker_key = SigningKey::generate();
+    let honest_pub = honest_key.verifying_key_bytes();
+
+    // TLS DID server hosts the honest key.
+    let tls = TlsTestServer::start_with(|port| {
+        let did = format!("did:web:localhost%3A{port}");
+        did_doc_router(ed25519_did_doc(&did, "key-1", &honest_pub))
+    })
+    .await;
+    let did = tls.did();
+    let key_id = format!("{did}#key-1");
+
+    // Compute the hash over a well-formed ProducerContent, then sign
+    // with the ATTACKER key. Hash will verify; signature won't.
+    let ctx_id = CtxId("acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into());
+    let lineage_id = derive_lineage_id(&ctx_id);
+    let mut body = Body {
+        ctx_id: ctx_id.clone(),
+        lineage_id,
+        origin_registry: "registry.example.com".into(),
+        created_at: Utc.with_ymd_and_hms(2026, 5, 18, 0, 0, 0).unwrap(),
+        content_hash: acdp::types::ContentHash(String::new()),
+        signature: Signature {
+            algorithm: "ed25519".into(),
+            key_id: key_id.clone(),
+            value: String::new(),
+        },
+        version: 1,
+        supersedes: None,
+        agent_id: AgentDid::new(did.clone()),
+        contributors: vec![],
+        title: "FEAT-05 diagnose forged sig".into(),
+        context_type: ContextType::DataSnapshot,
+        data_refs: vec![],
+        derived_from: vec![],
+        visibility: Visibility::Public,
+        audience: None,
+        acdp_version: None,
+        description: None,
+        summary: None,
+        tags: None,
+        domain: None,
+        expires_at: None,
+        data_period: None,
+        metadata: None,
+        schema_uri: None,
+        extensions: Default::default(),
+    };
+    let body_value = serde_json::to_value(&body).unwrap();
+    body.content_hash = compute_content_hash(&body_value).unwrap();
+    body.signature.value = attacker_key.sign_content_hash(&body.content_hash);
+
+    let full_value = serde_json::to_value(FullContext {
+        body,
+        registry_state: RegistryState {
+            status: Status::Active,
+            extensions: Default::default(),
+        },
+        registry_receipt: None,
+    })
+    .unwrap();
+
+    let registry = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/contexts/.+"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(full_value))
+        .mount(&registry)
+        .await;
+    let client = RegistryClient::new(&registry.uri()).unwrap();
+    let resolver = WebResolver::with_root_cert_pem(&tls.root_cert_pem).unwrap();
+
+    // Diagnose: MUST succeed with a populated report.
+    let (verified, report) = VerifiedContext::fetch_report_diagnose(
+        &client,
+        &resolver,
+        &ctx_id,
+        &VerificationPolicy::default(),
+    )
+    .await
+    .expect("fetch_report_diagnose MUST surface the report rather than erroring");
+
+    assert!(
+        verified.is_none(),
+        "top-level failure MUST yield None for the verified context"
+    );
+    assert!(report.schema_ok, "schema check MUST still pass");
+    assert!(
+        report.body_hash_ok,
+        "hash recomputation MUST pass — the attacker computed content_hash correctly"
+    );
+    assert!(
+        !report.signature_ok,
+        "signature MUST be recorded as failed — attacker_key ≠ honest key in DID doc"
+    );
+
+    // The default `fetch_report` MUST still hard-fail for the same input.
+    match VerifiedContext::fetch_report(&client, &resolver, &ctx_id, &VerificationPolicy::default())
+        .await
+    {
+        Ok(_) => panic!("default fetch_report MUST reject forged signature"),
+        Err(AcdpError::InvalidSignature(_)) => {}
+        Err(other) => panic!("default fetch_report MUST surface InvalidSignature, got {other:?}"),
+    }
+}
+
 // ── fixture presence checks ──────────────────────────────────────────────────
 
 /// Assert each Phase-12 fixture exists in the bundled spec checkout.
