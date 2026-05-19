@@ -215,7 +215,7 @@ impl RegistryClient {
     /// document for `min(max-age, 3600s)` seconds. When no
     /// `Cache-Control` (or no parseable `max-age`) is returned, the
     /// fallback is `300s` — a conservative middle-ground that matches
-    /// [`ResolverOptions::capabilities_ttl`]'s default.
+    /// [`crate::client::ResolverOptions::capabilities_ttl`]'s default.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self)))]
     pub async fn capabilities_with_ttl(
         &self,
@@ -532,7 +532,7 @@ impl RegistryClient {
 /// RFC-ACDP-0006 §4.2 — `min(Cache-Control: max-age=N, 3600s)`.
 ///
 /// Falls back to a conservative 300s when no parseable `max-age`
-/// directive is present (matches [`ResolverOptions::capabilities_ttl`]'s
+/// directive is present (matches [`crate::client::ResolverOptions::capabilities_ttl`]'s
 /// default so behavior is identical to the pre-BUG-09 code path on
 /// silent registries).
 fn cache_ttl_from_response(resp: &reqwest::Response) -> std::time::Duration {

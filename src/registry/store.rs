@@ -827,11 +827,22 @@ fn parse_opt_rfc3339(
     Ok(Some(dt.with_timezone(&chrono::Utc)))
 }
 
-/// Opaque cursor encoding — base64 of `<created_at_millis>:<ctx_id>`.
-/// Plain `STANDARD` engine so cursors are stable across machines.
+/// Cursor TTL — clients SHOULD re-fetch after this window.
+/// RFC-ACDP-0005 §3 leaves the exact value to implementations; 1 hour
+/// matches the common "≥1h" cursor-validity expectation.
+const CURSOR_TTL: chrono::Duration = chrono::Duration::seconds(3600);
+
+/// Opaque cursor encoding — base64 of
+/// `<mint_unix_ms>:<created_at_millis>:<ctx_id>`.
+///
+/// The `mint_unix_ms` prefix lets [`decode_cursor`] enforce the
+/// `CURSOR_TTL` window and surface `AcdpError::CursorExpired` rather
+/// than silently accepting an ancient cursor (FEAT-04). Plain
+/// `STANDARD` engine so cursors are stable across machines.
 fn encode_cursor(created_at_ms: i64, ctx_id: &str) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    STANDARD.encode(format!("{created_at_ms}:{ctx_id}"))
+    let mint_ms = chrono::Utc::now().timestamp_millis();
+    STANDARD.encode(format!("{mint_ms}:{created_at_ms}:{ctx_id}"))
 }
 
 fn decode_cursor(s: &str) -> Result<Option<(i64, String)>, AcdpError> {
@@ -841,13 +852,39 @@ fn decode_cursor(s: &str) -> Result<Option<(i64, String)>, AcdpError> {
         .map_err(|_| AcdpError::InvalidCursor("cursor is not valid base64".into()))?;
     let decoded = String::from_utf8(bytes)
         .map_err(|_| AcdpError::InvalidCursor("cursor is not utf-8".into()))?;
-    let (ms_str, id) = decoded
-        .split_once(':')
-        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ':' separator".into()))?;
-    let ms: i64 = ms_str
+    // Format: "<mint_ms>:<anchor_ms>:<ctx_id>". The mint timestamp
+    // prefix is FEAT-04 expiry tracking.
+    let mut parts = decoded.splitn(3, ':');
+    let mint_str = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing mint timestamp".into()))?;
+    let anchor_str = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing anchor timestamp".into()))?;
+    let ctx_id = parts
+        .next()
+        .ok_or_else(|| AcdpError::InvalidCursor("cursor missing ctx_id".into()))?;
+    let mint_ms: i64 = mint_str
+        .parse()
+        .map_err(|_| AcdpError::InvalidCursor("cursor mint millis is not an integer".into()))?;
+    let anchor_ms: i64 = anchor_str
         .parse()
         .map_err(|_| AcdpError::InvalidCursor("cursor anchor millis is not an integer".into()))?;
-    Ok(Some((ms, id.to_string())))
+
+    // FEAT-04: reject cursors older than CURSOR_TTL with the
+    // dedicated `cursor_expired` wire code so clients can distinguish
+    // "you typo'd the cursor" (InvalidCursor) from "your cursor aged
+    // out, restart the scan from page 1" (CursorExpired).
+    let now = chrono::Utc::now().timestamp_millis();
+    let age_ms = now.saturating_sub(mint_ms);
+    if age_ms > CURSOR_TTL.num_milliseconds() {
+        // CursorExpired is a unit variant in the wire-error mapping;
+        // the diagnostic ("aged Xms ago") is intentionally surfaced
+        // via Display rather than a payload so it round-trips through
+        // `AcdpError::from_wire_error`.
+        return Err(AcdpError::CursorExpired);
+    }
+    Ok(Some((anchor_ms, ctx_id.to_string())))
 }
 
 #[cfg(test)]
@@ -1149,6 +1186,35 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, AcdpError::InvalidCursor(_)));
+    }
+
+    /// FEAT-04: a cursor whose embedded mint timestamp is older than
+    /// `CURSOR_TTL` MUST surface as `CursorExpired`, not `InvalidCursor`.
+    /// Clients distinguish "you typo'd the cursor" from "your cursor
+    /// aged out, restart the scan from page 1".
+    #[test]
+    fn search_aged_cursor_rejected_as_cursor_expired() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let s = InMemoryStore::new();
+        // Mint a cursor 7200s in the past — twice the 3600s TTL.
+        let stale_mint_ms = chrono::Utc::now().timestamp_millis() - 7200 * 1000;
+        let aged = STANDARD.encode(format!(
+            "{stale_mint_ms}:0:acdp://r/12345678-1234-4321-8123-1234567812aa"
+        ));
+        let err = s
+            .search(
+                &SearchParams {
+                    cursor: Some(aged),
+                    ..Default::default()
+                },
+                None,
+                true,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, AcdpError::CursorExpired),
+            "expired cursor MUST surface CursorExpired, got {err:?}"
+        );
     }
 
     #[test]

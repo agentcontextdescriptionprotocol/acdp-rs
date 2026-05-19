@@ -135,6 +135,102 @@ async fn cli_publish_against_mocked_registry() {
     );
 }
 
+/// FEAT-02 — `--key-algorithm ecdsa-p256` builds a P256 producer.
+/// The posted body MUST carry `signature.algorithm = "ecdsa-p256"`
+/// and an 88-char IEEE-1363 base64 signature.
+#[tokio::test]
+async fn cli_publish_with_ecdsa_p256_key() {
+    let registry = MockServer::start().await;
+    let response_body = json!({
+        "ctx_id": "acdp://r.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:b14ccd2a8b34530309255db68c151a10689b6a82feb30aff9222d54fdd871720",
+        "version": 1,
+        "created_at": "2026-05-18T00:00:00.000Z",
+        "status": "active",
+    });
+    Mock::given(method("POST"))
+        .and(path("/contexts"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(response_body))
+        .mount(&registry)
+        .await;
+
+    // Use scalar=1 (the sig-002 golden seed) — guaranteed valid.
+    let seed_hex = format!("{:0>64}", "1");
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "publish",
+            &registry.uri(),
+            "--key-seed",
+            &seed_hex,
+            "--key-algorithm",
+            "ecdsa-p256",
+            "--agent-id",
+            "did:web:agents.example.com:test",
+            "--key-id",
+            "did:web:agents.example.com:test#key-1",
+            "--title",
+            "p256 cli test",
+            "--type",
+            "data_snapshot",
+        ],
+        None,
+    );
+    assert_eq!(
+        code, 0,
+        "p256 publish MUST succeed; stderr={stderr}, stdout={stdout}"
+    );
+
+    let requests = registry
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    let last = requests.last().expect("at least one request");
+    let sent: acdp::types::PublishRequest =
+        serde_json::from_slice(&last.body).expect("posted body parses as PublishRequest");
+    assert_eq!(
+        sent.signature.algorithm, "ecdsa-p256",
+        "CLI MUST emit `ecdsa-p256` algorithm string when --key-algorithm requests it"
+    );
+    assert_eq!(
+        sent.signature.value.len(),
+        88,
+        "p256 wire signature MUST be 88 base64 chars (IEEE 1363 r‖s)"
+    );
+}
+
+/// FEAT-02 — unknown `--key-algorithm` is a usage error.
+#[test]
+fn cli_publish_rejects_unknown_key_algorithm() {
+    let seed_hex = "0".repeat(64);
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "publish",
+            "http://unused.example.com",
+            "--key-seed",
+            &seed_hex,
+            "--key-algorithm",
+            "rsa-2048",
+            "--agent-id",
+            "did:web:agents.example.com:test",
+            "--key-id",
+            "did:web:agents.example.com:test#key-1",
+            "--title",
+            "x",
+            "--type",
+            "data_snapshot",
+        ],
+        None,
+    );
+    assert_eq!(
+        code, 1,
+        "unknown --key-algorithm MUST exit 1; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("rsa-2048") || stderr.contains("--key-algorithm"),
+        "stderr MUST mention the bad algorithm, got: {stderr}"
+    );
+}
+
 /// FEAT-04 — `--idempotency-key` is forwarded as a request header. We
 /// match the request having the header set.
 #[tokio::test]

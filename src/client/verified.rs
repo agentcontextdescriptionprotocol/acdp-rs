@@ -138,6 +138,11 @@ impl VerifiedContext {
     /// verification. The top-level checks (schema, body hash,
     /// signature) remain hard-fail: if any of them fails, the method
     /// returns an `AcdpError` and produces no report.
+    ///
+    /// For diagnostic callers that want a populated report even when
+    /// a top-level check fails (e.g. an audit walker that needs to
+    /// distinguish "wrong hash" from "wrong signature"), use
+    /// [`Self::fetch_report_diagnose`] instead.
     pub async fn fetch_report(
         client: &RegistryClient,
         resolver: &WebResolver,
@@ -145,6 +150,81 @@ impl VerifiedContext {
         policy: &VerificationPolicy,
     ) -> Result<(Self, VerificationReport), AcdpError> {
         Self::fetch_report_inner::<NoFetcher>(client, resolver, ctx_id, policy, None).await
+    }
+
+    /// Diagnostic variant of [`Self::fetch_report`] that never
+    /// short-circuits on a top-level failure — schema, body-hash, and
+    /// signature outcomes are each recorded individually in the
+    /// returned [`VerificationReport`]. Returns `Ok((None, report))`
+    /// when any top-level stage failed (the report shows which one);
+    /// `Ok((Some(verified), report))` only when every check passed
+    /// (FEAT-05).
+    ///
+    /// Use cases:
+    /// - Audit walkers that need to classify failures by stage.
+    /// - Admin tooling that wants to distinguish "hash mismatch"
+    ///   (probable tampering / encoding drift) from "signature
+    ///   verification failed" (key compromise / DID resolution
+    ///   problem).
+    ///
+    /// Network errors (retrieve, DID resolution) still propagate as
+    /// `Err` — there's no body to inspect when the registry is
+    /// unreachable.
+    pub async fn fetch_report_diagnose(
+        client: &RegistryClient,
+        resolver: &WebResolver,
+        ctx_id: &CtxId,
+        policy: &VerificationPolicy,
+    ) -> Result<(Option<Self>, VerificationReport), AcdpError> {
+        let ctx = client.retrieve(ctx_id).await?;
+        let mut report = VerificationReport {
+            body_hash_ok: false,
+            signature_ok: false,
+            schema_ok: false,
+            data_ref_embedded: Vec::with_capacity(ctx.body.data_refs.len()),
+            data_ref_external: Vec::with_capacity(ctx.body.data_refs.len()),
+        };
+
+        // Schema (structural) — record pass/fail.
+        if policy.validate_body_schema {
+            match crate::validation::validate_body_structural(&ctx.body) {
+                Ok(()) => report.schema_ok = true,
+                Err(_) => { /* keep schema_ok=false; continue collecting */ }
+            }
+        } else {
+            report.schema_ok = true;
+        }
+
+        // Per-DataRef embedded hashes — same as fetch_report_inner.
+        for dr in &ctx.body.data_refs {
+            if let (Some(emb), Some(_)) = (&dr.embedded, &dr.content_hash) {
+                let outcome = crate::validation::verify_embedded_hash(dr)
+                    .and_then(|()| crate::validation::embedded_decoded_bytes(emb).map(|b| b.len()));
+                report.data_ref_embedded.push(outcome);
+            } else {
+                report.data_ref_embedded.push(Ok(0));
+            }
+        }
+
+        // Hash + signature recorded independently (FEAT-05).
+        let verifier = Verifier::new(resolver);
+        report.body_hash_ok = verifier.verify_body_hash(&ctx.body).is_ok();
+        report.signature_ok = verifier.verify_body_signature(&ctx.body).await.is_ok();
+
+        // External fetches were not attempted (this method has no
+        // fetcher param — diagnostic callers can wire their own).
+        for _ in &ctx.body.data_refs {
+            report.data_ref_external.push(None);
+        }
+
+        // Decide whether to surface the verified handle.
+        let all_top_level_pass = report.schema_ok && report.body_hash_ok && report.signature_ok;
+        let verified = if all_top_level_pass {
+            Some(Self { inner: ctx })
+        } else {
+            None
+        };
+        Ok((verified, report))
     }
 
     /// Retrieve + verify like [`Self::fetch_report`], and additionally
