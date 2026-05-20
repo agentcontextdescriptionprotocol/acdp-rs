@@ -25,6 +25,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::error::AcdpError;
 
+#[cfg(feature = "client")]
+use std::sync::Arc;
+
 // Re-exported from [`crate::limits`] for back-compat.
 pub use crate::limits::{MAX_CONTEXT_BYTES, MAX_METADATA_BYTES, MAX_REDIRECTS};
 
@@ -35,6 +38,18 @@ pub struct SsrfPolicy {
     pub reject_ip_literals: bool,
     /// If false, only `https://` URLs are accepted. Default `false`.
     pub allow_http: bool,
+    /// When true, permit IPv4 `127.0.0.0/8` and IPv6 `::1` (loopback)
+    /// across [`Self::check_ip`] / [`Self::check_resolved_ip`] /
+    /// [`Self::pin_resolved_ip`]. All other forbidden ranges
+    /// (RFC 1918, link-local / IMDS, ULA, CGNAT, multicast, …) still
+    /// apply. Default `false`.
+    ///
+    /// Intended for test harnesses that resolve `did:web:localhost…`
+    /// against a self-signed in-process HTTPS server bound to
+    /// `127.0.0.1`. Production callers MUST keep this `false` — opening
+    /// loopback turns the resolver into an SSRF vector against
+    /// process-internal listeners (RFC-ACDP-0008 §4.8).
+    pub allow_loopback_resolved: bool,
 }
 
 impl Default for SsrfPolicy {
@@ -42,6 +57,21 @@ impl Default for SsrfPolicy {
         Self {
             reject_ip_literals: true,
             allow_http: false,
+            allow_loopback_resolved: false,
+        }
+    }
+}
+
+impl SsrfPolicy {
+    /// A test-only policy: defaults + `allow_loopback_resolved = true`.
+    ///
+    /// `#[doc(hidden)]` because production must never use this — see
+    /// [`Self::allow_loopback_resolved`].
+    #[doc(hidden)]
+    pub fn allow_test_loopback() -> Self {
+        Self {
+            allow_loopback_resolved: true,
+            ..Self::default()
         }
     }
 }
@@ -70,7 +100,7 @@ impl SsrfPolicy {
                         "SSRF policy: IPv4 literal '{v4}' not permitted; use a hostname"
                     )));
                 }
-                check_safe_ip(IpAddr::V4(v4))?;
+                self.check_ip(IpAddr::V4(v4))?;
             }
             url::Host::Ipv6(v6) => {
                 if self.reject_ip_literals {
@@ -78,7 +108,7 @@ impl SsrfPolicy {
                         "SSRF policy: IPv6 literal '{v6}' not permitted; use a hostname"
                     )));
                 }
-                check_safe_ip(IpAddr::V6(v6))?;
+                self.check_ip(IpAddr::V6(v6))?;
             }
             url::Host::Domain(name) => {
                 if name.is_empty() || name.len() > 253 {
@@ -94,8 +124,36 @@ impl SsrfPolicy {
 
     /// Validate an already-resolved [`IpAddr`] — useful when DNS resolution
     /// is performed externally and the caller wants to filter pre-connect.
+    /// Respects [`Self::allow_loopback_resolved`].
     pub fn check_resolved_ip(&self, ip: IpAddr) -> Result<(), AcdpError> {
-        check_safe_ip(ip)
+        self.check_ip(ip)
+    }
+
+    /// Range filter for a single [`IpAddr`], respecting the policy's
+    /// [`Self::allow_loopback_resolved`] flag.
+    pub fn check_ip(&self, ip: IpAddr) -> Result<(), AcdpError> {
+        let bad = match ip {
+            IpAddr::V4(v4) => {
+                if self.allow_loopback_resolved && v4.is_loopback() {
+                    false
+                } else {
+                    is_unsafe_v4(v4)
+                }
+            }
+            IpAddr::V6(v6) => {
+                if self.allow_loopback_resolved && v6.is_loopback() {
+                    false
+                } else {
+                    is_unsafe_v6(v6)
+                }
+            }
+        };
+        if bad {
+            return Err(AcdpError::SchemaViolation(format!(
+                "SSRF policy: IP address '{ip}' is in a forbidden range"
+            )));
+        }
+        Ok(())
     }
 
     /// DNS rebinding protection per RFC-ACDP-0006 §7.6.
@@ -124,7 +182,7 @@ impl SsrfPolicy {
         }
         let mut last_err: Option<AcdpError> = None;
         for addr in &candidates {
-            match check_safe_ip(addr.ip()) {
+            match self.check_ip(addr.ip()) {
                 Ok(()) => return Ok(*addr),
                 Err(e) => last_err = Some(e),
             }
@@ -156,7 +214,11 @@ impl SsrfPolicy {
     }
 }
 
-/// Reject the danger ranges enumerated by RFC-ACDP-0006 §7.1.
+/// Strict-default range filter (no loopback allowance). Retained as a
+/// test-only helper that pins the legacy `check_safe_ip` semantics —
+/// production callers should use the policy-aware
+/// [`SsrfPolicy::check_ip`] instead.
+#[cfg(test)]
 fn check_safe_ip(ip: IpAddr) -> Result<(), AcdpError> {
     let bad = match ip {
         IpAddr::V4(v4) => is_unsafe_v4(v4),
@@ -168,6 +230,66 @@ fn check_safe_ip(ip: IpAddr) -> Result<(), AcdpError> {
         )));
     }
     Ok(())
+}
+
+// ── DNS-rebinding protection (RFC-ACDP-0006 §7.6 / RFC-ACDP-0008 §4.8) ──────
+//
+// Plumb [`SsrfPolicy::check_ip`] into reqwest's DNS resolver hook so the
+// filter and the actual TCP connect see the SAME resolved IP. A hostile
+// authoritative DNS server can no longer flip the answer between a
+// pre-connect `pin_resolved_ip` check and the real connect: reqwest
+// passes the addresses we return straight to the connector.
+
+/// `reqwest::dns::Resolve` implementation that filters every resolved
+/// IP through an [`SsrfPolicy`] before handing it to the connector.
+#[cfg(feature = "client")]
+pub(crate) struct SafeDnsResolver {
+    policy: SsrfPolicy,
+}
+
+#[cfg(feature = "client")]
+impl SafeDnsResolver {
+    pub(crate) fn arc(policy: SsrfPolicy) -> Arc<Self> {
+        Arc::new(Self { policy })
+    }
+}
+
+#[cfg(feature = "client")]
+impl reqwest::dns::Resolve for SafeDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let policy = self.policy.clone();
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // Port 0 — reqwest replaces it with the URL's port (or the
+            // scheme default) before connecting. We only care about the
+            // IPs returned.
+            let target = format!("{host}:0");
+            let candidates: Vec<SocketAddr> = tokio::net::lookup_host(&target)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+                .collect();
+
+            let safe: Vec<SocketAddr> = candidates
+                .iter()
+                .copied()
+                .filter(|a| policy.check_ip(a.ip()).is_ok())
+                .collect();
+
+            if safe.is_empty() {
+                // RFC-ACDP-0008 §4.8 — refusal is policy-driven; reqwest
+                // bubbles this up as a transport error and the caller's
+                // error mapper (e.g. WebResolver) translates it.
+                let count = candidates.len();
+                let msg: String = format!(
+                    "SSRF policy refused all {count} DNS answer(s) for '{host}' (range filter)"
+                );
+                return Err(msg.into());
+            }
+
+            let addrs: reqwest::dns::Addrs = Box::new(safe.into_iter());
+            Ok(addrs)
+        })
+    }
 }
 
 fn is_unsafe_v4(ip: Ipv4Addr) -> bool {

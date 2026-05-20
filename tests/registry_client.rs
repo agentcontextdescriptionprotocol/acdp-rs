@@ -87,7 +87,7 @@ async fn capabilities_happy_path() {
     Mock::given(method("GET"))
         .and(path("/.well-known/acdp.json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "acdp_version": "0.0.1",
+            "acdp_version": "0.1.0",
             "registry_did": "did:web:registry.example.com",
             "supported_signature_algorithms": ["ed25519"],
             "supported_did_methods": ["did:web"],
@@ -105,7 +105,7 @@ async fn capabilities_happy_path() {
     let client = RegistryClient::new(&server.uri()).unwrap();
     let caps = client.capabilities().await.expect("capabilities call");
 
-    assert_eq!(caps.acdp_version, "0.0.1");
+    assert_eq!(caps.acdp_version, "0.1.0");
     assert!(caps.supports_discovery());
     assert!(!caps.supports_federation());
     assert_eq!(caps.limits.max_embedded_bytes, 65536);
@@ -352,10 +352,11 @@ async fn search_passes_query_string() {
         .and(query_param("q", "revenue"))
         .and(query_param("type", "data_snapshot"))
         .and(query_param("limit", "10"))
+        // A registry with no further pages MUST omit `next_cursor`, not
+        // emit `next_cursor: null` (schema-005 absent-vs-null convention).
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "matches": [],
-            "total_estimate": 0,
-            "next_cursor": null
+            "total_estimate": 0
         })))
         .mount(&server)
         .await;
@@ -475,7 +476,7 @@ async fn trailing_slash_is_normalized() {
     Mock::given(method("GET"))
         .and(path("/.well-known/acdp.json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "acdp_version": "0.0.1",
+            "acdp_version": "0.1.0",
             "registry_did": "did:web:registry.example.com",
             "supported_signature_algorithms": ["ed25519"],
             "supported_did_methods": ["did:web"],
@@ -497,7 +498,7 @@ async fn trailing_slash_is_normalized() {
 async fn capabilities_ttl_reflects_cache_control_max_age() {
     let server = MockServer::start().await;
     let caps_body = json!({
-        "acdp_version": "0.0.1",
+        "acdp_version": "0.1.0",
         "registry_did": "did:web:registry.example.com",
         "supported_signature_algorithms": ["ed25519"],
         "supported_did_methods": ["did:web"],
@@ -530,7 +531,7 @@ async fn capabilities_ttl_reflects_cache_control_max_age() {
 async fn capabilities_ttl_clamps_to_3600_ceiling() {
     let server = MockServer::start().await;
     let caps_body = json!({
-        "acdp_version": "0.0.1",
+        "acdp_version": "0.1.0",
         "registry_did": "did:web:registry.example.com",
         "supported_signature_algorithms": ["ed25519"],
         "supported_did_methods": ["did:web"],
@@ -558,7 +559,7 @@ async fn capabilities_ttl_clamps_to_3600_ceiling() {
 async fn capabilities_ttl_default_when_cache_control_absent() {
     let server = MockServer::start().await;
     let caps_body = json!({
-        "acdp_version": "0.0.1",
+        "acdp_version": "0.1.0",
         "registry_did": "did:web:registry.example.com",
         "supported_signature_algorithms": ["ed25519"],
         "supported_did_methods": ["did:web"],

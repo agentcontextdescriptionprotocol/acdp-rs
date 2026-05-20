@@ -64,6 +64,20 @@ pub struct DataRef {
     /// Inline embedded payload. Decoded size MUST NOT exceed 64 KB.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedded: Option<EmbeddedContent>,
+
+    /// Unknown producer-controlled `DataRef` fields, preserved verbatim.
+    ///
+    /// `acdp-data-ref.schema.json` has NO `additionalProperties: false`
+    /// at its root — the object is open by design. A `DataRef` lives
+    /// inside `ProducerContent` (the `content_hash` preimage), so a
+    /// future ACDP minor version that adds a producer-controlled DataRef
+    /// field must round-trip through this map: without it an older
+    /// consumer would silently drop the new field on deserialization and
+    /// recompute a different `content_hash`, falsely failing verification.
+    /// Mirrors the [`crate::types::body::Body::extensions`] pattern
+    /// (RFC-ACDP-0001 §5.7, conformance fixture can-010).
+    #[serde(flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Locator for `DataRef.location` — either a URI string or a structured
@@ -93,6 +107,7 @@ impl DataRef {
             content_hash: None,
             location: Some(Location::Uri(uri.into())),
             embedded: None,
+            extensions: serde_json::Map::new(),
         }
     }
 
@@ -107,6 +122,7 @@ impl DataRef {
             content_hash: Some(hash),
             location: Some(Location::Uri(uri.into())),
             embedded: None,
+            extensions: serde_json::Map::new(),
         }
     }
 
@@ -142,6 +158,7 @@ impl DataRef {
             content_hash: None,
             location: Some(Location::Structured(map)),
             embedded: None,
+            extensions: serde_json::Map::new(),
         }
     }
 
@@ -171,6 +188,7 @@ impl DataRef {
             content_hash: None,
             location: Some(Location::Structured(map)),
             embedded: None,
+            extensions: serde_json::Map::new(),
         })
     }
 
@@ -188,6 +206,7 @@ impl DataRef {
                 encoding: EmbeddedEncoding::Json,
                 content,
             }),
+            extensions: serde_json::Map::new(),
         }
     }
 
@@ -205,6 +224,7 @@ impl DataRef {
                 encoding: EmbeddedEncoding::Utf8,
                 content: serde_json::Value::String(text.into()),
             }),
+            extensions: serde_json::Map::new(),
         }
     }
 
@@ -222,6 +242,7 @@ impl DataRef {
                 encoding: EmbeddedEncoding::Base64,
                 content: serde_json::Value::String(b64.into()),
             }),
+            extensions: serde_json::Map::new(),
         }
     }
 

@@ -87,7 +87,14 @@ impl CapabilitiesDocument {
 }
 
 /// Resource limits declared by the registry.
+///
+/// The capabilities document is OPEN at the top level, but `limits` is a
+/// CLOSED sub-object (`additionalProperties: false`): new limit keys are
+/// added by a spec version bump, not by registries inventing fields, so
+/// `deny_unknown_fields` rejects an unknown key (RFC-ACDP-0007 §3.3.1,
+/// conformance fixture schema-010).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Limits {
     /// Maximum total publish request size in bytes.
     pub max_payload_bytes: u64,

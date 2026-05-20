@@ -162,6 +162,7 @@ impl From<serde_json::Error> for CliError {
 fn classify(e: &AcdpError) -> &'static str {
     match e {
         AcdpError::HashMismatch { .. } | AcdpError::RemoteHashMismatch(_) => "hash_mismatch",
+        AcdpError::DataRefHashMismatch(_) => "data_ref_hash_mismatch",
         AcdpError::InvalidSignature(_) => "invalid_signature",
         AcdpError::SchemaViolation(_) => "schema_violation",
         AcdpError::NotFound(_) => "not_found",

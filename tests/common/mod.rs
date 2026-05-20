@@ -200,10 +200,10 @@ pub fn did_doc_router(did_doc: Value) -> Router {
 }
 
 /// Build a minimal capabilities document with the given `registry_did`.
-/// All other fields are the v0.0.1 mandatory minimum.
+/// All other fields are the v0.1.0 mandatory minimum.
 pub fn minimal_capabilities(registry_did: &str) -> Value {
     json!({
-        "acdp_version": "0.0.1",
+        "acdp_version": "0.1.0",
         "registry_did": registry_did,
         "supported_signature_algorithms": ["ed25519"],
         "supported_did_methods": ["did:web"],
