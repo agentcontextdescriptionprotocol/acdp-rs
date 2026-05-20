@@ -332,12 +332,12 @@ impl VerifiedContext {
 
     /// Verify the registry receipt, when one is present.
     ///
-    /// In v0.0.1 receipts are not specified; this method is forward-compat
+    /// In v0.1.0 receipts are not specified; this method is forward-compat
     /// scaffolding:
     /// - Returns `Ok(())` when no receipt is present (typical case).
     /// - Returns [`AcdpError::NotImplemented`] when a receipt **is**
     ///   present, signaling the consumer is talking to a v0.1+ registry
-    ///   while running this v0.0.1 library. Consumers SHOULD upgrade.
+    ///   while running this v0.1.0 library. Consumers SHOULD upgrade.
     pub async fn verify_receipt(&self, _resolver: &WebResolver) -> Result<(), AcdpError> {
         if self.inner.registry_receipt.is_some() {
             return Err(AcdpError::NotImplemented(

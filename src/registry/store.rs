@@ -37,8 +37,16 @@ pub trait RegistryStore: Send + Sync {
     /// All contexts in a lineage, oldest first.
     fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError>;
 
-    /// Latest active version in a lineage (or the highest version if
-    /// every entry has been superseded).
+    /// Returns the newest non-[`Status::Superseded`] version of a lineage
+    /// — either [`Status::Active`] or [`Status::Expired`] (an
+    /// expired-but-unreplaced body is still the latest version, and
+    /// callers need to see it to know it has lapsed).
+    ///
+    /// Returns `Ok(None)` when the lineage is unknown or every version is
+    /// `Superseded` (RFC-ACDP-0004 §5.2: "if no such version exists,
+    /// returns not_found" — fixture `ret-002`). Visibility rules are NOT
+    /// applied here — filter at the server layer via
+    /// [`crate::registry::server::RegistryServer::current`].
     fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError>;
 
     /// Mark `ctx_id`'s registry state as `superseded`. Idempotent.
@@ -301,6 +309,7 @@ impl RegistryStore for InMemoryStore {
                 extensions: Default::default(),
             },
             registry_receipt: None,
+            extensions: Default::default(),
         };
         let mut g = self.lock();
         if g.by_ctx.contains_key(&ctx_id) {
@@ -565,6 +574,7 @@ impl RegistryStore for InMemoryStore {
                 extensions: Default::default(),
             },
             registry_receipt: None,
+            extensions: Default::default(),
         };
         g.by_ctx.insert(ctx_id_str.clone(), stored);
         g.lineages
@@ -1274,7 +1284,7 @@ mod tests {
             .unwrap();
 
         let caps = CapabilitiesDocument {
-            acdp_version: "0.0.1".into(),
+            acdp_version: "0.1.0".into(),
             registry_did: "did:web:registry.example.com".into(),
             supported_signature_algorithms: vec!["ed25519".into()],
             supported_did_methods: vec!["did:web".into()],

@@ -43,7 +43,7 @@ impl<'a> PublishValidator<'a> {
     /// `registry.example.com`). When set, a publish request whose
     /// `supersedes` ctx_id has a different authority will be rejected with
     /// [`AcdpError::SupersededTarget`] / `CrossRegistrySupersessionUnsupported`
-    /// (RFC-ACDP-0006 — v0.0.1 only allows same-registry supersession).
+    /// (RFC-ACDP-0006 — v0.1.0 only allows same-registry supersession).
     pub fn for_authority(caps: &'a CapabilitiesDocument, own_authority: &'a str) -> Self {
         Self {
             caps,
@@ -176,7 +176,7 @@ impl<'a> PublishValidator<'a> {
             )));
         }
 
-        // Cross-registry supersession check — v0.0.1 only allows same-registry.
+        // Cross-registry supersession check — v0.1.0 only allows same-registry.
         if let (Some(own), Some(target)) = (self.own_authority, &req.supersedes) {
             let target_authority = target.authority();
             if target_authority != own {
@@ -184,7 +184,7 @@ impl<'a> PublishValidator<'a> {
                     reason: crate::error::SupersessionReason::CrossRegistrySupersessionUnsupported,
                     message: format!(
                         "supersedes target on '{target_authority}' rejected by '{own}'; \
-                         v0.0.1 only allows same-registry supersession"
+                         v0.1.0 only allows same-registry supersession"
                     ),
                 });
             }
@@ -243,7 +243,7 @@ mod tests {
 
     fn test_caps() -> CapabilitiesDocument {
         CapabilitiesDocument {
-            acdp_version: "0.0.1".into(),
+            acdp_version: "0.1.0".into(),
             registry_did: "did:web:registry.example.com".into(),
             supported_signature_algorithms: vec!["ed25519".into()],
             supported_did_methods: vec!["did:web".into()],

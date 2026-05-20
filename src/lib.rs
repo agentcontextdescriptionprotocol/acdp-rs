@@ -62,6 +62,20 @@ pub mod client;
 #[cfg(feature = "server")]
 pub mod registry;
 
+// ── Protocol version ──────────────────────────────────────────────────────────
+
+/// The ACDP protocol version this library implements.
+///
+/// Per the spec CHANGELOG the `0.0.1` identifier was never promoted past
+/// draft and is superseded by `0.1.0`. Note that an absent
+/// `acdp_version` field on a publish request is interpreted as this
+/// version by the protocol — see [`producer::RequestBuilder::acdp_version`].
+pub const ACDP_VERSION: &str = "0.1.0";
+
+/// The JSON Schema namespace (`$id` prefix) for this protocol version,
+/// e.g. `<ACDP_SCHEMA_NAMESPACE>/acdp-error.schema.json`.
+pub const ACDP_SCHEMA_NAMESPACE: &str = "https://schemas.acdp.io/v0.1.0";
+
 // ── Convenience re-exports ────────────────────────────────────────────────────
 pub use error::{AcdpError, SupersessionReason};
 pub use types::{

@@ -1,6 +1,7 @@
 use crate::types::body::{DataPeriod, Signature};
 use crate::types::data_ref::DataRef;
 use crate::types::primitives::*;
+use crate::types::serde_helpers::de_present;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -39,14 +40,33 @@ pub struct PublishRequest {
     pub signature: Signature,
 
     // Producer-controlled optional fields
+    //
+    // Bare-typed optional fields use the absent-vs-null convention
+    // (RFC-ACDP-0005 §2.2.1, schema-005/006/007 fixtures): absent →
+    // `None`, present with `null` → rejected at deserialize. See
+    // [`crate::types::serde_helpers::de_present`]. `supersedes` is the
+    // one v0.1.0 field declared `["string","null"]` (RFC-ACDP-0002
+    // §3.1) and stays permissively nullable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audience: Option<Vec<AgentDid>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub acdp_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub description: Option<String>,
     /// Producer-supplied summary for search results (≤ 1000 chars).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub summary: Option<String>,
     /// Optional self-verification of the lineage_id on supersession publish.
     /// Per `acdp-publish-request.schema.json` `allOf` conditional: v1
@@ -55,9 +75,17 @@ pub struct PublishRequest {
     /// Excluded from ProducerContent (hash preimage) per RFC-ACDP-0001 §5.7.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lineage_id: Option<LineageId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tags: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub domain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
@@ -65,7 +93,11 @@ pub struct PublishRequest {
     pub data_period: Option<DataPeriod>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub schema_uri: Option<String>,
 }
 

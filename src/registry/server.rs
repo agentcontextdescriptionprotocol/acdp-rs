@@ -303,11 +303,29 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
     /// Applies the RFC-ACDP-0008 §4.5 search disclosure rules (note the
     /// asymmetry vs retrieval): private contexts surface in search only
     /// to their producer (audience members must already know the ctx_id).
+    ///
+    /// When `caps.anonymous_public_reads` is `false`, an anonymous search
+    /// request is rejected outright with [`AcdpError::NotAuthorized`]
+    /// (HTTP 403) rather than returning an empty `200`. An empty result
+    /// set would still leak the registry's existence and confirm that
+    /// the keyword query ran; the required response is `not_authorized`
+    /// (RFC-ACDP-0005 §2.5.5, RFC-ACDP-0008 §6.3, fixture `vis-009`).
     pub fn search(
         &self,
         params: &SearchParams,
         requester: Option<&AgentDid>,
     ) -> Result<SearchResponse, AcdpError> {
+        // BUG-01 + vis-009: reject anonymous search when the registry
+        // does not allow anonymous reads. An empty 200 would still leak
+        // the registry's existence (and that the query executed); the
+        // normative response is 403 not_authorized.
+        if requester.is_none() && !self.caps.anonymous_public_reads {
+            return Err(AcdpError::NotAuthorized(
+                "anonymous search requires authentication \
+                 (registry caps: anonymous_public_reads=false)"
+                    .into(),
+            ));
+        }
         // BUG-02: pass `anonymous_public_reads` to the store so search
         // and retrieve agree. A registry advertising the flag as false
         // MUST suppress public contexts for anonymous callers in BOTH
@@ -349,7 +367,7 @@ mod tests {
 
     fn caps() -> CapabilitiesDocument {
         CapabilitiesDocument {
-            acdp_version: "0.0.1".into(),
+            acdp_version: "0.1.0".into(),
             registry_did: "did:web:registry.example.com".into(),
             supported_signature_algorithms: vec!["ed25519".into()],
             supported_did_methods: vec!["did:web".into()],
@@ -690,11 +708,12 @@ mod tests {
         );
     }
 
-    // ── BUG-02 — search honors anonymous_public_reads ──────────────────
+    // ── BUG-01 / vis-009 — anonymous search honors anonymous_public_reads ──
 
-    /// BUG-02: a registry advertising `anonymous_public_reads: false`
-    /// MUST suppress public contexts from anonymous search results
-    /// (matching the behavior of `retrieve`). Same context surfaces
+    /// BUG-01 + vis-009: a registry advertising `anonymous_public_reads:
+    /// false` MUST reject an anonymous search with `not_authorized`
+    /// (HTTP 403) — not an empty `200`, which would still leak the
+    /// registry's existence. The same context surfaces with a `200`
     /// once the requester authenticates.
     #[test]
     fn search_suppresses_public_when_anonymous_public_reads_false() {
@@ -711,8 +730,8 @@ mod tests {
             .unwrap();
         server.publish_unverified_for_tests(&req).unwrap();
 
-        // Anonymous: must NOT see the public context (capability says so).
-        let anon = server
+        // Anonymous: MUST be rejected with NotAuthorized (vis-009 s1).
+        let err = server
             .search(
                 &SearchParams {
                     q: Some("public-but-flag-off".into()),
@@ -720,11 +739,11 @@ mod tests {
                 },
                 None,
             )
-            .unwrap();
+            .unwrap_err();
         assert!(
-            anon.matches.is_empty(),
-            "anonymous search MUST be empty when anonymous_public_reads=false; got {} matches",
-            anon.matches.len()
+            matches!(err, AcdpError::NotAuthorized(_)),
+            "vis-009: anonymous search MUST be NotAuthorized when \
+             anonymous_public_reads=false; got {err:?}"
         );
 
         // Authenticated requester (any DID — public is universally visible
