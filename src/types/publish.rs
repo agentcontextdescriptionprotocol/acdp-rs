@@ -143,7 +143,15 @@ pub struct WireErrorBody {
     /// Human-readable message.
     pub message: String,
     /// Machine-readable details (e.g. `{"reason": "lineage_mismatch"}`).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Optional in `acdp-error.schema.json` and, when present, a JSON
+    /// object (`"type": "object"`) — not nullable. `de_present_object`
+    /// rejects an explicit `"details": null` and any non-object value.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present_object"
+    )]
     pub details: Option<serde_json::Value>,
 }
 

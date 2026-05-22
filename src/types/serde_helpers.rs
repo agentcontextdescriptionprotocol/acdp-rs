@@ -38,3 +38,37 @@ where
 {
     T::deserialize(d).map(Some)
 }
+
+/// Reject an explicit JSON `null` — and any other non-object value — on a
+/// present optional field whose schema types it as `"type": "object"`.
+///
+/// [`de_present`] alone cannot do this when the field is
+/// `Option<serde_json::Value>`: `Value::deserialize` happily accepts
+/// `null` (→ `Value::Null`) and every other JSON type. This helper
+/// deserializes the value and then enforces the object constraint, so a
+/// strict consumer rejects `"details": null` (and `"details": "x"`,
+/// arrays, numbers, …).
+///
+/// Used for `WireErrorBody.details` (`acdp-error.schema.json`, where
+/// `details` is optional but `"type": "object"` when present).
+pub(crate) fn de_present_object<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    if !v.is_object() {
+        let kind = match &v {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => unreachable!("is_object() was false"),
+        };
+        return Err(serde::de::Error::custom(format!(
+            "field present but {kind}; the ACDP schema types it as a \
+             non-nullable JSON object"
+        )));
+    }
+    Ok(Some(v))
+}

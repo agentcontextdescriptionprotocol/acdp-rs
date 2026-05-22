@@ -317,12 +317,23 @@ impl<'a> RequestBuilder<'a> {
     /// Set the ACDP protocol version string explicitly (e.g.
     /// [`crate::ACDP_VERSION`]).
     ///
-    /// Optional. When left unset the field is omitted from the request,
-    /// and the protocol interprets an absent `acdp_version` as the
-    /// current version (`0.1.0`). Omitting it is the default — it keeps
-    /// the ProducerContent (and therefore `content_hash`) byte-stable
-    /// against the `sig-001` golden vector. Call this only when a
-    /// downstream consumer needs the version stated explicitly.
+    /// **SDK default: omitted.** Per RFC-ACDP-0001 §6, a conformant
+    /// consumer treats an absent `acdp_version` as `"0.1.0"`. This
+    /// builder defaults to omission for golden-vector stability (the
+    /// `sig-001` fixture was signed without the field; changing the
+    /// default would break every hash that doesn't include
+    /// `acdp_version`).
+    ///
+    /// **Distinct preimage warning.** An absent `acdp_version` and an
+    /// explicit `"0.1.0"` are *semantically identical* to consumers but
+    /// produce *different `content_hash` values* because the JCS byte
+    /// sequences differ. Pick one and sign over exactly what you emit;
+    /// do not switch mid-lineage.
+    ///
+    /// **One-line explicit emission:**
+    /// ```rust,ignore
+    /// builder.acdp_version(acdp::ACDP_VERSION)
+    /// ```
     pub fn acdp_version(mut self, v: impl Into<String>) -> Self {
         self.acdp_version = Some(v.into());
         self
