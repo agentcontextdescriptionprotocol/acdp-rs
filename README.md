@@ -115,6 +115,20 @@ let req = producer
 println!("content_hash: {}", req.content_hash);
 ```
 
+#### `acdp_version` field
+
+The builder omits `acdp_version` by default. Conformant consumers treat an absent
+field as `"0.1.0"` (RFC-ACDP-0001 §6), so this is safe. To emit it explicitly:
+
+```rust,ignore
+builder.acdp_version(acdp::ACDP_VERSION) // adds "acdp_version": "0.1.0" to the body
+```
+
+**Note:** absent and explicit `"0.1.0"` are semantically identical but produce
+**different `content_hash` values** (the JCS byte sequences differ). Pick one and
+stay consistent within a lineage. The `sig-001` golden vector was signed without
+the field; using the omission default keeps round-trip tests byte-stable.
+
 ### Consumer — retrieve and verify
 
 ```rust,no_run
@@ -137,20 +151,27 @@ println!("status: {:?}", ctx.registry_state().status);
 # Ok(()) }
 ```
 
-### Server — validate an incoming publish request
+### Server — verify and publish a context (RFC-ACDP-0003 §2.1)
 
 ```rust,no_run
 # #[cfg(feature = "server")]
-# fn run(caps: &acdp::CapabilitiesDocument, req: &acdp::PublishRequest, raw_len: usize)
-#   -> Result<(), acdp::AcdpError> {
-use acdp::registry::PublishValidator;
-
-let validator = PublishValidator::new(caps);
-let validated = validator.validate_structural(req, raw_len)?;
-// Steps 7-8 (DID resolve + signature verify) are async; use
-// `acdp::crypto::verify::Verifier::verify_body` once persisted.
-# Ok(()) }
+# async fn run(
+#     server: &acdp::registry::RegistryServer<acdp::registry::InMemoryStore>,
+#     resolver: &acdp::did::WebResolver,
+#     req: &acdp::PublishRequest,
+# ) -> Result<acdp::types::PublishResponse, acdp::AcdpError> {
+// `publish_verified` runs the full §2.1 pipeline: schema validation →
+// hash recomputation → DID resolution → signature verification → and
+// only then assigns a `ctx_id` and persists. This is the ONLY
+// conformant server path — never persist before signature verification.
+let response = server.publish_verified(req, None, resolver).await?;
+# Ok(response) }
 ```
+
+> `RegistryServer::publish_unverified_for_tests` is provided for unit tests
+> that cannot run a live DID resolver. It MUST NOT be used in production —
+> it skips DID resolution and signature verification, which is a protocol
+> violation (RFC-ACDP-0003 §2.1).
 
 ## Cryptographic design
 

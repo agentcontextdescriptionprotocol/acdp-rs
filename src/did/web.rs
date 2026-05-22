@@ -245,19 +245,17 @@ fn build_http_client(
         if attempt.previous().len() >= MAX_REDIRECTS {
             return attempt.error(format!("DID resolver: exceeded {MAX_REDIRECTS} redirects"));
         }
-        // Same-authority enforcement against the original request URL.
-        let original_host = attempt
+        // Same-authority enforcement (scheme + host + port) against the
+        // original request URL. RFC-ACDP-0008 §4.8.
+        let cross = attempt
             .previous()
             .first()
-            .and_then(|u| u.host_str())
-            .map(str::to_string);
-        let next_host = attempt.url().host_str().map(str::to_string);
-        if let (Some(orig), Some(next)) = (original_host, next_host) {
-            if orig != next {
-                return attempt.error(format!(
-                    "DID resolver: cross-authority redirect rejected ({orig} -> {next})"
-                ));
-            }
+            .filter(|orig| !crate::safe_http::same_fetch_authority(orig, attempt.url()))
+            .map(|orig| (orig.to_string(), attempt.url().to_string()));
+        if let Some((from, to)) = cross {
+            return attempt.error(format!(
+                "DID resolver: cross-authority redirect rejected ({from} -> {to})"
+            ));
         }
         attempt.follow()
     });
@@ -282,8 +280,8 @@ fn build_http_client(
 
 /// Translate a `reqwest::Error` into the right [`AcdpError`] variant.
 ///
-/// Walks the error's `source()` chain so the SafeDnsResolver's refusal
-/// message ("SSRF policy refused all N DNS answer(s) …") survives
+/// Walks the error's `source()` chain so the `SafeDnsResolver`'s refusal
+/// message — which always contains the substring `"SSRF policy"` — survives
 /// reqwest's wrapping. An SSRF-refused DNS lookup is policy-driven and
 /// permanent — it maps to `key_resolution_failed` (HTTP 400), NOT
 /// `key_resolution_unreachable` (502, retryable) that

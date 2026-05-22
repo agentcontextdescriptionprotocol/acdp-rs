@@ -314,12 +314,13 @@ mod fed_001_005_offline {
     #[test]
     fn fed_005_cross_authority_redirect() {
         let p = SsrfPolicy::default();
+        let orig = url::Url::parse("https://registry.example.com/a").unwrap();
         let err = p
-            .check_redirect_authority("registry.example.com", "https://attacker.com/x")
+            .check_redirect_authority(&orig, "https://attacker.com/x")
             .expect_err("fed-005: cross-authority redirect MUST be rejected");
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
         // Same authority OK.
-        p.check_redirect_authority("registry.example.com", "https://registry.example.com/y")
+        p.check_redirect_authority(&orig, "https://registry.example.com/y")
             .expect("fed-005: same-authority redirect MUST pass");
     }
 }

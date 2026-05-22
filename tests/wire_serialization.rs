@@ -106,6 +106,58 @@ fn wire_error_omits_details_when_absent() {
     );
 }
 
+/// WIRE-02 — `acdp-error.schema.json` types `details` as `"type": "object"`.
+/// An explicit `"details": null` (or any non-object) MUST be rejected.
+#[test]
+fn wire_error_rejects_null_and_non_object_details() {
+    let null_details = r#"{"error":{"code":"not_found","message":"x","details":null}}"#;
+    assert!(
+        serde_json::from_str::<WireError>(null_details).is_err(),
+        "WireErrorBody.details: explicit null MUST be rejected"
+    );
+    let string_details = r#"{"error":{"code":"not_found","message":"x","details":"oops"}}"#;
+    assert!(
+        serde_json::from_str::<WireError>(string_details).is_err(),
+        "WireErrorBody.details: a non-object value MUST be rejected"
+    );
+    // A real object is accepted.
+    let ok = r#"{"error":{"code":"not_found","message":"x","details":{"key_id":"k"}}}"#;
+    assert!(serde_json::from_str::<WireError>(ok).is_ok());
+}
+
+/// WIRE-01 — `DataRef` optional fields are typed as bare values in
+/// `acdp-data-ref.schema.json`, not nullable. An explicit `null` MUST
+/// be rejected on each.
+#[test]
+fn data_ref_rejects_null_on_bare_typed_optional_fields() {
+    for field in [
+        r#""description":null"#,
+        r#""size_bytes":null"#,
+        r#""format":null"#,
+        r#""schema_version":null"#,
+        r#""content_hash":null"#,
+        r#""location":null"#,
+        r#""embedded":null"#,
+    ] {
+        let json = format!(r#"{{"type":"raw_data","location":"https://x.example/d",{field}}}"#);
+        assert!(
+            serde_json::from_str::<acdp::types::data_ref::DataRef>(&json).is_err(),
+            "DataRef MUST reject explicit null: {field}"
+        );
+    }
+}
+
+/// WIRE-03 — `Limits.idempotency_key_ttl_seconds` is a bare integer in
+/// the capabilities schema, not nullable.
+#[test]
+fn limits_rejects_null_idempotency_ttl() {
+    let json = r#"{"max_payload_bytes":1048576,"max_embedded_bytes":65536,"idempotency_key_ttl_seconds":null}"#;
+    assert!(
+        serde_json::from_str::<acdp::types::capabilities::Limits>(json).is_err(),
+        "Limits.idempotency_key_ttl_seconds: explicit null MUST be rejected"
+    );
+}
+
 /// BUG-06 / schema-008 — the closed `signature` object rejects an
 /// unknown field.
 #[test]

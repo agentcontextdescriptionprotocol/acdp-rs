@@ -67,19 +67,67 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
 
     /// Production constructor.
     ///
-    /// Validates capabilities against RFC-ACDP-0007 §3 and enforces that
+    /// Validates that `authority` is a bare lowercase DNS hostname,
+    /// validates capabilities against RFC-ACDP-0007 §3, and enforces that
     /// `caps.registry_did` equals `did:web:<authority>` (per
     /// RFC-ACDP-0006 §4.1 step 3 — the registry's DID document binds it
     /// to the authority it claims).
+    ///
+    /// A `host:port`, scheme-prefixed, or uppercase authority is rejected:
+    /// the server uses `authority` to mint `ctx_id` (`acdp://<authority>/…`)
+    /// and `origin_registry`, and a colon or slash there violates the
+    /// `acdp://` URI authority rule (RFC-ACDP-0002 §3.1). For `host:port`
+    /// test setups use [`Self::try_new_for_test_authority`].
     pub fn try_new(
         store: S,
         caps: CapabilitiesDocument,
         authority: impl Into<String>,
     ) -> Result<Self, AcdpError> {
         let authority = authority.into();
+        // Production authority MUST be a bare lowercase DNS hostname — no
+        // port, no scheme, no DID prefix (RFC-ACDP-0002 §3.1).
+        if !crate::types::primitives::is_valid_dns_authority(&authority) {
+            return Err(AcdpError::SchemaViolation(format!(
+                "registry authority '{authority}' is not a valid DNS hostname \
+                 (must be lowercase labels, e.g. 'registry.example.com'); \
+                 use RegistryServer::try_new_for_test_authority for host:port test setups"
+            )));
+        }
         crate::validation::validate_capabilities(&caps)?;
         // BUG-06: percent-encode `:` in `host:port` authorities — the
         // colon is a structural separator in did:web.
+        let expected_did = crate::did::authority_to_did_web(&authority);
+        if caps.registry_did != expected_did {
+            return Err(AcdpError::SchemaViolation(format!(
+                "capabilities.registry_did '{}' does not match expected '{expected_did}' \
+                 for authority '{authority}'",
+                caps.registry_did
+            )));
+        }
+        Ok(Self {
+            store,
+            caps,
+            authority,
+            rate_limiter: NoopRateLimiter,
+        })
+    }
+
+    /// Test-only constructor that accepts a `host:port` authority such as
+    /// `"localhost:8443"`. The authority is **not** validated as a DNS
+    /// hostname; capabilities and the DID binding are still checked.
+    ///
+    /// **Non-production only.** A server built with this constructor will
+    /// mint `ctx_id` and `origin_registry` values that do not conform to
+    /// the `acdp://` URI syntax rules (a colon in the authority segment).
+    /// Use [`Self::try_new`] for production registries.
+    #[doc(hidden)]
+    pub fn try_new_for_test_authority(
+        store: S,
+        caps: CapabilitiesDocument,
+        authority: impl Into<String>,
+    ) -> Result<Self, AcdpError> {
+        let authority = authority.into();
+        crate::validation::validate_capabilities(&caps)?;
         let expected_did = crate::did::authority_to_did_web(&authority);
         if caps.registry_did != expected_did {
             return Err(AcdpError::SchemaViolation(format!(
@@ -792,6 +840,44 @@ mod tests {
     #[test]
     fn try_new_accepts_valid_caps() {
         RegistryServer::try_new(InMemoryStore::new(), caps(), "registry.example.com").unwrap();
+    }
+
+    // ── WIRE-04 — try_new authority-format validation ───────────────────
+
+    #[test]
+    fn try_new_accepts_valid_dns_authority() {
+        RegistryServer::try_new(InMemoryStore::new(), caps(), "registry.example.com").unwrap();
+    }
+
+    #[test]
+    fn try_new_rejects_host_port_authority() {
+        // A `host:port` authority would mint `acdp://localhost:8443/<uuid>`
+        // ctx_ids — a colon violates the acdp:// authority rule.
+        let res = RegistryServer::try_new(InMemoryStore::new(), caps(), "localhost:8443");
+        assert!(matches!(res, Err(AcdpError::SchemaViolation(_))));
+    }
+
+    #[test]
+    fn try_new_rejects_uppercase_authority() {
+        let res = RegistryServer::try_new(InMemoryStore::new(), caps(), "Registry.Example.Com");
+        assert!(matches!(res, Err(AcdpError::SchemaViolation(_))));
+    }
+
+    #[test]
+    fn try_new_rejects_url_form_authority() {
+        let res =
+            RegistryServer::try_new(InMemoryStore::new(), caps(), "https://registry.example.com");
+        assert!(matches!(res, Err(AcdpError::SchemaViolation(_))));
+    }
+
+    #[test]
+    fn try_new_for_test_accepts_host_port() {
+        // The test constructor skips the DNS-authority check; it still
+        // enforces the DID binding, so the caps DID must match.
+        let mut c = caps();
+        c.registry_did = crate::did::authority_to_did_web("localhost:8443");
+        RegistryServer::try_new_for_test_authority(InMemoryStore::new(), c, "localhost:8443")
+            .unwrap();
     }
 
     // ── Visibility-enforcement tests (RFC-ACDP-0008 §4.5) ───────────────
