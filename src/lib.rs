@@ -1,5 +1,8 @@
 //! # acdp — Rust library for the Agent Context Description Protocol
 //!
+//! Reference implementation of **ACDP v0.1.0 Final** (specification
+//! promoted to Final on 2026-05-19).
+//!
 //! ACDP lets agents publish immutable, producer-signed context descriptors,
 //! retrieve and verify them locally, discover them by keyword, and follow
 //! signed references across registries.
