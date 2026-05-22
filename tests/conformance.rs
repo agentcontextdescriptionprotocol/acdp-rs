@@ -93,15 +93,17 @@ fn all_conformance_fixtures_parse_as_valid_json() {
         );
         count += 1;
     }
-    // The v0.1.0 Final spec ships 90 conformance fixtures across the
-    // `body`, `can`, `caps`, `cur`, `data-ref`, `did-ssrf`, `err`,
+    // The v0.1.0 Final spec (including the 2026-05-20 Clarifications
+    // Addendum) ships 93 conformance fixtures across the `body`, `can`,
+    // `caps`, `cur`, `data-ref`, `data-ref-ssrf`, `did-ssrf`, `err`,
     // `fed`, `idem`, `lin`, `meta`, `pub`, `rate`, `ret`, `schema`,
-    // `sig`, `status`, `vis` families. Floor at 90 so a wholesale
+    // `sig`, `status`, `vis` families. The addendum added the
+    // `data-ref-ssrf-001/002/003` family. Floor at 93 so a wholesale
     // regression in fixture loading is caught; the spec only ever
     // grows, so `>=` accommodates future additions.
     assert!(
-        count >= 90,
-        "expected ≥90 fixtures (ACDP v0.1.0 Final spec), found {count}"
+        count >= 93,
+        "expected ≥93 fixtures (ACDP v0.1.0 + addendum), found {count}"
     );
 }
 
@@ -223,9 +225,14 @@ fn data_ref_conformance_fixtures() {
         if !name.starts_with("data-ref-") {
             continue;
         }
-        // data-ref-008 + data-ref-ssrf-* — fetch-time checks, not
-        // structural validation. See the doc comment above.
-        if name.starts_with("data-ref-008") || name.starts_with("data-ref-ssrf-") {
+        // data-ref-008 — fetch-time external hash mismatch (tested
+        // separately by data_ref_008_external_hash_mismatch_*).
+        if name.starts_with("data-ref-008") {
+            continue;
+        }
+        // data-ref-ssrf-* — consumer fetch-time SSRF refusal, not
+        // structural validation (tested by data_ref_ssrf_conformance_fixtures).
+        if name.starts_with("data-ref-ssrf-") {
             continue;
         }
         let v = read_json(&path);
@@ -261,6 +268,152 @@ fn data_ref_conformance_fixtures() {
     assert!(
         checked >= 5,
         "expected ≥5 data-ref-* fixtures, got {checked}"
+    );
+}
+
+/// `data-ref-ssrf-001/002/003` — consumer fetch-time DataRef SSRF refusal.
+///
+/// RFC-ACDP-0008 §4.9 (Clarifications Addendum, 2026-05-20).
+/// `data-ref-ssrf-*` are required fixtures for the `acdp-consumer` profile.
+///
+/// - `ssrf-001`: IP-literal private/loopback/link-local host → refused
+///   before any DNS lookup (URL-level SSRF check, `SsrfPolicy::check_url`).
+/// - `ssrf-002`: hostname that DNS-resolves to a forbidden address → the
+///   *entire* resolution is rejected if **any** answer is disallowed
+///   (`SsrfPolicy::check_ip` per resolved IP — the multi-answer
+///   reject-all rule, RFC-ACDP-0006 §7.1).
+/// - `ssrf-003`: cross-authority redirect → refused (`check_redirect_authority`,
+///   the same-authority host+port policy).
+///
+/// Each fixture's own `input` is driven so the `acdp-consumer` profile
+/// claim is traceable to the canonical fixture data, not just a mirror
+/// of the unit tests in `src/client/data_ref.rs` and `src/safe_http.rs`.
+#[cfg(feature = "client")]
+#[tokio::test]
+async fn data_ref_ssrf_conformance_fixtures() {
+    use acdp::client::DataRefFetcher;
+    use acdp::safe_http::SsrfPolicy;
+
+    let Some(root) = spec_root() else { return };
+    let dir = root.join("schemas/conformance");
+
+    let mut checked = 0usize;
+
+    // ── data-ref-ssrf-001: IP-literal host → SSRF refusal at URL-check
+    // time, before any DNS resolution. Drive every URI the fixture lists
+    // (`data_ref_under_test.location` + `additional_test_cases`).
+    let f001 = dir.join("data-ref-ssrf-001-ip-literal-private.json");
+    if f001.exists() {
+        let fixture = read_json(&f001);
+        let input = &fixture["input"];
+        let mut uris: Vec<String> = Vec::new();
+        if let Some(u) = input["data_ref_under_test"]["location"].as_str() {
+            uris.push(u.to_string());
+        }
+        if let Some(extra) = input["additional_test_cases"].as_array() {
+            uris.extend(extra.iter().filter_map(|v| v.as_str().map(str::to_string)));
+        }
+        assert!(
+            uris.len() >= 5,
+            "data-ref-ssrf-001: expected ≥5 IP-literal URIs from the fixture, got {uris:?}"
+        );
+        let fetcher = acdp::client::HttpsDataRefFetcher::new();
+        for uri in &uris {
+            let loc = acdp::types::Location::Uri(uri.clone());
+            let err = fetcher
+                .fetch(&loc)
+                .await
+                .expect_err(&format!("data-ref-ssrf-001: '{uri}' must be refused"));
+            assert!(
+                matches!(err, acdp::AcdpError::SchemaViolation(_)),
+                "data-ref-ssrf-001: '{uri}' must be SchemaViolation (SSRF policy), got {err:?}"
+            );
+        }
+        checked += 1;
+    }
+
+    // ── data-ref-ssrf-002: a hostname can be syntactically public yet
+    // resolve to a forbidden address. The reject-all rule: if ANY answer
+    // in the DNS response is disallowed, the whole resolution is rejected
+    // (including the `rebind.example` mixed public+private case). Bind to
+    // every `dns_resolution_results` list the fixture carries.
+    let f002 = dir.join("data-ref-ssrf-002-dns-rebinding-loopback.json");
+    if f002.exists() {
+        let fixture = read_json(&f002);
+        let input = &fixture["input"];
+        let policy = SsrfPolicy::default();
+
+        let mut answer_sets: Vec<Vec<String>> = Vec::new();
+        if let Some(top) = input["dns_resolution_results"].as_array() {
+            answer_sets.push(
+                top.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+            );
+        }
+        if let Some(extra) = input["additional_test_cases"].as_array() {
+            for case in extra {
+                if let Some(ips) = case["dns_resolution_results"].as_array() {
+                    answer_sets.push(
+                        ips.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect(),
+                    );
+                }
+            }
+        }
+        assert!(
+            !answer_sets.is_empty(),
+            "data-ref-ssrf-002: fixture carried no dns_resolution_results"
+        );
+        for set in &answer_sets {
+            // RFC-ACDP-0006 §7.1: reject the whole resolution if ANY
+            // single resolved address is forbidden.
+            let any_forbidden = set.iter().any(|ip| {
+                let parsed: std::net::IpAddr = ip
+                    .parse()
+                    .unwrap_or_else(|_| panic!("ssrf-002: bad IP '{ip}'"));
+                policy.check_ip(parsed).is_err()
+            });
+            assert!(
+                any_forbidden,
+                "data-ref-ssrf-002: resolution {set:?} contains a forbidden \
+                 address, so the entire resolution MUST be rejected"
+            );
+        }
+        checked += 1;
+    }
+
+    // ── data-ref-ssrf-003: a 30x redirect to a different authority MUST
+    // be refused. Drive the fixture's own initial location + redirect.
+    let f003 = dir.join("data-ref-ssrf-003-cross-authority-redirect.json");
+    if f003.exists() {
+        let fixture = read_json(&f003);
+        let input = &fixture["input"];
+        let original = input["data_ref_under_test"]["location"]
+            .as_str()
+            .expect("ssrf-003: input.data_ref_under_test.location");
+        let redirect = input["redirect_response"]["Location"]
+            .as_str()
+            .expect("ssrf-003: input.redirect_response.Location");
+        let original_url = url::Url::parse(original).expect("ssrf-003: original URL");
+        let policy = SsrfPolicy::default();
+        let err = policy
+            .check_redirect_authority(&original_url, redirect)
+            .expect_err(&format!(
+                "data-ref-ssrf-003: redirect {original} → {redirect} must be refused"
+            ));
+        assert!(
+            matches!(err, acdp::AcdpError::SchemaViolation(_)),
+            "data-ref-ssrf-003: cross-authority redirect must be SchemaViolation, got {err:?}"
+        );
+        checked += 1;
+    }
+
+    assert!(
+        checked >= 1,
+        "expected ≥1 data-ref-ssrf-* fixture (ACDP v0.1.0 addendum); \
+         set ACDP_SPEC_DIR to enable"
     );
 }
 
