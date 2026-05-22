@@ -412,6 +412,10 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
     let mut summary: Option<String> = None;
     let mut description: Option<String> = None;
     let mut tags_csv: Option<String> = None;
+    // IMP-01: stdin-overlay-only fields (no CLI flag).
+    let mut acdp_version: Option<String> = None;
+    let mut schema_uri: Option<String> = None;
+    let mut expires_at: Option<chrono::DateTime<chrono::Utc>> = None;
 
     let mut i = 1;
     while i < rest.len() {
@@ -562,11 +566,51 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
                         builder = builder.tags(vs);
                     }
                 }
+                "visibility" if visibility.is_none() => {
+                    visibility = v.as_str().map(str::to_string);
+                }
+                "acdp_version" if acdp_version.is_none() => {
+                    acdp_version = v.as_str().map(str::to_string);
+                }
+                "schema_uri" if schema_uri.is_none() => {
+                    schema_uri = v.as_str().map(str::to_string);
+                }
+                "expires_at" if expires_at.is_none() => {
+                    let s = v.as_str().ok_or_else(|| {
+                        CliError::Usage("expires_at must be an RFC 3339 string".into())
+                    })?;
+                    let dt = s
+                        .parse::<chrono::DateTime<chrono::Utc>>()
+                        .map_err(|e| CliError::Usage(format!("invalid expires_at '{s}': {e}")))?;
+                    expires_at = Some(dt);
+                }
+                "data_period" => {
+                    let dp: acdp::types::DataPeriod = serde_json::from_value(v)
+                        .map_err(|e| CliError::Usage(format!("invalid data_period JSON: {e}")))?;
+                    builder = builder.data_period(dp);
+                }
+                "derived_from" => {
+                    let refs: Vec<CtxId> = serde_json::from_value(v)
+                        .map_err(|e| CliError::Usage(format!("invalid derived_from JSON: {e}")))?;
+                    builder = builder.derived_from(refs);
+                }
+                "contributors" => {
+                    let dids: Vec<AgentDid> = serde_json::from_value(v)
+                        .map_err(|e| CliError::Usage(format!("invalid contributors JSON: {e}")))?;
+                    builder = builder.contributors(dids);
+                }
+                "audience" if audience_csv.is_none() => {
+                    let dids: Vec<AgentDid> = serde_json::from_value(v)
+                        .map_err(|e| CliError::Usage(format!("invalid audience JSON: {e}")))?;
+                    builder = builder.audience(dids);
+                }
                 _ => {
-                    // Forward-compat: unknown overlay keys are ignored
-                    // rather than rejected. RequestBuilder doesn't have
-                    // setters for every conceivable field; the user is
-                    // expected to know which keys are meaningful.
+                    return Err(CliError::Usage(format!(
+                        "unknown publish overlay field '{k}'; supported: title, type, \
+                         summary, description, domain, visibility, audience, contributors, \
+                         derived_from, data_refs, metadata, tags, data_period, schema_uri, \
+                         expires_at, acdp_version"
+                    )));
                 }
             }
         }
@@ -600,6 +644,15 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
     if let Some(csv) = audience_csv {
         let dids: Vec<AgentDid> = csv.split(',').map(|s| AgentDid::new(s.trim())).collect();
         builder = builder.audience(dids);
+    }
+    if let Some(v) = acdp_version {
+        builder = builder.acdp_version(v);
+    }
+    if let Some(u) = schema_uri {
+        builder = builder.schema_uri(u);
+    }
+    if let Some(e) = expires_at {
+        builder = builder.expires_at(e);
     }
 
     let req: PublishRequest = builder.build()?;

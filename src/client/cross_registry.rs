@@ -153,9 +153,9 @@ impl CrossRegistryResolver {
     /// whose HTTP layer trusts the in-process TLS server's self-signed
     /// root certificate (via [`RegistryClient::with_root_cert_pem`]), so
     /// the resolver hits the mock instead of attempting a real network
-    /// call. The seeded client wins over the lazy `RegistryClient::new`
-    /// constructor that [`Self::resolve`] would otherwise invoke on
-    /// first access.
+    /// call. The seeded client wins over the lazy
+    /// `RegistryClient::new_pinned` constructor that [`Self::resolve`]
+    /// would otherwise invoke on first access.
     pub fn seed_client(&self, authority: impl Into<String>, client: RegistryClient) {
         self.client_cache
             .lock()
@@ -194,7 +194,7 @@ impl CrossRegistryResolver {
             .map_err(|e| AcdpError::CrossRegistryResolutionFailed(format!("SSRF policy: {e}")))?;
 
         // Cached client (and capabilities) per authority.
-        let registry = self.client_for(&authority, &base)?;
+        let registry = self.client_for(&authority, &base).await?;
         let caps = self.capabilities_for(&authority, &registry).await?;
 
         // Step 3a: capabilities.registry_did MUST be `did:web:<authority>`.
@@ -320,16 +320,30 @@ impl CrossRegistryResolver {
     }
 
     /// Return a cached `RegistryClient` for the authority, building one
-    /// on first use. Each client carries its own SSRF policy + timeouts;
-    /// reuse across hops avoids per-hop reqwest connection-pool churn.
-    fn client_for(&self, authority: &str, base: &str) -> Result<RegistryClient, AcdpError> {
-        let mut cache = self.client_cache.lock().unwrap();
-        if let Some(c) = cache.get(authority) {
-            return Ok(c.clone());
+    /// on first use. Reuse across hops avoids per-hop reqwest
+    /// connection-pool churn.
+    ///
+    /// SEC-01: the client is built with [`RegistryClient::new_pinned`],
+    /// which resolves the authority's DNS up-front, filters every
+    /// resolved IP through the resolver's [`SsrfPolicy`], and pins the
+    /// connection to that address. Without pinning a hostile `ctx_id`
+    /// authority (e.g. `internal-host.example.com` resolving to
+    /// `10.0.0.1` or `169.254.169.254`) would slip past the URL-syntax
+    /// `check_url` gate and reach an internal target. The seeded test
+    /// path ([`Self::seed_client`]) bypasses this constructor.
+    async fn client_for(&self, authority: &str, base: &str) -> Result<RegistryClient, AcdpError> {
+        {
+            let cache = self.client_cache.lock().unwrap();
+            if let Some(c) = cache.get(authority) {
+                return Ok(c.clone());
+            }
         }
-        let client = RegistryClient::new(base)?;
-        cache.insert(authority.to_string(), client.clone());
-        Ok(client)
+        // Build with full DNS pinning before taking the cache lock —
+        // `new_pinned` is async and the cache mutex must not be held
+        // across the await.
+        let client = RegistryClient::new_pinned(base, &self.ssrf_policy).await?;
+        let mut cache = self.client_cache.lock().unwrap();
+        Ok(cache.entry(authority.to_string()).or_insert(client).clone())
     }
 
     /// Return the cached capabilities for `authority`, fetching when
