@@ -16,6 +16,7 @@ exclude       = [
     "/target",
     "/examples",
     "/tests",
+    "/plans",
     "/.gitignore",
     "/deny.toml",
     "/rustfmt.toml",

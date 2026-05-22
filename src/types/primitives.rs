@@ -412,7 +412,14 @@ fn is_lowercase_hex(s: &str) -> bool {
         .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
-fn is_valid_dns_authority(s: &str) -> bool {
+/// Validate a bare DNS authority: lowercase ASCII labels separated by
+/// dots, each `1..=63` chars of `[a-z0-9-]` with no leading/trailing
+/// hyphen, total `<= 253`. Rejects uppercase, underscores, and ports.
+///
+/// `pub(crate)` so [`crate::validation`] can reuse it for
+/// `origin_registry` (BUG-02) — the schema's `hostname` type and
+/// `CtxId`'s authority share exactly this grammar.
+pub(crate) fn is_valid_dns_authority(s: &str) -> bool {
     if s.is_empty() || s.len() > 253 {
         return false;
     }

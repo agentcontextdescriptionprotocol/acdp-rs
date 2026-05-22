@@ -281,6 +281,99 @@ async fn cli_publish_forwards_idempotency_key() {
     );
 }
 
+/// IMP-01 — the stdin overlay supports `data_period` and `schema_uri`.
+/// Both are structural fields with no CLI flag; the overlay MUST plumb
+/// them into the posted `PublishRequest`.
+#[tokio::test]
+async fn cli_publish_overlay_data_period_and_schema_uri() {
+    let registry = MockServer::start().await;
+    let response_body = json!({
+        "ctx_id": "acdp://r.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:b14ccd2a8b34530309255db68c151a10689b6a82feb30aff9222d54fdd871720",
+        "version": 1,
+        "created_at": "2026-05-10T00:00:00.000Z",
+        "status": "active",
+    });
+    Mock::given(method("POST"))
+        .and(path("/contexts"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(response_body))
+        .mount(&registry)
+        .await;
+
+    let seed_hex = "0".repeat(64);
+    let url = registry.uri();
+    let overlay = json!({
+        "data_period": {
+            "start": "2026-01-01T00:00:00.000Z",
+            "end": "2026-03-31T00:00:00.000Z"
+        },
+        "schema_uri": "https://schemas.example.com/snapshot.json"
+    })
+    .to_string();
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "publish",
+            &url,
+            "--key-seed",
+            &seed_hex,
+            "--agent-id",
+            "did:web:agents.example.com:test",
+            "--key-id",
+            "did:web:agents.example.com:test#key-1",
+            "--title",
+            "overlay test",
+            "--type",
+            "data_snapshot",
+        ],
+        Some(&overlay),
+    );
+    assert_eq!(
+        code, 0,
+        "overlay publish must succeed; stderr={stderr}, stdout={stdout}"
+    );
+    let requests = registry.received_requests().await.expect("recorded");
+    let last = requests.last().expect("a request");
+    let sent: acdp::types::PublishRequest =
+        serde_json::from_slice(&last.body).expect("posted body deserializes");
+    assert!(sent.data_period.is_some(), "data_period overlay dropped");
+    assert_eq!(
+        sent.schema_uri.as_deref(),
+        Some("https://schemas.example.com/snapshot.json"),
+        "schema_uri overlay dropped"
+    );
+}
+
+/// IMP-01 — an unknown overlay key is a usage error, not silently
+/// ignored. Catches the trap where e.g. a misspelled `expires_at`
+/// publishes a context with no expiry.
+#[test]
+fn cli_publish_overlay_rejects_unknown_key() {
+    let seed_hex = "0".repeat(64);
+    let overlay = json!({ "expirez_at": "2026-12-31T00:00:00Z" }).to_string();
+    let (code, _stdout, stderr) = run_cli(
+        &[
+            "publish",
+            "http://unused.example.com",
+            "--key-seed",
+            &seed_hex,
+            "--agent-id",
+            "did:web:agents.example.com:test",
+            "--key-id",
+            "did:web:agents.example.com:test#key-1",
+            "--title",
+            "x",
+            "--type",
+            "data_snapshot",
+        ],
+        Some(&overlay),
+    );
+    assert_eq!(code, 1, "unknown overlay key MUST exit 1; stderr={stderr}");
+    assert!(
+        stderr.contains("expirez_at") || stderr.contains("unknown publish overlay field"),
+        "stderr MUST name the bad overlay key, got: {stderr}"
+    );
+}
+
 // ── validate ──────────────────────────────────────────────────────────────────
 
 /// FEAT-05 — `acdp validate` runs offline schema validation and

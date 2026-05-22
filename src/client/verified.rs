@@ -9,21 +9,25 @@ use crate::types::{body::FullContext, primitives::CtxId};
 
 /// Consumer-tunable strictness for [`VerifiedContext::fetch_with_policy`].
 ///
-/// The defaults match the strict spec-conformant behavior; loosen only
-/// for tightly controlled environments (e.g. testing).
+/// For ACDP v0.1.0 the verification profile is **always strict**:
+///
+/// - `did:web` is required for every producer identity — enforced
+///   unconditionally by `verify_signature_envelope`
+///   (RFC-ACDP-0001 §5.4), regardless of any policy field.
+/// - Embedded `DataRef` hashes are verified by
+///   [`crate::validation::validate_body`] whenever `validate_body_schema`
+///   is set.
+///
+/// Only the fields below have real effect in this version; there are no
+/// relaxed-mode `did:web` or embedded-hash knobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationPolicy {
-    /// If true, reject bodies whose `agent_id` is not `did:web` (and
-    /// whose `key_id` doesn't start with `did:web:`). Default `true`.
-    pub require_did_web: bool,
-
-    /// If true, run [`crate::validation::validate_body`] before any
-    /// cryptographic check. Default `true`.
+    /// If true, run [`crate::validation::validate_body`] (structural
+    /// schema checks plus embedded-`DataRef` hash verification) before
+    /// any cryptographic check. Default `true`. Set `false` only in
+    /// diagnostic paths that want to attempt signature verification
+    /// despite a body known to fail structural checks.
     pub validate_body_schema: bool,
-
-    /// If true, embedded `data_refs` with declared `content_hash` are
-    /// re-hashed and compared. Default `true`.
-    pub verify_embedded_hashes: bool,
 
     /// If true, accept `Status::Other` values (degrade to active per
     /// RFC-ACDP-0004 §4.1). When false, reject unknown statuses.
@@ -38,9 +42,7 @@ pub struct VerificationPolicy {
 impl Default for VerificationPolicy {
     fn default() -> Self {
         Self {
-            require_did_web: true,
             validate_body_schema: true,
-            verify_embedded_hashes: true,
             allow_unknown_status: true,
             verify_registry_receipt: false,
         }
@@ -67,10 +69,11 @@ impl VerifiedContext {
     /// strictness.
     ///
     /// 1. Fetches `body + registry_state` from the registry.
-    /// 2. Optionally runs `validate_body` (policy-controlled).
+    /// 2. Optionally runs `validate_body` — structural schema checks
+    ///    plus embedded-`DataRef` hash verification (policy-controlled).
     /// 3. Recomputes `content_hash` over ProducerContent.
-    /// 4. Resolves the producer's DID document; rejects non-`did:web`
-    ///    when policy requires it.
+    /// 4. Resolves the producer's DID document. `did:web` is required
+    ///    unconditionally for v0.1.0 (RFC-ACDP-0001 §5.4).
     /// 5. Verifies the Ed25519 signature (or other supported algorithm).
     /// 6. Optionally verifies the `registry_receipt` placeholder.
     /// 7. Optionally rejects unknown statuses.
@@ -86,27 +89,12 @@ impl VerifiedContext {
             crate::validation::validate_body(&ctx.body)?;
         }
 
-        if policy.verify_embedded_hashes {
-            for dr in &ctx.body.data_refs {
-                if dr.embedded.is_some() && dr.content_hash.is_some() {
-                    crate::validation::verify_embedded_hash(dr)?;
-                }
-            }
-        }
-
-        if policy.require_did_web && !ctx.body.agent_id.as_str().starts_with("did:web:") {
-            return Err(AcdpError::KeyNotAuthorized(format!(
-                "policy requires did:web agent_id; got '{}'",
-                ctx.body.agent_id
-            )));
-        }
-
         // BUG-05: use `verify_body_signed` (hash + signature only) so
-        // the schema / embedded-hash / did-web checks above stay
-        // policy-controlled. Calling `verify_body` here re-runs
-        // `validate_body` unconditionally — which previously made
-        // `policy.validate_body_schema = false`, `require_did_web =
-        // false`, and `verify_embedded_hashes = false` no-ops.
+        // the schema / embedded-hash checks above stay policy-controlled.
+        // Calling `verify_body` here would re-run `validate_body`
+        // unconditionally. `verify_body_signed` still enforces `did:web`
+        // for the producer key (RFC-ACDP-0001 §5.4) — that enforcement
+        // is unconditional in v0.1.0 and is not policy-tunable.
         let verifier = Verifier::new(resolver);
         verifier.verify_body_signed(&ctx.body).await?;
 
@@ -277,17 +265,11 @@ impl VerifiedContext {
             }
         }
 
-        if policy.require_did_web && !ctx.body.agent_id.as_str().starts_with("did:web:") {
-            return Err(AcdpError::KeyNotAuthorized(format!(
-                "policy requires did:web agent_id; got '{}'",
-                ctx.body.agent_id
-            )));
-        }
-
         // `verify_body_signed` recomputes content_hash + verifies the
         // signature WITHOUT re-running the schema validator (we already
         // ran the structural part above, and embedded-hash failures are
-        // recorded per-DataRef rather than aborting).
+        // recorded per-DataRef rather than aborting). It still enforces
+        // `did:web` for the producer key (RFC-ACDP-0001 §5.4).
         Verifier::new(resolver)
             .verify_body_signed(&ctx.body)
             .await?;
