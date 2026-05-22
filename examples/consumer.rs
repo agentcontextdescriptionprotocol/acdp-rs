@@ -29,7 +29,7 @@ fn main() {
     // async fn fetch_one(registry_url: &str, ctx_id: CtxId) -> anyhow::Result<()> {
     //     let client   = RegistryClient::new(registry_url)?;
     //     let resolver = WebResolver::new();
-    //     let policy   = VerificationPolicy::default();
+    //     let policy   = VerificationPolicy::strict_v0_1_0();
     //
     //     let (verified, report) =
     //         VerifiedContext::fetch_report(&client, &resolver, &ctx_id, &policy).await?;

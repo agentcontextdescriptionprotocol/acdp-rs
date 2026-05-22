@@ -49,6 +49,26 @@ impl Default for VerificationPolicy {
     }
 }
 
+impl VerificationPolicy {
+    /// The v0.1.0 strict verification profile (RFC-ACDP-0001 §5.11, §9.2).
+    ///
+    /// Runs the full §5.11 pipeline: body schema validation, `content_hash`
+    /// recomputation, `did:web` key resolution, signature verification, and
+    /// embedded `data_ref.content_hash` checks. Returns on the first failure.
+    ///
+    /// This is the **only** mode covered by the `acdp-consumer` conformance
+    /// profile. Relaxed modes (`Diagnostic`, `UnsafeForTests`) are NOT
+    /// available in this crate in v0.1.0 — they would be separately-named
+    /// opt-ins per §9.2, and are not currently implemented.
+    ///
+    /// Identical to [`Default::default()`]; provided as a named constructor
+    /// so callers can write `VerificationPolicy::strict_v0_1_0()` to match
+    /// the RFC-ACDP-0001 §9.2 RECOMMENDED API shape.
+    pub fn strict_v0_1_0() -> Self {
+        Self::default()
+    }
+}
+
 /// A retrieved context that has been cryptographically verified.
 pub struct VerifiedContext {
     pub inner: FullContext,
@@ -380,5 +400,20 @@ impl DataRefFetcher for NoFetcher {
         Err(AcdpError::NotImplemented(
             "NoFetcher should never be called — this is a fetch_report sentinel".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VerificationPolicy;
+
+    /// BUG-01 — the RFC-ACDP-0001 §9.2 RECOMMENDED named constructor
+    /// `strict_v0_1_0()` MUST be exactly the strict default policy.
+    #[test]
+    fn strict_v0_1_0_equals_default() {
+        assert_eq!(
+            VerificationPolicy::strict_v0_1_0(),
+            VerificationPolicy::default()
+        );
     }
 }

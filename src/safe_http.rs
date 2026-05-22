@@ -13,11 +13,13 @@
 //! - **§7.3** Response-size caps.
 //! - **§7.5** Maximum redirects, same-authority only.
 //! - **§7.6** DNS rebinding protection. [`SsrfPolicy::pin_resolved_ip`]
-//!   resolves a hostname once, applies the same range filter to the
-//!   returned IPs, and returns a [`SocketAddr`] that the caller pins
-//!   into `reqwest::Client::builder().resolve(host, addr)` — so the
-//!   filter and the connection use the same IP, defeating a hostile
-//!   DNS server flipping the answer between the two.
+//!   resolves a hostname once, validates **every** returned IP, and
+//!   returns a [`SocketAddr`] that the caller pins into
+//!   `reqwest::Client::builder().resolve(host, addr)` — so the filter
+//!   and the connection use the same IP, defeating a hostile DNS server
+//!   flipping the answer between the two. Per §7.1 the resolution is
+//!   rejected outright if **any** returned IP is forbidden — a public
+//!   answer cannot mask a private one.
 
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
@@ -158,16 +160,21 @@ impl SsrfPolicy {
 
     /// DNS rebinding protection per RFC-ACDP-0006 §7.6.
     ///
-    /// Resolves `host:port`, applies the policy filter against every
-    /// returned address, and returns the first [`SocketAddr`] that
-    /// passes. The caller MUST pin this exact address into the HTTP
-    /// client via `reqwest::Client::builder().resolve(host, addr)` —
-    /// otherwise a hostile authoritative DNS could flip the answer
-    /// between the filter check and the connect, bypassing §7.1.
+    /// Resolves `host:port`, validates **every** returned address, and
+    /// returns one [`SocketAddr`] to pin. The caller MUST pin this exact
+    /// address into the HTTP client via
+    /// `reqwest::Client::builder().resolve(host, addr)` — otherwise a
+    /// hostile authoritative DNS could flip the answer between the filter
+    /// check and the connect, bypassing §7.1.
+    ///
+    /// RFC-ACDP-0006 §7.1 / RFC-ACDP-0008 §4.8: if **any** resolved
+    /// address is in a forbidden range, the **entire** resolution is
+    /// rejected — an attacker MUST NOT be able to bypass the filter by
+    /// mixing one public and one private answer in a single DNS response.
     ///
     /// Returns [`AcdpError::Http`] when DNS returns no answers and
-    /// [`AcdpError::SchemaViolation`] when every answer is in a
-    /// forbidden range.
+    /// [`AcdpError::SchemaViolation`] when any answer is in a forbidden
+    /// range.
     #[cfg(feature = "client")]
     pub async fn pin_resolved_ip(&self, host: &str, port: u16) -> Result<SocketAddr, AcdpError> {
         let target = format!("{host}:{port}");
@@ -180,38 +187,49 @@ impl SsrfPolicy {
                 "DNS lookup for '{host}' returned no addresses"
             )));
         }
-        let mut last_err: Option<AcdpError> = None;
-        for addr in &candidates {
-            match self.check_ip(addr.ip()) {
-                Ok(()) => return Ok(*addr),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            AcdpError::SchemaViolation(format!(
-                "SSRF policy: no safe IP for '{host}' across {} candidate(s)",
-                candidates.len()
-            ))
-        }))
+        // Validate EVERY resolved address before pinning one. Any failure
+        // aborts the whole resolution (no silent filtering).
+        reject_if_any_forbidden(self, host, &candidates)?;
+        // All candidates passed — pin the first (IPv4-preferred).
+        let pinned = candidates
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| candidates.first())
+            .copied()
+            .expect("candidates is non-empty");
+        Ok(pinned)
     }
 
     /// Per §7.5: a redirect is permitted only if it stays within the same
-    /// authority as the originating request.
+    /// fetch authority as the originating request — identical scheme,
+    /// host, and effective port (RFC-ACDP-0008 §4.8: "host + port").
     pub fn check_redirect_authority(
         &self,
-        original_authority: &str,
+        original_url: &url::Url,
         redirect_url: &str,
     ) -> Result<(), AcdpError> {
-        let parsed = url::Url::parse(redirect_url)
+        let redirect = url::Url::parse(redirect_url)
             .map_err(|e| AcdpError::SchemaViolation(format!("invalid redirect URL: {e}")))?;
-        let new_authority = parsed.host_str().unwrap_or("");
-        if new_authority != original_authority {
+        if !same_fetch_authority(original_url, &redirect) {
             return Err(AcdpError::SchemaViolation(format!(
-                "SSRF policy: cross-authority redirect rejected: {original_authority} → {new_authority}"
+                "SSRF policy: cross-authority redirect rejected: {original_url} → {redirect}"
             )));
         }
         Ok(())
     }
+}
+
+/// Returns `true` when `a` and `b` share the same fetch authority:
+/// identical scheme, identical host, and identical effective port
+/// (the scheme default applies — 443 for `https`, 80 for `http`).
+///
+/// RFC-ACDP-0006 §7.5 and RFC-ACDP-0008 §4.8: a "same authority"
+/// redirect must match host **and** port; this also pins the scheme so
+/// an `https → http` downgrade can never be treated as same-authority.
+pub(crate) fn same_fetch_authority(a: &url::Url, b: &url::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
 }
 
 /// Strict-default range filter (no loopback allowance). Retained as a
@@ -240,8 +258,30 @@ fn check_safe_ip(ip: IpAddr) -> Result<(), AcdpError> {
 // pre-connect `pin_resolved_ip` check and the real connect: reqwest
 // passes the addresses we return straight to the connector.
 
-/// `reqwest::dns::Resolve` implementation that filters every resolved
-/// IP through an [`SsrfPolicy`] before handing it to the connector.
+/// Reject the **entire** resolution if ANY candidate address is in a
+/// forbidden range (RFC-ACDP-0006 §7.1 / RFC-ACDP-0008 §4.8). Shared by
+/// [`SsrfPolicy::pin_resolved_ip`] and [`SafeDnsResolver::resolve`] so
+/// both apply identical reject-all semantics — never silent filtering.
+#[cfg(feature = "client")]
+fn reject_if_any_forbidden(
+    policy: &SsrfPolicy,
+    host: &str,
+    candidates: &[SocketAddr],
+) -> Result<(), AcdpError> {
+    for addr in candidates {
+        if let Err(e) = policy.check_ip(addr.ip()) {
+            return Err(AcdpError::SchemaViolation(format!(
+                "SSRF policy: DNS answer for '{host}' contains a forbidden address \
+                 ({} is disallowed); rejecting the entire resolution. {e}",
+                addr.ip()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `reqwest::dns::Resolve` implementation that validates every resolved
+/// IP through an [`SsrfPolicy`] before handing them to the connector.
 #[cfg(feature = "client")]
 pub(crate) struct SafeDnsResolver {
     policy: SsrfPolicy,
@@ -269,24 +309,24 @@ impl reqwest::dns::Resolve for SafeDnsResolver {
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
                 .collect();
 
-            let safe: Vec<SocketAddr> = candidates
-                .iter()
-                .copied()
-                .filter(|a| policy.check_ip(a.ip()).is_ok())
-                .collect();
-
-            if safe.is_empty() {
-                // RFC-ACDP-0008 §4.8 — refusal is policy-driven; reqwest
-                // bubbles this up as a transport error and the caller's
-                // error mapper (e.g. WebResolver) translates it.
-                let count = candidates.len();
-                let msg: String = format!(
-                    "SSRF policy refused all {count} DNS answer(s) for '{host}' (range filter)"
-                );
+            if candidates.is_empty() {
+                let msg: String = format!("DNS lookup for '{host}' returned no addresses");
                 return Err(msg.into());
             }
 
-            let addrs: reqwest::dns::Addrs = Box::new(safe.into_iter());
+            // RFC-ACDP-0006 §7.1 / RFC-ACDP-0008 §4.8: validate EVERY
+            // resolved address. If any answer is in a forbidden range the
+            // ENTIRE resolution is rejected — never silently filter, or an
+            // attacker bypasses the filter by mixing one public and one
+            // private answer in a single DNS response. reqwest bubbles
+            // this up as a transport error and the caller's error mapper
+            // (e.g. WebResolver) translates it.
+            if let Err(e) = reject_if_any_forbidden(&policy, &host, &candidates) {
+                let msg: String = e.to_string();
+                return Err(msg.into());
+            }
+
+            let addrs: reqwest::dns::Addrs = Box::new(candidates.into_iter());
             Ok(addrs)
         })
     }
@@ -394,13 +434,117 @@ mod tests {
     #[test]
     fn cross_authority_redirect_rejected() {
         let p = SsrfPolicy::default();
+        let orig = url::Url::parse("https://registry.example.com/a").unwrap();
         let err = p
-            .check_redirect_authority("registry.example.com", "https://attacker.com/x")
+            .check_redirect_authority(&orig, "https://attacker.com/x")
             .unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
         // Same authority OK
-        p.check_redirect_authority("registry.example.com", "https://registry.example.com/y")
+        p.check_redirect_authority(&orig, "https://registry.example.com/y")
             .unwrap();
+    }
+
+    // ── SEC-02 — same_fetch_authority (scheme + host + port) ────────────
+    fn u(s: &str) -> url::Url {
+        url::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn same_host_same_implicit_port_allowed() {
+        assert!(same_fetch_authority(
+            &u("https://a.example/x"),
+            &u("https://a.example/y")
+        ));
+    }
+
+    #[test]
+    fn same_host_explicit_443_same_as_implicit_allowed() {
+        // Explicit :443 must compare equal to the implicit https default.
+        assert!(same_fetch_authority(
+            &u("https://a.example/x"),
+            &u("https://a.example:443/y")
+        ));
+    }
+
+    #[test]
+    fn same_host_different_port_rejected() {
+        assert!(!same_fetch_authority(
+            &u("https://a.example/x"),
+            &u("https://a.example:8443/y")
+        ));
+    }
+
+    #[test]
+    fn https_to_http_same_host_rejected() {
+        // Scheme downgrade is never same-authority.
+        assert!(!same_fetch_authority(
+            &u("https://a.example/x"),
+            &u("http://a.example/y")
+        ));
+    }
+
+    #[test]
+    fn different_host_rejected() {
+        assert!(!same_fetch_authority(
+            &u("https://a.example/x"),
+            &u("https://b.example/y")
+        ));
+    }
+
+    #[test]
+    fn check_redirect_authority_rejects_port_change() {
+        let p = SsrfPolicy::default();
+        let orig = u("https://registry.example.com/a");
+        let err = p
+            .check_redirect_authority(&orig, "https://registry.example.com:8443/b")
+            .unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    // ── SEC-01 — reject the ENTIRE resolution on any forbidden IP ───────
+    #[cfg(feature = "client")]
+    fn sock(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn mixed_public_private_dns_rejected_entirely() {
+        let p = SsrfPolicy::default();
+        let candidates = [sock("203.0.113.10:443"), sock("10.0.0.1:443")];
+        assert!(reject_if_any_forbidden(&p, "evil.example", &candidates).is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn mixed_public_loopback_rejected() {
+        let p = SsrfPolicy::default();
+        let candidates = [sock("198.51.100.1:443"), sock("127.0.0.1:443")];
+        assert!(reject_if_any_forbidden(&p, "evil.example", &candidates).is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn mixed_public_imds_rejected() {
+        let p = SsrfPolicy::default();
+        let candidates = [sock("198.51.100.1:443"), sock("169.254.169.254:443")];
+        assert!(reject_if_any_forbidden(&p, "evil.example", &candidates).is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn single_public_ip_allowed() {
+        let p = SsrfPolicy::default();
+        let candidates = [sock("203.0.113.10:443")];
+        assert!(reject_if_any_forbidden(&p, "ok.example", &candidates).is_ok());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn all_public_ips_allowed() {
+        let p = SsrfPolicy::default();
+        let candidates = [sock("203.0.113.10:443"), sock("198.51.100.1:443")];
+        assert!(reject_if_any_forbidden(&p, "ok.example", &candidates).is_ok());
     }
 
     #[test]

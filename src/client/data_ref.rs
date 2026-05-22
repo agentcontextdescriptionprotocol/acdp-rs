@@ -137,19 +137,17 @@ fn build_data_ref_http_client(policy: &SsrfPolicy) -> Result<reqwest::Client, Ac
                 "data_ref fetch: exceeded {MAX_REDIRECTS} redirects"
             ));
         }
-        // Same-authority enforcement against the original request URL.
-        let original_host = attempt
+        // Same-authority enforcement (scheme + host + port) against the
+        // original request URL. RFC-ACDP-0008 §4.8.
+        let cross = attempt
             .previous()
             .first()
-            .and_then(|u| u.host_str())
-            .map(str::to_string);
-        let next_host = attempt.url().host_str().map(str::to_string);
-        if let (Some(orig), Some(next)) = (original_host, next_host) {
-            if orig != next {
-                return attempt.error(format!(
-                    "data_ref fetch: cross-authority redirect rejected ({orig} -> {next})"
-                ));
-            }
+            .filter(|orig| !crate::safe_http::same_fetch_authority(orig, attempt.url()))
+            .map(|orig| (orig.to_string(), attempt.url().to_string()));
+        if let Some((from, to)) = cross {
+            return attempt.error(format!(
+                "data_ref fetch: cross-authority redirect rejected ({from} -> {to})"
+            ));
         }
         attempt.follow()
     });

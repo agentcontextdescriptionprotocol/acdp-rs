@@ -35,34 +35,65 @@ pub struct DataRef {
     pub ref_type: DataRefType,
 
     /// Human-readable description (≤ 1000 chars).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Optional and absent-or-string in `acdp-data-ref.schema.json` — not
+    /// nullable. `de_present` rejects an explicit `"description": null`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub description: Option<String>,
 
     /// Size of the referenced or embedded data in bytes.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub size_bytes: Option<u64>,
 
     /// Producer-defined format identifier (e.g. `parquet`, `csv`).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub format: Option<String>,
 
     /// Producer-specific schema version for this data.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub schema_version: Option<String>,
 
     /// Optional SHA-256 hash for verifying data integrity at fetch time.
     /// For embedded data, computed over the decoded bytes per
     /// `acdp-data-ref.schema.json`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub content_hash: Option<ContentHash>,
 
     /// Where the data resides — either a URI string or a structured
     /// locator object with a dotted-namespace `scheme` field.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub location: Option<Location>,
 
     /// Inline embedded payload. Decoded size MUST NOT exceed 64 KB.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub embedded: Option<EmbeddedContent>,
 
     /// Unknown producer-controlled `DataRef` fields, preserved verbatim.

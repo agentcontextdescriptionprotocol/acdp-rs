@@ -104,6 +104,13 @@ pub struct Limits {
 
     /// How long idempotency-key mappings are retained, in seconds.
     /// MUST be present when `supports_idempotency_key` is true.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    ///
+    /// Optional and absent-or-integer in the schema — not nullable.
+    /// `de_present` rejects an explicit `"idempotency_key_ttl_seconds": null`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::types::serde_helpers::de_present"
+    )]
     pub idempotency_key_ttl_seconds: Option<u32>,
 }

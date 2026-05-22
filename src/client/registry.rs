@@ -95,21 +95,23 @@ impl RegistryClient {
             .ok()
             .and_then(|u| u.host_str().map(str::to_string));
 
-        let authority_for_redirect = original_authority.clone();
         let policy = redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
                 return attempt.error(format!(
                     "exceeded {MAX_REDIRECTS} redirects per RFC-ACDP-0006 §7.5"
                 ));
             }
-            // Same-authority enforcement (skip when we couldn't parse the base).
-            let next_host = attempt.url().host_str().map(str::to_string);
-            if let (Some(orig), Some(next_host)) = (&authority_for_redirect, &next_host) {
-                if next_host != orig {
-                    return attempt.error(format!(
-                        "cross-authority redirect rejected ({orig} -> {next_host})"
-                    ));
-                }
+            // Same-authority enforcement (scheme + host + port) against the
+            // original request URL. RFC-ACDP-0008 §4.8.
+            let cross = attempt
+                .previous()
+                .first()
+                .filter(|orig| !crate::safe_http::same_fetch_authority(orig, attempt.url()))
+                .map(|orig| (orig.to_string(), attempt.url().to_string()));
+            if let Some((from, to)) = cross {
+                return attempt.error(format!(
+                    "cross-authority redirect rejected ({from} -> {to})"
+                ));
             }
             attempt.follow()
         });
@@ -166,20 +168,23 @@ impl RegistryClient {
 
         let pinned = policy.pin_resolved_ip(&host, port).await?;
 
-        let original_authority = Some(host.clone());
         let policy_redirect = redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
                 return attempt.error(format!(
                     "exceeded {MAX_REDIRECTS} redirects per RFC-ACDP-0006 §7.5"
                 ));
             }
-            let next_host = attempt.url().host_str().map(str::to_string);
-            if let (Some(orig), Some(next_host)) = (&original_authority, &next_host) {
-                if next_host != orig {
-                    return attempt.error(format!(
-                        "cross-authority redirect rejected ({orig} -> {next_host})"
-                    ));
-                }
+            // Same-authority enforcement (scheme + host + port) against the
+            // original request URL. RFC-ACDP-0008 §4.8.
+            let cross = attempt
+                .previous()
+                .first()
+                .filter(|orig| !crate::safe_http::same_fetch_authority(orig, attempt.url()))
+                .map(|orig| (orig.to_string(), attempt.url().to_string()));
+            if let Some((from, to)) = cross {
+                return attempt.error(format!(
+                    "cross-authority redirect rejected ({from} -> {to})"
+                ));
             }
             attempt.follow()
         });
