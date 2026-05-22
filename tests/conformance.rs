@@ -198,13 +198,20 @@ fn status_conformance_fixtures() {
 
 /// FEAT-03 — DataRef structural-validation fixtures (data-ref-001..007).
 ///
-/// `data-ref-008` is deliberately excluded: it is an *external*
-/// data_ref hash mismatch — a runtime data-integrity failure that can
-/// only be detected after fetching `location`, not by structural
-/// validation. It is bound behaviorally by
-/// `fetch_and_verify_uri_ref_fails_on_hash_mismatch` in
-/// `src/client/data_ref.rs`, which asserts the
-/// [`acdp::AcdpError::DataRefHashMismatch`] outcome (BUG-02).
+/// Two fixture families are deliberately excluded because they are
+/// *not* structural-validation cases — the body stays valid and a
+/// registry MUST accept the publish:
+///
+/// - `data-ref-008` — an *external* data_ref hash mismatch, a runtime
+///   data-integrity failure detectable only after fetching `location`.
+///   Bound behaviorally by `fetch_and_verify_uri_ref_fails_on_hash_mismatch`
+///   in `src/client/data_ref.rs` (asserts `DataRefHashMismatch`).
+/// - `data-ref-ssrf-*` — consumer fetch-time SSRF defenses
+///   (RFC-ACDP-0008 §4.9). The fixture's `expected.body_remains_valid`
+///   is `true` and `registry_publish_behavior` says the publish MUST
+///   NOT be rejected; the refusal lives entirely in
+///   `HttpsDataRefFetcher`. Bound behaviorally by the SSRF tests in
+///   `src/client/data_ref.rs`.
 #[test]
 fn data_ref_conformance_fixtures() {
     let Some(root) = spec_root() else { return };
@@ -216,9 +223,9 @@ fn data_ref_conformance_fixtures() {
         if !name.starts_with("data-ref-") {
             continue;
         }
-        // data-ref-008 — external (fetch-time) hash mismatch; not a
-        // structural-validation case. See the doc comment above.
-        if name.starts_with("data-ref-008") {
+        // data-ref-008 + data-ref-ssrf-* — fetch-time checks, not
+        // structural validation. See the doc comment above.
+        if name.starts_with("data-ref-008") || name.starts_with("data-ref-ssrf-") {
             continue;
         }
         let v = read_json(&path);
@@ -738,6 +745,11 @@ fn mixed_data_refs_example_deserializes() {
 /// T9 — every `can-*` canonicalization vector that publishes an
 /// `expected.canonical_form` and `expected.sha256_hex` (or
 /// `expected.content_hash_field_value`) MUST hash-match exactly.
+///
+/// BUG-05: `lin-*` fixtures are covered here too. `lin-001` uses the
+/// same `input.ctx_id → expected.lineage_id` vector shape as the
+/// lineage vectors inside `can-001`, so the existing derivation check
+/// handles both with no extra logic.
 #[test]
 fn can_vectors_match_expected_hash() {
     use sha2::{Digest, Sha256};
@@ -750,7 +762,7 @@ fn can_vectors_match_expected_hash() {
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if !name.starts_with("can-") {
+        if !name.starts_with("can-") && !name.starts_with("lin-") {
             continue;
         }
         let v = read_json(&path);
@@ -800,6 +812,48 @@ fn can_vectors_match_expected_hash() {
     assert!(
         checked >= 1,
         "expected at least one hashable can-* vector; checked {checked}"
+    );
+}
+
+/// IMP-02 — `did-ssrf-001/002/003` are required by `profiles.json` for
+/// `acdp-consumer` and `acdp-registry-core`. Bind them to a behavioral
+/// assertion: each fixture's `did:web` authority resolves into a
+/// forbidden range (loopback / IMDS / RFC 1918) and MUST be refused by
+/// the default `WebResolver` SSRF policy before any request is made.
+#[cfg(feature = "client")]
+#[tokio::test]
+async fn did_ssrf_conformance_fixtures() {
+    let Some(root) = spec_root() else { return };
+    let dir = root.join("schemas/conformance");
+    let cases = [
+        ("did-ssrf-001-loopback-did-web.json", "did:web:127.0.0.1"),
+        ("did-ssrf-002-imds-did-web.json", "did:web:169.254.169.254"),
+        (
+            "did-ssrf-003-private-range-did-web.json",
+            "did:web:10.0.0.1",
+        ),
+    ];
+    let resolver = acdp::did::WebResolver::new();
+    let mut checked = 0usize;
+    for (filename, did) in &cases {
+        let path = dir.join(filename);
+        if !path.exists() {
+            continue;
+        }
+        let _fixture = read_json(&path); // validates the fixture JSON parses
+        let err = resolver
+            .resolve(did)
+            .await
+            .expect_err(&format!("{filename}: {did} MUST be blocked by SSRF policy"));
+        assert!(
+            matches!(err, acdp::AcdpError::KeyResolution(_)),
+            "{filename}: {did} must fail with KeyResolution (permanent, HTTP 400); got {err:?}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 1,
+        "expected ≥1 did-ssrf-* fixture, found {checked}"
     );
 }
 

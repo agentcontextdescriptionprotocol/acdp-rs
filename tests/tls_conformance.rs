@@ -379,6 +379,38 @@ async fn fed_006_registry_did_mismatch() {
     }
 }
 
+// ── SEC-01 — CrossRegistryResolver pins authority DNS ────────────────────────
+
+/// SEC-01 — `CrossRegistryResolver` builds its per-authority
+/// `RegistryClient` via `RegistryClient::new_pinned`, which resolves the
+/// authority's DNS up-front and refuses any answer in a forbidden range.
+///
+/// `check_url` alone only validates URL *syntax* — a hostile `ctx_id`
+/// authority that is a syntactically valid public hostname but resolves
+/// to a private / loopback address would slip past it. `localhost`
+/// stands in for such a hostname: it parses as a valid `CtxId`
+/// authority and clears `check_url`, but resolves to a loopback address
+/// that the pinned constructor MUST reject before any connection.
+#[tokio::test]
+async fn sec_01_cross_registry_pins_authority_dns() {
+    use acdp::client::CrossRegistryResolver;
+    use acdp::types::primitives::CtxId;
+
+    let resolver = CrossRegistryResolver::new();
+    let ctx_id = CtxId("acdp://localhost/12345678-1234-4321-8123-123456781234".into());
+    let err = match resolver.resolve(&ctx_id).await {
+        Ok(_) => panic!("SEC-01: authority resolving to loopback MUST be refused"),
+        Err(e) => e,
+    };
+    // `new_pinned` → `pin_resolved_ip` rejects the loopback answer with
+    // `SchemaViolation` ("forbidden range"); it propagates unwrapped
+    // from `client_for`.
+    assert!(
+        matches!(err, AcdpError::SchemaViolation(_)),
+        "SEC-01: expected SchemaViolation from the pinned DNS check, got {err:?}"
+    );
+}
+
 // ── VerificationReport (FEAT-06) — structured diagnostic outcome ────────────
 
 /// FEAT-06 — `VerifiedContext::fetch_report` returns a structured

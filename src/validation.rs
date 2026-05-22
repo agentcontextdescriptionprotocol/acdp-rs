@@ -761,6 +761,17 @@ fn validate_origin_registry(s: &str) -> Result<(), AcdpError> {
             "origin_registry must be a syntactically valid DNS hostname (got '{s}')"
         )));
     }
+    // BUG-02: delegate the full hostname grammar to the same validator
+    // `CtxId::parse` uses for its authority. Enforces lowercase-only,
+    // no underscore, no port, and valid label structure — values like
+    // `REGISTRY.EXAMPLE.COM`, `registry_example.com`, or `registry-.com`
+    // pass the coarse checks above but are not schema-valid hostnames.
+    if !crate::types::primitives::is_valid_dns_authority(s) {
+        return Err(AcdpError::SchemaViolation(format!(
+            "origin_registry '{s}' is not a valid DNS hostname (must be lowercase \
+             labels of [a-z0-9-] separated by dots, e.g. 'registry.example.com')"
+        )));
+    }
     Ok(())
 }
 
@@ -869,6 +880,43 @@ mod tests {
             encoding: EmbeddedEncoding::Json,
             content: v,
         }
+    }
+
+    // ── origin_registry (BUG-02) ─────────────────────────────────────────────
+
+    #[test]
+    fn origin_registry_accepts_valid_hostname() {
+        validate_origin_registry("registry.example.com").unwrap();
+        validate_origin_registry("reg.example").unwrap();
+        validate_origin_registry("a-b-c.io").unwrap();
+    }
+
+    #[test]
+    fn origin_registry_rejects_uppercase() {
+        assert!(matches!(
+            validate_origin_registry("REGISTRY.EXAMPLE.COM"),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn origin_registry_rejects_underscore() {
+        assert!(matches!(
+            validate_origin_registry("registry_example.com"),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn origin_registry_rejects_hyphen_label_edges() {
+        assert!(matches!(
+            validate_origin_registry("registry-.com"),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+        assert!(matches!(
+            validate_origin_registry("-registry.example.com"),
+            Err(AcdpError::SchemaViolation(_))
+        ));
     }
 
     // ── DataRef.oneOf ────────────────────────────────────────────────────────

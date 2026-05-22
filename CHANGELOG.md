@@ -5,7 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-05-19
+
+First public release. Full conformance with the **ACDP v0.1.0 Final**
+specification (promoted to Final on 2026-05-19): the complete spec
+conformance fixture suite, the `sig-001` / `can-001` / `lin-001` golden
+vectors, and the `acdp-consumer` profile.
 
 ### Added — repository hygiene
 - Project metadata: repository, homepage, documentation, README, exclude rules,
@@ -127,8 +132,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deferred
 - IMP-09 — standalone `acdp-cli` crate (sign / verify / publish /
   retrieve / search). Out of scope for this revision.
-- RFC-ACDP-0006 §7.6 — DNS rebinding pin. `reqwest` does not natively
-  expose a hook; documented as follow-up in `safe_http.rs`.
 - IMP-05 — auto-populating `acdp_version = "0.0.1"` in the builder
   would change the content_hash and break the `sig-001` golden vector;
   v0.0.1 producers MAY include it explicitly via
@@ -144,12 +147,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`sig-001-ed25519-golden`).
 - Or-pattern bug in `Visibility::Restricted` audience check.
 
-## [0.1.0] - 2026-05-04
+### Security
+- Cross-registry resolution builds its per-authority `RegistryClient`
+  with `new_pinned`: the foreign authority's DNS is resolved up-front,
+  every resolved IP is filtered through the `SsrfPolicy`, and the
+  connection is pinned to that address — closing a DNS-rebinding /
+  internal-host SSRF gap (SEC-01).
+- `HttpsDataRefFetcher` builds its HTTP client with a `SafeDnsResolver`
+  DNS hook and a same-authority redirect cap, so a producer-controlled
+  `DataRef` location resolving into a private range is refused at DNS
+  time and cross-authority redirects are rejected (SEC-02).
+- `validate_origin_registry` rejects uppercase, underscores, and
+  malformed labels by delegating to the shared DNS-authority validator
+  (BUG-02).
 
-### Added
-- Initial release: types, JCS canonicalization, content_hash and lineage_id
-  derivation, Ed25519 sign/verify, did:web resolver, registry client,
-  publish validator (server feature), producer builder, golden-vector tests.
-
-[Unreleased]: https://github.com/agentcontextdescriptionprotocol/acdp-rs/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/agentcontextdescriptionprotocol/acdp-rs/releases/tag/v0.1.0

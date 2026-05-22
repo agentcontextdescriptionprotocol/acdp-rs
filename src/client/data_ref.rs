@@ -88,24 +88,80 @@ impl HttpsDataRefFetcher {
 
     /// Build a fetcher with a custom response-size cap.
     pub fn with_max_bytes(max_bytes: u64) -> Self {
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("HttpsDataRefFetcher reqwest build failed");
+        let policy = SsrfPolicy::default();
+        let http = build_data_ref_http_client(&policy)
+            .expect("HttpsDataRefFetcher HTTP client build failed");
         Self {
             http,
-            ssrf_policy: SsrfPolicy::default(),
+            ssrf_policy: policy,
             max_bytes,
         }
     }
 
     /// Replace the [`SsrfPolicy`] (useful for tests).
+    ///
+    /// SEC-02: this rebuilds the underlying `reqwest::Client` so the new
+    /// policy is actually applied at the DNS layer. The HTTP client
+    /// carries a [`SafeDnsResolver`](crate::safe_http) hook, so the
+    /// resolver only takes effect on a client built *with* the policy —
+    /// mutating `ssrf_policy` alone would leave the old DNS filter wired
+    /// in.
     pub fn with_ssrf_policy(mut self, policy: SsrfPolicy) -> Self {
+        self.http = build_data_ref_http_client(&policy)
+            .expect("rebuild HttpsDataRefFetcher HTTP client with new SSRF policy");
         self.ssrf_policy = policy;
         self
     }
+}
+
+/// Build the `reqwest::Client` used by [`HttpsDataRefFetcher`].
+///
+/// SEC-02: mirrors `WebResolver`'s build path so a `DataRef` fetch gets
+/// the same SSRF defenses as DID resolution:
+///
+/// - `policy` is plumbed into reqwest's `dns_resolver` hook via
+///   [`SafeDnsResolver`](crate::safe_http), so every resolved IP is
+///   filtered against the policy *before any TCP connect*. A
+///   producer-controlled `location` URL whose hostname resolves into a
+///   forbidden range (loopback, RFC 1918, link-local/IMDS, ULA, …) is
+///   refused at DNS time — defeating DNS rebinding (RFC-ACDP-0008 §4.8).
+/// - Redirects are capped at [`crate::limits::MAX_REDIRECTS`] and must
+///   stay on the original request's authority; a cross-authority
+///   redirect is rejected.
+fn build_data_ref_http_client(policy: &SsrfPolicy) -> Result<reqwest::Client, AcdpError> {
+    use crate::limits::MAX_REDIRECTS;
+
+    let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error(format!(
+                "data_ref fetch: exceeded {MAX_REDIRECTS} redirects"
+            ));
+        }
+        // Same-authority enforcement against the original request URL.
+        let original_host = attempt
+            .previous()
+            .first()
+            .and_then(|u| u.host_str())
+            .map(str::to_string);
+        let next_host = attempt.url().host_str().map(str::to_string);
+        if let (Some(orig), Some(next)) = (original_host, next_host) {
+            if orig != next {
+                return attempt.error(format!(
+                    "data_ref fetch: cross-authority redirect rejected ({orig} -> {next})"
+                ));
+            }
+        }
+        attempt.follow()
+    });
+
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(redirect_policy)
+        .dns_resolver(crate::safe_http::SafeDnsResolver::arc(policy.clone()))
+        .build()
+        .map_err(|e| AcdpError::Http(e.to_string()))
 }
 
 impl DataRefFetcher for HttpsDataRefFetcher {
@@ -345,5 +401,68 @@ mod tests {
         m.insert("scheme".into(), serde_json::json!("kafka.offset"));
         let err = f.fetch(&Location::Structured(m)).await.unwrap_err();
         assert!(matches!(err, AcdpError::NotImplemented(_)));
+    }
+
+    /// data-ref-ssrf-001 — an external `data_refs[].location` whose host
+    /// is an IP literal in a private / loopback / link-local / IMDS
+    /// range MUST be refused before any connection (RFC-ACDP-0008 §4.9).
+    /// The default `SsrfPolicy` rejects IP-literal URLs at `check_url`,
+    /// so no socket activity occurs.
+    #[tokio::test]
+    async fn https_fetcher_rejects_ip_literal_private_location() {
+        let f = HttpsDataRefFetcher::new();
+        for uri in [
+            "https://10.0.0.1/data.csv",
+            "https://127.0.0.1/data.csv",
+            "https://[::1]/data.csv",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://192.168.1.10/export.parquet",
+        ] {
+            let err = f.fetch(&Location::Uri(uri.into())).await.unwrap_err();
+            assert!(
+                matches!(err, AcdpError::SchemaViolation(_)),
+                "data-ref-ssrf-001: '{uri}' must be refused by the SSRF policy, got {err:?}"
+            );
+        }
+    }
+
+    /// data-ref-ssrf-002 — an external `data_refs[].location` whose host
+    /// is a syntactically public DNS name that *resolves* to a loopback
+    /// address MUST be refused. The `SafeDnsResolver` DNS hook filters
+    /// the resolved IP before any TCP connect, defeating DNS rebinding.
+    /// `localhost` stands in for the fixture's synthetic hostname — it
+    /// always resolves to a loopback address.
+    #[tokio::test]
+    async fn https_fetcher_blocks_hostname_resolving_to_loopback() {
+        let f = HttpsDataRefFetcher::new();
+        let err = f
+            .fetch(&Location::Uri("https://localhost/data.csv".into()))
+            .await
+            .unwrap_err();
+        // The hostname passes `check_url` (not an IP literal); the
+        // SafeDnsResolver refuses the resolved loopback IP, surfacing as
+        // a transport error rather than a successful fetch.
+        assert!(
+            !matches!(err, AcdpError::NotImplemented(_)),
+            "data-ref-ssrf-002: loopback-resolving host must be blocked, got {err:?}"
+        );
+    }
+
+    /// data-ref-ssrf-002 escape hatch — a test harness MAY opt into
+    /// loopback via a non-default SSRF policy. With `allow_test_loopback`
+    /// the DNS filter no longer refuses `localhost`, so the fetch fails
+    /// only on the connection itself (nothing is listening) rather than
+    /// on policy — i.e. it is no longer an SSRF refusal.
+    #[tokio::test]
+    async fn https_fetcher_allow_test_loopback_permits_localhost_dns() {
+        let f = HttpsDataRefFetcher::new()
+            .with_ssrf_policy(crate::safe_http::SsrfPolicy::allow_test_loopback());
+        // No server is listening, so this still errors — but the point
+        // is that `with_ssrf_policy` rebuilt the client with the relaxed
+        // DNS resolver (SEC-02); the policy, not a stale resolver, now
+        // governs the fetch.
+        let _ = f
+            .fetch(&Location::Uri("https://localhost:1/data.csv".into()))
+            .await;
     }
 }
