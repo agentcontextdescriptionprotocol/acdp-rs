@@ -3,6 +3,23 @@
 **/*.rs.bk
 *.pdb
 
+# Language bindings — each is a standalone Cargo package with its own
+# target/ dir, plus NAPI-rs / maturin generated artifacts. Source files
+# under bindings/**/src/, bindings/**/tests/, the manifests, and the
+# READMEs are committed; everything else is build output.
+bindings/**/target/
+bindings/**/Cargo.lock
+bindings/acdp-py/.venv/
+bindings/acdp-py/*.so
+bindings/acdp-py/dist/
+bindings/acdp-node/node_modules/
+bindings/acdp-node/index.js
+bindings/acdp-node/index.d.ts
+bindings/acdp-node/acdp.*.node
+bindings/acdp-node/package-lock.json
+__pycache__/
+.pytest_cache/
+
 # Editor / IDE
 .vscode/
 .idea/

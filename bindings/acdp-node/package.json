@@ -1,0 +1,22 @@
+{
+  "name": "acdp",
+  "version": "0.1.0",
+  "description": "Agent Context Description Protocol — Node.js SDK",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "type": "commonjs",
+  "napi": {
+    "name": "acdp"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test tests/*.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
