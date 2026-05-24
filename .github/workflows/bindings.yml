@@ -44,6 +44,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # `maturin develop` requires an active venv/conda env — it refuses
+      # to install into the bare hosted-tool Python. Create one and
+      # promote it into PATH + VIRTUAL_ENV for every subsequent step.
+      - name: Create and activate venv
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
       - name: Install maturin + pytest
         run: |
           python -m pip install --upgrade pip
@@ -104,6 +112,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      # `maturin develop` requires an active venv — see acdp-py job.
+      - name: Create and activate venv
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
