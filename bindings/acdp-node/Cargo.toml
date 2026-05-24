@@ -1,0 +1,37 @@
+# Standalone package: NOT part of the parent acdp-rs crate (acdp-rs is a
+# single-package crate with no [workspace] table). Built by `@napi-rs/cli`
+# against an external Node.js, so it carries its own [workspace] table.
+#
+# The acdp library is pulled in via path. We keep `default-features = false`
+# so reqwest/tokio/rustls don't end up in the .node binary — this binding
+# never makes HTTP calls; host code is expected to use fetch / undici.
+[package]
+name        = "acdp-node"
+version     = "0.1.0"
+edition     = "2021"
+description = "Agent Context Description Protocol — Node.js SDK"
+license     = "MIT OR Apache-2.0"
+publish     = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+napi-build = "2"
+
+[dependencies]
+acdp        = { path = "../..", default-features = false }
+napi        = { version = "2.16", features = ["napi8"] }
+napi-derive = "2.16"
+serde_json  = "1"
+base64      = "0.22"
+# `Zeroizing<[u8; 32]>` wipes the seed when the napi class is dropped,
+# so we don't strip the protection the Rust `SigningKey` provides.
+zeroize     = "1"
+
+[profile.release]
+lto           = true
+codegen-units = 1
+strip         = "symbols"
