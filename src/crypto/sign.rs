@@ -66,6 +66,38 @@ impl SigningKey {
     pub fn verifying_key_bytes(&self) -> [u8; 32] {
         self.0.verifying_key().to_bytes()
     }
+
+    /// Return the 32-byte raw private-key seed.
+    ///
+    /// Used by language bindings that need to store the key across
+    /// FFI calls (the FFI surface holds a `[u8; 32]` and reconstructs
+    /// the `SigningKey` per call, since `SigningKey` is
+    /// [`ZeroizeOnDrop`] and not `Clone`).
+    ///
+    /// The seed is private-key material — treat it as a secret and
+    /// route persistence through a key vault or HSM. The round-trip
+    /// `SigningKey::from_bytes(&key.seed_bytes())` reconstructs an
+    /// identical signing key.
+    pub fn seed_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    /// Sign the UTF-8 bytes of an arbitrary string. Returns the
+    /// signature as standard base64 (88 chars including padding).
+    ///
+    /// Distinct from [`Self::sign_content_hash`], which signs the
+    /// ASCII bytes of the `"sha256:<hex>"` `content_hash` envelope per
+    /// RFC-ACDP-0001 §5.8. Use this method when the protocol's signing
+    /// input is *not* a `ContentHash` value — most notably the ACDP
+    /// registry's bearer-token challenge flow, whose signing input is
+    /// the namespaced ASCII string
+    /// `"acdp-registry-auth:v1:{nonce}:{agent_id}:{authority}:{expires_at}"`.
+    /// The registry verifies with
+    /// [`crate::crypto::verify::verify_ed25519`]`(&pub_bytes, &sig, &input)`.
+    pub fn sign_string(&self, input: &str) -> String {
+        let sig = self.0.sign(input.as_bytes());
+        STANDARD.encode(sig.to_bytes())
+    }
 }
 
 impl std::fmt::Debug for SigningKey {
@@ -409,5 +441,54 @@ mod tests {
             .try_into()
             .unwrap();
         verify_ed25519(&pub_bytes, &sig_b64, hash.as_str()).unwrap();
+    }
+
+    /// `seed_bytes` returns the same 32-byte seed that `from_bytes`
+    /// consumes — used by the FFI bindings to store the key across
+    /// calls without holding the `ZeroizeOnDrop` handle.
+    #[test]
+    fn seed_bytes_round_trip() {
+        let key = SigningKey::from_bytes(&ED25519_TEST_SEED);
+        assert_eq!(key.seed_bytes(), ED25519_TEST_SEED);
+
+        // Reconstruct from the exported seed and confirm it signs
+        // identically — the signature is deterministic for Ed25519
+        // given the same key and message.
+        let rebuilt = SigningKey::from_bytes(&key.seed_bytes());
+        let hash = ContentHash(
+            "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5".into(),
+        );
+        assert_eq!(
+            key.sign_content_hash(&hash),
+            rebuilt.sign_content_hash(&hash),
+            "key reconstructed from seed_bytes must produce an identical signature"
+        );
+    }
+
+    /// `sign_string` produces a base64-encoded Ed25519 signature over
+    /// the UTF-8 bytes of the input and verifies via `verify_ed25519`
+    /// against the same string. Pins the registry auth-challenge
+    /// signing flow.
+    #[test]
+    fn sign_string_verifies_directly() {
+        use crate::crypto::verify::verify_ed25519;
+        let key = SigningKey::from_bytes(&ED25519_TEST_SEED);
+        // Shape of the ACDP registry challenge `signing_input`.
+        let signing_input = "acdp-registry-auth:v1:nonce-abc:\
+                             did:web:agents.example.com:test-producer:\
+                             registry.example.com:1748000000";
+        let sig_b64 = key.sign_string(signing_input);
+        // Ed25519 raw signature is 64 bytes → 88 base64 chars (padded).
+        assert_eq!(sig_b64.len(), 88);
+
+        let pub_bytes: [u8; 32] = hex::decode(ED25519_TEST_PUB_HEX)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        verify_ed25519(&pub_bytes, &sig_b64, signing_input).unwrap();
+
+        // A different input must NOT verify against the same signature.
+        verify_ed25519(&pub_bytes, &sig_b64, "different-input")
+            .expect_err("sign_string output MUST be specific to the signed input");
     }
 }
