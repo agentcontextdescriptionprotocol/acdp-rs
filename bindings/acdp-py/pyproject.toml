@@ -1,0 +1,20 @@
+[build-system]
+requires      = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name             = "acdp"
+version          = "0.1.0"
+description      = "Agent Context Description Protocol — Python SDK"
+requires-python  = ">=3.9"
+classifiers      = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.maturin]
+features    = ["extension-module"]
+module-name = "acdp"

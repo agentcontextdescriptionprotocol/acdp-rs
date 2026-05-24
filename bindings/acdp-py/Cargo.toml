@@ -1,0 +1,42 @@
+# Standalone package: NOT a member of the parent acdp-rs crate (acdp-rs is
+# a single-package crate with no [workspace] table). Built by maturin
+# against an external CPython, so it carries its own [workspace] table.
+#
+# The acdp library is pulled in via path; turning on its `client` feature
+# would compile reqwest / tokio / rustls into the wheel. The Python SDK
+# never makes HTTP calls — host code is expected to do that with httpx /
+# requests — so we deliberately keep `default-features = false`.
+[package]
+name        = "acdp-py"
+version     = "0.1.0"
+edition     = "2021"
+description = "Agent Context Description Protocol — Python SDK"
+license     = "MIT OR Apache-2.0"
+publish     = false
+
+[workspace]
+
+[lib]
+name       = "acdp"
+crate-type = ["cdylib"]
+
+# `extension-module` is opt-in so `cargo check` / `cargo build` work
+# standalone. maturin enables it via pyproject.toml `[tool.maturin]`.
+# A plain `cargo build` (feature off) links libpython for local testing;
+# the importable wheel MUST be built with the feature on.
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+acdp       = { path = "../..", default-features = false }
+pyo3       = "0.22"
+serde_json = "1"
+base64     = "0.22"
+# `Zeroizing<[u8; 32]>` wipes the seed when the pyclass is dropped, so
+# we don't strip the protection the Rust `SigningKey` provides.
+zeroize    = "1"
+
+[profile.release]
+lto           = true
+codegen-units = 1
+strip         = "symbols"
