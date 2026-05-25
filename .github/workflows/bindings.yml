@@ -41,7 +41,7 @@ jobs:
           # separate cache key keeps the bindings' target/ dirs from
           # competing with the root crate's.
           workspaces: bindings/acdp-py
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       # `maturin develop` requires an active venv/conda env — it refuses
@@ -106,7 +106,7 @@ jobs:
           workspaces: |
             bindings/acdp-py
             bindings/acdp-node
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - uses: actions/setup-node@v4
