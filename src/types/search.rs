@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// All fields are optional; unset fields are omitted from the query string.
 /// The registry defaults `status` to `active` when not supplied.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Clone)]
 pub struct SearchParams {
     /// Full-text search across title, description, domain, tags, agent_id, type.
     #[serde(skip_serializing_if = "Option::is_none")]
