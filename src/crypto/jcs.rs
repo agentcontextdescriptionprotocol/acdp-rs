@@ -65,36 +65,106 @@ fn write_value(v: &serde_json::Value, out: &mut Vec<u8>) {
 }
 
 fn write_number(n: &serde_json::Number, out: &mut Vec<u8>) {
-    if let Some(f) = n.as_f64() {
-        // RFC 8785 §3.2.2.3: negative zero MUST be serialized as "0"
-        if f == 0.0 && f.is_sign_negative() {
-            out.push(b'0');
-            return;
-        }
-        // JSON cannot represent NaN or Infinity. In practice
-        // `serde_json::Number::from_f64` rejects these (returns None) and
-        // this crate does not enable `arbitrary_precision`, so a
-        // non-finite `Number` cannot be constructed through the safe API
-        // and this branch is unreachable on real input. Emitting `null`
-        // would let the canonical bytes silently disagree with the
-        // in-memory value (a corrupted hash preimage), so we refuse
-        // non-finite input loudly in debug and test builds; the `null`
-        // fallback remains only as a release-build last resort so
-        // canonicalization stays total. Producers writing custom numeric
-        // paths MUST detect non-finite floats *before* canonicalization.
-        debug_assert!(
-            f.is_finite(),
-            "non-finite f64 reached JCS canonicalization ({f}); reject \
-             non-finite numbers before hashing (RFC 8785 §3.2.2.3)"
-        );
-        if f.is_nan() || f.is_infinite() {
-            out.extend_from_slice(b"null");
-            return;
-        }
+    // Integer `Number`s (i64 / u64) are already canonical — serde_json prints
+    // the exact digits with no decimal point and no exponent, exactly what
+    // RFC 8785 requires. Only floats need the ECMAScript reformatting below.
+    if n.is_i64() || n.is_u64() {
+        out.extend_from_slice(n.to_string().as_bytes());
+        return;
     }
-    // For all other numbers, serde_json's display representation is
-    // ES6-compatible for integers and common float values.
-    out.extend_from_slice(n.to_string().as_bytes());
+
+    // Float path. `as_f64` is `Some` for any non-integer `Number`; the `None`
+    // arm is unreachable but kept total rather than panicking.
+    let Some(f) = n.as_f64() else {
+        out.extend_from_slice(n.to_string().as_bytes());
+        return;
+    };
+
+    // RFC 8785 §3.2.2.3: both negative and positive zero serialize as "0".
+    if f == 0.0 {
+        out.push(b'0');
+        return;
+    }
+
+    // JSON cannot represent NaN or Infinity. `serde_json::Number::from_f64`
+    // rejects these and this crate does not enable `arbitrary_precision`, so a
+    // non-finite `Number` cannot be built through the safe API — unreachable on
+    // parsed input. Refuse it loudly in debug/test builds; the `null` fallback
+    // is a release-only last resort so canonicalization stays total (emitting
+    // `null` would corrupt the hash preimage). Producers with custom numeric
+    // paths MUST reject non-finite floats *before* canonicalization.
+    debug_assert!(
+        f.is_finite(),
+        "non-finite f64 reached JCS canonicalization ({f}); reject \
+         non-finite numbers before hashing (RFC 8785 §3.2.2.3)"
+    );
+    if !f.is_finite() {
+        out.extend_from_slice(b"null");
+        return;
+    }
+
+    out.extend_from_slice(ecma_number_string(f).as_bytes());
+}
+
+/// Serialize a finite, non-zero `f64` per the ECMAScript `Number::toString`
+/// algorithm that RFC 8785 §3.2.2.3 references: the shortest decimal that
+/// round-trips, rendered with the ES6 band rules — plain decimal for
+/// magnitudes in `[1e-6, 1e21)`, otherwise exponential with a signed,
+/// zero-padding-free exponent; the mantissa never carries a trailing `.0`.
+///
+/// Rust's `{:e}` formatter already produces the shortest round-tripping
+/// mantissa (via the stdlib's Grisu/Ryū path) as `d.ddde±EE`; we extract its
+/// digits and decimal exponent and reformat into the band ECMAScript chooses.
+fn ecma_number_string(f: f64) -> String {
+    let neg = f.is_sign_negative();
+    // e.g. "1.23e25", "5e-324", "1e21", "1.0000005e6".
+    let sci = format!("{:e}", f.abs());
+    let (mantissa, exp) = sci.split_once('e').expect("{:e} always emits 'e'");
+    let e10: i32 = exp.parse().expect("{:e} exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    let k = digits.len() as i32; // count of significant digits
+    let n = e10 + 1; // value = digits × 10^(n − k)
+
+    let body = if (k..=21).contains(&n) {
+        // Integer-valued: all digits then (n − k) trailing zeros.
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if (1..=21).contains(&n) {
+        // Decimal point falls inside the digit run (here n < k).
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if (-5..=0).contains(&n) {
+        // Leading "0." then (−n) zeros then the digits.
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else if k == 1 {
+        // Single-digit mantissa, exponential form.
+        format!("{digits}e{}{}", exp_sign(n - 1), (n - 1).abs())
+    } else {
+        // Multi-digit mantissa, exponential form.
+        format!(
+            "{}.{}e{}{}",
+            &digits[..1],
+            &digits[1..],
+            exp_sign(n - 1),
+            (n - 1).abs()
+        )
+    };
+
+    if neg {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
+/// `'+'` for a non-negative ECMAScript exponent, `'-'` otherwise. RFC 8785
+/// requires the exponent sign to always be present (`1e+21`, `1e-7`).
+fn exp_sign(e: i32) -> char {
+    if e >= 0 {
+        '+'
+    } else {
+        '-'
+    }
 }
 
 fn write_string(s: &str, out: &mut Vec<u8>) {
@@ -196,9 +266,10 @@ mod tests {
     // ECMAScript `Number::toString` output diverges from serde_json's
     // shortest-float Display. We therefore pin the cases that actually
     // occur on the wire and that this canonicalizer guarantees, plus the
-    // negative-zero rule that is the most common JCS bug. (Full ES6
-    // exponent formatting is intentionally out of scope; nothing in the
-    // ACDP schema can produce those tokens.)
+    // negative-zero rule that is the most common JCS bug. Full ECMAScript
+    // `Number::toString` formatting (exponential bands, shortest
+    // round-trip) is implemented in `write_number` and is covered by
+    // `rfc8785_ecmascript_float_bands` below.
 
     /// Helper: canonicalize a single JSON number token (parsed from
     /// text, so integers stay integers) and return the emitted string.
@@ -260,6 +331,48 @@ mod tests {
             let once = canon_number(token);
             let twice = canon_number(&once);
             assert_eq!(once, twice, "token={token}");
+        }
+    }
+
+    /// RFC 8785 §3.2.2.3 float serialization — the `can-011` numeric
+    /// bands, now that ECMAScript `Number::toString` is implemented in
+    /// `write_number`. These canonical tokens are fixed by the algorithm,
+    /// so they hold regardless of the spec fixture's own SHA-256 values.
+    #[test]
+    fn rfc8785_ecmascript_float_bands() {
+        for (token, expected) in [
+            // Large-magnitude exponential (≥ 1e21).
+            ("1e21", "1e+21"),
+            ("1e22", "1e+22"),
+            ("1.23e25", "1.23e+25"),
+            ("1e100", "1e+100"),
+            // Small-magnitude exponential (< 1e-6).
+            ("1e-7", "1e-7"),
+            ("1e-10", "1e-10"),
+            ("5e-9", "5e-9"),
+            ("1e-20", "1e-20"),
+            // Decimal band [1e-6, 1e21).
+            ("1e-6", "0.000001"),
+            ("0.1", "0.1"),
+            ("1000000.5", "1000000.5"),
+            ("12345.6789", "12345.6789"),
+            // Integer-valued floats normalize like integers (no trailing .0).
+            ("1.0", "1"),
+            ("100.0", "100"),
+            // IEEE 754 magnitude extremes.
+            ("1.7976931348623157e308", "1.7976931348623157e+308"),
+            ("5e-324", "5e-324"),
+        ] {
+            assert_eq!(canon_number(token), expected, "token={token}");
+        }
+    }
+
+    /// Positive and negative zero — including the float and exponential
+    /// spellings — all canonicalize to "0" (RFC 8785 §3.2.2.3).
+    #[test]
+    fn rfc8785_all_zeros_normalize() {
+        for token in ["0", "-0", "0.0", "-0.0", "0e0", "-0.0e10"] {
+            assert_eq!(canon_number(token), "0", "token={token}");
         }
     }
 }
