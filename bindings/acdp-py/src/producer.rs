@@ -13,7 +13,7 @@
 // on the Python side.
 #![allow(clippy::too_many_arguments)]
 
-use acdp::crypto::SigningKey;
+use acdp::crypto::{P256SigningKey, SigningKey};
 use acdp::producer::Producer;
 use acdp::types::{AgentDid, Body, CtxId};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -255,5 +255,235 @@ impl PyAcdpProducer {
     fn sign_challenge(&self, signing_input: &str) -> String {
         let key = SigningKey::from_bytes(&self.seed);
         key.sign_string(signing_input)
+    }
+}
+
+/// An ACDP producer signing with ECDSA-P256 (RFC-ACDP signature-algorithms
+/// `ecdsa-p256`) instead of the Ed25519 baseline.
+///
+/// Mirrors [`PyAcdpProducer`] exactly — same JSON-in/JSON-out surface —
+/// but emits `signature.algorithm = "ecdsa-p256"` and the IEEE 1363
+/// `r‖s` wire form. Use this when the producer's `did:web` verification
+/// method declares a P-256 key (e.g. for FIPS-constrained deployments).
+///
+/// The DID document's verification method MUST declare the P-256
+/// algorithm so consumers don't reject the signature on
+/// algorithm-downgrade grounds (RFC-ACDP-0008 §3.9). See
+/// `P256SigningKey::did_verification_method` on the Rust side.
+#[pyclass(name = "AcdpP256Producer")]
+pub struct PyAcdpP256Producer {
+    /// Raw 32-byte P-256 private scalar (big-endian). Reconstructs
+    /// `P256SigningKey` on demand — the key zeroizes its scalar on drop
+    /// and is not `Clone`, so the binding cannot hold a long-lived
+    /// handle. Wrapped in `Zeroizing` so the seed is wiped on drop.
+    seed: Zeroizing<[u8; 32]>,
+    agent_did: String,
+    key_id: String,
+}
+
+#[pymethods]
+impl PyAcdpP256Producer {
+    /// Generate a producer with a fresh random P-256 key (OsRng).
+    ///
+    /// * `agent_did` — the full did:web DID.
+    /// * `key_id` — the DID URL for the signing key (`…#key-1`).
+    #[staticmethod]
+    fn generate(agent_did: &str, key_id: &str) -> Self {
+        let key = P256SigningKey::generate();
+        Self {
+            seed: Zeroizing::new(key.seed_bytes()),
+            agent_did: agent_did.to_string(),
+            key_id: key_id.to_string(),
+        }
+    }
+
+    /// Construct from a 32-byte P-256 private scalar (big-endian).
+    ///
+    /// Deterministic — useful for tests and for loading material from a
+    /// secret store. Raises `ValueError` if the bytes are not exactly 32
+    /// or are not a valid scalar (zero or ≥ curve order).
+    #[staticmethod]
+    fn from_seed(seed: &[u8], agent_did: &str, key_id: &str) -> PyResult<Self> {
+        let arr: [u8; 32] = seed
+            .try_into()
+            .map_err(|_| PyValueError::new_err("seed must be exactly 32 bytes"))?;
+        // Validate the scalar up-front so a bad seed fails at construction
+        // rather than on first use.
+        P256SigningKey::from_bytes(&arr).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            seed: Zeroizing::new(arr),
+            agent_did: agent_did.to_string(),
+            key_id: key_id.to_string(),
+        })
+    }
+
+    /// The producer's DID (`did:web:…`).
+    #[getter]
+    fn agent_did(&self) -> &str {
+        &self.agent_did
+    }
+
+    /// The producer's signing-key DID URL (`did:web:…#key-1`).
+    #[getter]
+    fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// SEC1-uncompressed public key (`0x04 || x || y`, 65 bytes) as
+    /// standard base64.
+    ///
+    /// Use this (or split into JWK `x`/`y` halves) to populate a did:web
+    /// `JsonWebKey2020` verification method when standing up the
+    /// producer's DID document.
+    #[getter]
+    fn public_key_sec1_b64(&self) -> PyResult<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(STANDARD.encode(key.verifying_key_sec1()))
+    }
+
+    /// The raw 32-byte private scalar, for storage in a key vault.
+    ///
+    /// Returns a fresh `bytes` copy each call — Python owns the buffer.
+    fn seed_bytes(&self) -> Vec<u8> {
+        self.seed.to_vec()
+    }
+
+    /// Build and sign a first-version PublishRequest. Returns the wire
+    /// JSON string. Identical surface to
+    /// [`PyAcdpProducer::build_publish_request`]; only the signature
+    /// algorithm differs.
+    #[pyo3(signature = (
+        title, context_type,
+        visibility=None, description=None, summary=None,
+        tags=None, domain=None, metadata=None,
+        derived_from=None, audience=None, schema_uri=None,
+        contributors=None
+    ))]
+    fn build_publish_request(
+        &self,
+        title: String,
+        context_type: String,
+        visibility: Option<String>,
+        description: Option<String>,
+        summary: Option<String>,
+        tags: Option<Vec<String>>,
+        domain: Option<String>,
+        metadata: Option<String>,
+        derived_from: Option<Vec<String>>,
+        audience: Option<Vec<String>>,
+        schema_uri: Option<String>,
+        contributors: Option<Vec<String>>,
+    ) -> PyResult<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let did = AgentDid::new(&self.agent_did);
+        let producer = Producer::new_p256(key, did, &self.key_id);
+        let ctx_type = parse_context_type(&context_type)?;
+        let vis = parse_visibility(visibility.as_deref().unwrap_or("public"))?;
+
+        let mut b = producer
+            .publish_request()
+            .title(title)
+            .context_type(ctx_type)
+            .visibility(vis);
+
+        if let Some(d) = description {
+            b = b.description(d);
+        }
+        if let Some(s) = summary {
+            b = b.summary(s);
+        }
+        if let Some(t) = tags {
+            b = b.tags(t);
+        }
+        if let Some(d) = domain {
+            b = b.domain(d);
+        }
+        if let Some(u) = schema_uri {
+            b = b.schema_uri(u);
+        }
+        if let Some(m) = metadata {
+            let v: serde_json::Value = serde_json::from_str(&m)
+                .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
+            b = b.metadata(v);
+        }
+        if let Some(df) = derived_from {
+            b = b.derived_from(df.into_iter().map(CtxId).collect());
+        }
+        if let Some(aud) = audience {
+            b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());
+        }
+        if let Some(c) = contributors {
+            b = b.contributors(c.into_iter().map(|d| AgentDid::new(&d)).collect());
+        }
+
+        let req = b
+            .build()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        serde_json::to_string(&req).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Build and sign a supersession PublishRequest from a previous
+    /// version's `Body` JSON. Same semantics as
+    /// [`PyAcdpProducer::build_supersede_request`].
+    #[pyo3(signature = (
+        previous_body_json,
+        title=None, summary=None, description=None,
+        tags=None, domain=None, metadata=None
+    ))]
+    fn build_supersede_request(
+        &self,
+        previous_body_json: &str,
+        title: Option<String>,
+        summary: Option<String>,
+        description: Option<String>,
+        tags: Option<Vec<String>>,
+        domain: Option<String>,
+        metadata: Option<String>,
+    ) -> PyResult<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let did = AgentDid::new(&self.agent_did);
+        let producer = Producer::new_p256(key, did, &self.key_id);
+
+        let previous: Body = serde_json::from_str(previous_body_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid body JSON: {e}")))?;
+
+        let mut b = producer.new_version_from(&previous);
+        if let Some(t) = title {
+            b = b.title(t);
+        }
+        if let Some(s) = summary {
+            b = b.summary(s);
+        }
+        if let Some(d) = description {
+            b = b.description(d);
+        }
+        if let Some(t) = tags {
+            b = b.tags(t);
+        }
+        if let Some(d) = domain {
+            b = b.domain(d);
+        }
+        if let Some(m) = metadata {
+            let v: serde_json::Value = serde_json::from_str(&m)
+                .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
+            b = b.metadata(v);
+        }
+
+        let req = b
+            .build()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        serde_json::to_string(&req).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Sign a registry auth-challenge `signing_input` string with the
+    /// producer's P-256 key. Returns the base64 IEEE 1363 signature.
+    /// Same flow as [`PyAcdpProducer::sign_challenge`].
+    fn sign_challenge(&self, signing_input: &str) -> PyResult<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(key.sign_string(signing_input))
     }
 }

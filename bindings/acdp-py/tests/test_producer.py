@@ -281,3 +281,111 @@ def test_supersede_v3_chain():
     assert v3["version"] == 3
     assert v3["supersedes"] == body_v2["ctx_id"]
     assert v3["lineage_id"] == body_v1["lineage_id"]
+
+
+# ── ECDSA-P256 producer (AcdpP256Producer) ──────────────────────────────
+
+# sig-002 golden vector: private scalar = 1 (public key = the P-256
+# generator point G). RFC 6979 makes the signature reproducible.
+P256_GOLDEN_SEED = bytes(31) + bytes([1])
+P256_GOLDEN_HASH = (
+    "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5"
+)
+P256_GOLDEN_SIG = (
+    "O+b+E5OIecgwCnjDyTqsiwwy3VTdBHbVhiRR9k3FAPZHvLJ5dyYYVPPUWbl0dKDdgKMw2dWrnKWRANJVoS9vNw=="
+)
+
+
+def _p256_producer():
+    return acdp.AcdpP256Producer.generate(AGENT_DID, KEY_ID)
+
+
+def test_p256_generate_produces_distinct_keys():
+    a = acdp.AcdpP256Producer.generate(AGENT_DID, KEY_ID)
+    b = acdp.AcdpP256Producer.generate(AGENT_DID, KEY_ID)
+    assert a.public_key_sec1_b64 != b.public_key_sec1_b64
+
+
+def test_p256_from_seed_is_deterministic():
+    seed = bytes([7] * 32)
+    a = acdp.AcdpP256Producer.from_seed(seed, AGENT_DID, KEY_ID)
+    b = acdp.AcdpP256Producer.from_seed(seed, AGENT_DID, KEY_ID)
+    assert a.public_key_sec1_b64 == b.public_key_sec1_b64
+    assert bytes(a.seed_bytes()) == seed
+
+
+def test_p256_from_seed_rejects_wrong_length():
+    with pytest.raises(Exception):
+        acdp.AcdpP256Producer.from_seed(bytes(31), AGENT_DID, KEY_ID)
+
+
+def test_p256_public_key_is_sec1_uncompressed():
+    p = acdp.AcdpP256Producer.from_seed(P256_GOLDEN_SEED, AGENT_DID, KEY_ID)
+    sec1 = base64.b64decode(p.public_key_sec1_b64)
+    # 0x04 || x(32) || y(32) = 65 bytes.
+    assert len(sec1) == 65
+    assert sec1[0] == 0x04
+    # scalar 1 → public key is the P-256 generator G.
+    assert sec1.hex() == (
+        "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+        "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+    )
+
+
+def test_p256_build_publish_request_minimal():
+    p = _p256_producer()
+    req = json.loads(
+        p.build_publish_request(title="P256 ctx", context_type="data_snapshot")
+    )
+    assert req["version"] == 1
+    assert req["agent_id"] == AGENT_DID
+    assert req["signature"]["algorithm"] == "ecdsa-p256"
+    assert req["signature"]["key_id"] == KEY_ID
+    # IEEE 1363 r‖s is 64 raw bytes → 88 base64 chars.
+    assert len(req["signature"]["value"]) == 88
+    assert len(base64.b64decode(req["signature"]["value"])) == 64
+
+
+def test_p256_golden_content_hash_and_signature():
+    """Pins the P-256 producer against the sig-002 spec golden vector.
+
+    content_hash is algorithm-independent (signature is excluded from
+    the preimage), so it matches sig-001. The signature value is the
+    RFC 6979 deterministic ECDSA value from the fixture.
+    """
+    p = acdp.AcdpP256Producer.from_seed(
+        P256_GOLDEN_SEED,
+        "did:web:agents.example.com:test-producer",
+        "did:web:agents.example.com:test-producer#key-1",
+    )
+    req = json.loads(
+        p.build_publish_request(
+            title="Golden test vector — minimal first version",
+            context_type="data_snapshot",
+        )
+    )
+    assert req["content_hash"] == P256_GOLDEN_HASH
+    assert req["signature"]["algorithm"] == "ecdsa-p256"
+    assert req["signature"]["value"] == P256_GOLDEN_SIG
+
+
+def test_p256_verify_content_hash_roundtrip():
+    # The content_hash check is algorithm-agnostic, so the existing
+    # verifier accepts a P-256-signed body's hash.
+    p = _p256_producer()
+    raw = p.build_publish_request(
+        title="Round-trip", context_type="analysis", summary="s", domain="d"
+    )
+    req = json.loads(raw)
+    assert acdp.AcdpVerifier.verify_content_hash(raw, req["content_hash"])
+
+
+def test_p256_sign_challenge_produces_64_byte_signature():
+    p = _p256_producer()
+    signing_input = (
+        f"acdp-registry-auth:v1:test-nonce:{AGENT_DID}"
+        ":registry.example.com:1748000000"
+    )
+    sig = p.sign_challenge(signing_input)
+    # P-256 IEEE 1363 r‖s is 64 raw bytes.
+    assert len(base64.b64decode(sig)) == 64

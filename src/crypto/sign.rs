@@ -161,6 +161,39 @@ impl P256SigningKey {
         STANDARD.encode(sig.to_bytes())
     }
 
+    /// Return the 32-byte raw private scalar (big-endian).
+    ///
+    /// P-256 analogue of [`SigningKey::seed_bytes`]. Language bindings
+    /// hold this `[u8; 32]` and reconstruct the `P256SigningKey` per FFI
+    /// call (the key zeroizes its scalar on drop and is not `Clone`). The
+    /// round-trip `P256SigningKey::from_bytes(&k.seed_bytes())`
+    /// reconstructs an identical signing key.
+    ///
+    /// The scalar is private-key material — treat it as a secret and
+    /// route persistence through a key vault or HSM.
+    pub fn seed_bytes(&self) -> [u8; 32] {
+        let fb = self.0.to_bytes();
+        let mut out = [0u8; 32];
+        // `AsRef<[u8]>` rather than the deprecated `GenericArray::as_slice`.
+        out.copy_from_slice(fb.as_ref());
+        out
+    }
+
+    /// Sign the UTF-8 bytes of an arbitrary string. Returns the
+    /// signature as standard base64 of the 64-byte IEEE 1363 `r‖s`
+    /// wire form (88 chars including padding).
+    ///
+    /// P-256 analogue of [`SigningKey::sign_string`] — uses RFC 6979
+    /// deterministic ECDSA, so the output is reproducible. Use this for
+    /// the ACDP registry's bearer-token challenge flow when the
+    /// producer's key is ECDSA-P256; the registry verifies with
+    /// [`crate::crypto::verify::verify_ecdsa_p256`]`(&sec1, &sig, input)`.
+    pub fn sign_string(&self, input: &str) -> String {
+        use p256::ecdsa::{signature::Signer as _, Signature};
+        let sig: Signature = self.0.sign(input.as_bytes());
+        STANDARD.encode(sig.to_bytes())
+    }
+
     /// SEC1-uncompressed public key (65 bytes: `0x04 || x || y`).
     ///
     /// Use this to populate a `did:web` verification method's
@@ -490,5 +523,79 @@ mod tests {
         // A different input must NOT verify against the same signature.
         verify_ed25519(&pub_bytes, &sig_b64, "different-input")
             .expect_err("sign_string output MUST be specific to the signed input");
+    }
+
+    // ── ECDSA-P256 binding-support + golden vector (sig-002) ─────────────
+
+    /// `P256SigningKey::seed_bytes` round-trips through `from_bytes` and
+    /// the reconstructed key signs identically (RFC 6979 deterministic).
+    /// Pins the FFI key-storage contract used by the P256 bindings.
+    #[test]
+    fn p256_seed_bytes_round_trip() {
+        // RFC 6979 P-256 example private scalar.
+        let seed: [u8; 32] =
+            hex::decode("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let key = P256SigningKey::from_bytes(&seed).unwrap();
+        assert_eq!(key.seed_bytes(), seed);
+
+        let rebuilt = P256SigningKey::from_bytes(&key.seed_bytes()).unwrap();
+        let hash = ContentHash("sha256:".to_owned() + &"a".repeat(64));
+        assert_eq!(
+            key.sign_content_hash(&hash),
+            rebuilt.sign_content_hash(&hash),
+            "key reconstructed from seed_bytes must produce an identical signature"
+        );
+    }
+
+    /// `P256SigningKey::sign_string` produces an IEEE 1363 signature over
+    /// the UTF-8 bytes of the input that verifies via `verify_ecdsa_p256`.
+    /// Pins the P-256 registry auth-challenge signing flow.
+    #[test]
+    fn p256_sign_string_verifies_directly() {
+        use crate::crypto::verify::verify_ecdsa_p256;
+        let key = P256SigningKey::generate();
+        let signing_input = "acdp-registry-auth:v1:nonce-abc:\
+                             did:web:agents.example.com:test-producer:\
+                             registry.example.com:1748000000";
+        let sig_b64 = key.sign_string(signing_input);
+        // P-256 IEEE 1363 r‖s is 64 bytes → 88 base64 chars (padded).
+        assert_eq!(sig_b64.len(), 88);
+
+        let sec1 = key.verifying_key_sec1();
+        verify_ecdsa_p256(&sec1, &sig_b64, signing_input).unwrap();
+        verify_ecdsa_p256(&sec1, &sig_b64, "different-input")
+            .expect_err("sign_string output MUST be specific to the signed input");
+    }
+
+    /// Golden vector regression for `ecdsa-p256` (sig-002). The test
+    /// keypair's private scalar is 1 (public key = the P-256 generator);
+    /// RFC 6979 makes the signature value reproducible. Drift here is a
+    /// protocol break — keep in sync with
+    /// `schemas/conformance/sig-002-ecdsa-p256-golden.json`.
+    #[test]
+    fn sign_and_verify_ecdsa_p256_golden() {
+        use crate::crypto::verify::verify_ecdsa_p256;
+        let mut seed = [0u8; 32];
+        seed[31] = 1; // private scalar = 1
+        let key = P256SigningKey::from_bytes(&seed).unwrap();
+        let hash = ContentHash(
+            "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5".into(),
+        );
+        let sig_b64 = key.sign_content_hash(&hash);
+        assert_eq!(
+            sig_b64,
+            "O+b+E5OIecgwCnjDyTqsiwwy3VTdBHbVhiRR9k3FAPZHvLJ5dyYYVPPUWbl0dKDdgKMw2dWrnKWRANJVoS9vNw=="
+        );
+        // Public key MUST be the SEC1 generator point from the fixture.
+        let sec1_hex = hex::encode(key.verifying_key_sec1());
+        assert_eq!(
+            sec1_hex,
+            "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296\
+             4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+        );
+        verify_ecdsa_p256(&key.verifying_key_sec1(), &sig_b64, hash.as_str()).unwrap();
     }
 }
