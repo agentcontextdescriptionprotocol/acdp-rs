@@ -63,6 +63,9 @@ pub mod validation;
 pub mod client;
 
 #[cfg(feature = "server")]
+pub mod pagination;
+
+#[cfg(feature = "server")]
 pub mod registry;
 
 // ── Protocol version ──────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@
 //! * `verify_signature` — Ed25519 verify against an already-known
 //!   public key, useful once the host has resolved the producer's DID.
 
-use acdp::crypto::{verify_content_hash, verify_ed25519};
+use acdp::crypto::{verify_content_hash, verify_ecdsa_p256, verify_ed25519};
 use acdp::types::ContentHash;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -72,6 +72,38 @@ impl PyAcdpVerifier {
             .try_into()
             .map_err(|_| PyValueError::new_err("public key must decode to 32 bytes"))?;
         verify_ed25519(&arr, sig_b64, content_hash)
+            .map(|_| true)
+            .map_err(|e| PyRuntimeError::new_err(format!("signature invalid: {e}")))
+    }
+
+    /// Verify an ECDSA-P256 signature over a `content_hash` string.
+    ///
+    /// The counterpart to [`AcdpP256Producer`] signing. The signing input
+    /// per RFC-ACDP-0001 §5.8 is the ASCII bytes of the full
+    /// `"sha256:<hex>"` string — NOT the raw 32-byte digest. The wire
+    /// signature is IEEE 1363 `r‖s` (64 bytes, base64), NOT DER.
+    ///
+    /// * `pub_key_sec1_b64` — standard base64 of the 65-byte
+    ///   SEC1-uncompressed public key (`0x04 || x || y`), the same format
+    ///   as `AcdpP256Producer.public_key_sec1_b64`.
+    /// * `sig_b64` — the `body.signature.value` field from the wire
+    ///   format (88-char base64 of the 64-byte `r‖s`).
+    /// * `content_hash` — the `body.content_hash` string.
+    ///
+    /// Returns `True` on success. Raises `ValueError` on malformed
+    /// base64 input or `RuntimeError` on a verification failure.
+    ///
+    /// [`AcdpP256Producer`]: crate::producer::PyAcdpP256Producer
+    #[staticmethod]
+    fn verify_signature_p256(
+        pub_key_sec1_b64: &str,
+        sig_b64: &str,
+        content_hash: &str,
+    ) -> PyResult<bool> {
+        let pub_bytes: Vec<u8> = STANDARD
+            .decode(pub_key_sec1_b64)
+            .map_err(|e| PyValueError::new_err(format!("invalid pub_key_sec1_b64: {e}")))?;
+        verify_ecdsa_p256(&pub_bytes, sig_b64, content_hash)
             .map(|_| true)
             .map_err(|e| PyRuntimeError::new_err(format!("signature invalid: {e}")))
     }

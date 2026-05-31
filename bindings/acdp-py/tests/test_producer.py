@@ -389,3 +389,152 @@ def test_p256_sign_challenge_produces_64_byte_signature():
     sig = p.sign_challenge(signing_input)
     # P-256 IEEE 1363 r‖s is 64 raw bytes.
     assert len(base64.b64decode(sig)) == 64
+
+
+def test_p256_verify_signature_roundtrip():
+    """The P-256 verifier accepts a signature its own producer emitted."""
+    p = _p256_producer()
+    req = json.loads(
+        p.build_publish_request(title="P256 sig", context_type="data_snapshot")
+    )
+    assert acdp.AcdpVerifier.verify_signature_p256(
+        p.public_key_sec1_b64,
+        req["signature"]["value"],
+        req["content_hash"],
+    )
+
+
+def test_p256_verify_signature_rejects_wrong_key():
+    p = _p256_producer()
+    other = _p256_producer()
+    req = json.loads(
+        p.build_publish_request(title="P256 sig", context_type="data_snapshot")
+    )
+    with pytest.raises(Exception, match=r"(?i)signature"):
+        acdp.AcdpVerifier.verify_signature_p256(
+            other.public_key_sec1_b64,
+            req["signature"]["value"],
+            req["content_hash"],
+        )
+
+
+def test_p256_golden_verify_signature():
+    """End-to-end against the sig-002 fixture: the pinned signature must
+    verify under the pinned SEC1 public key and content_hash."""
+    p = acdp.AcdpP256Producer.from_seed(P256_GOLDEN_SEED, AGENT_DID, KEY_ID)
+    assert acdp.AcdpVerifier.verify_signature_p256(
+        p.public_key_sec1_b64, P256_GOLDEN_SIG, P256_GOLDEN_HASH
+    )
+
+
+def test_p256_public_key_jwk_shape():
+    p = acdp.AcdpP256Producer.from_seed(P256_GOLDEN_SEED, AGENT_DID, KEY_ID)
+    jwk = json.loads(p.public_key_jwk)
+    assert jwk["kty"] == "EC"
+    assert jwk["crv"] == "P-256"
+    # x and y are base64url-no-pad halves of the SEC1 point.
+    assert "x" in jwk and "y" in jwk
+    assert "=" not in jwk["x"] and "=" not in jwk["y"]
+
+
+def test_p256_did_verification_method():
+    p = acdp.AcdpP256Producer.from_seed(P256_GOLDEN_SEED, AGENT_DID, KEY_ID)
+    vm = json.loads(p.did_verification_method(KEY_ID, AGENT_DID))
+    assert vm["id"] == KEY_ID
+    assert vm["type"] == "JsonWebKey2020"
+    assert vm["controller"] == AGENT_DID
+    # The embedded JWK matches the standalone getter.
+    assert vm["publicKeyJwk"] == json.loads(p.public_key_jwk)
+
+
+# ── Extended Body fields (data_refs / data_period / expires_at /
+#    expected_lineage_id) ──────────────────────────────────────────────
+
+def test_publish_with_data_refs_period_and_expiry():
+    """The complex body fields cross the boundary as JSON / RFC 3339
+    strings, land correctly in the request, and stay inside the
+    content_hash preimage (so the body re-verifies)."""
+    p = _producer()
+    raw = p.build_publish_request(
+        title="Rich body",
+        context_type="data_snapshot",
+        data_refs=json.dumps(
+            [{"type": "primary_result", "location": "https://example.com/d.parquet"}]
+        ),
+        data_period=json.dumps(
+            {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"}
+        ),
+        expires_at="2026-06-01T00:00:00Z",
+    )
+    req = json.loads(raw)
+    assert req["data_refs"][0]["type"] == "primary_result"
+    assert req["data_refs"][0]["location"] == "https://example.com/d.parquet"
+    assert req["data_period"]["start"].startswith("2026-01-01")
+    assert req["expires_at"].startswith("2026-06-01")
+    # data_refs is part of ProducerContent → must be in the hash preimage.
+    assert acdp.AcdpVerifier.verify_content_hash(raw, req["content_hash"])
+
+
+def test_invalid_data_refs_json_rejected():
+    p = _producer()
+    with pytest.raises(Exception, match=r"(?i)data_refs|invalid"):
+        p.build_publish_request(
+            title="t", context_type="data_snapshot", data_refs="[not-json"
+        )
+
+
+def test_invalid_expires_at_rejected():
+    p = _producer()
+    with pytest.raises(Exception, match=r"(?i)rfc 3339|timestamp|invalid"):
+        p.build_publish_request(
+            title="t", context_type="data_snapshot", expires_at="not-a-date"
+        )
+
+
+def test_expected_lineage_id_rejected_on_v1():
+    """v1 publishes MUST NOT carry a lineage_id (RFC-ACDP-0003 §2.2)."""
+    p = _producer()
+    with pytest.raises(Exception):
+        p.build_publish_request(
+            title="t",
+            context_type="data_snapshot",
+            expected_lineage_id="lin:sha256:" + "a" * 64,
+        )
+
+
+def test_supersede_expected_lineage_id_override():
+    """The supersede path accepts an explicit expected_lineage_id, which
+    surfaces on the wire as the `lineage_id` self-verification field."""
+    p = _producer()
+    v1 = json.loads(p.build_publish_request(title="v1", context_type="data_snapshot"))
+    lineage = "lin:sha256:" + "b" * 64
+    body = {
+        **v1,
+        "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": lineage,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+    v2 = json.loads(
+        p.build_supersede_request(
+            json.dumps(body), title="v2", expected_lineage_id=lineage
+        )
+    )
+    assert v2["version"] == 2
+    assert v2["lineage_id"] == lineage
+
+
+def test_supersede_rejects_malformed_lineage_id():
+    p = _producer()
+    v1 = json.loads(p.build_publish_request(title="v1", context_type="data_snapshot"))
+    body = {
+        **v1,
+        "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:" + "c" * 64,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+    with pytest.raises(Exception, match=r"(?i)lineage"):
+        p.build_supersede_request(
+            json.dumps(body), expected_lineage_id="not-a-lineage-id"
+        )

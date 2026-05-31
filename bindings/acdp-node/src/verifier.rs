@@ -4,7 +4,7 @@
 //! — that requires async HTTP and belongs in JS land. This binding
 //! exposes the two pure-crypto checks every consumer needs.
 
-use acdp::crypto::{verify_content_hash, verify_ed25519};
+use acdp::crypto::{verify_content_hash, verify_ecdsa_p256, verify_ed25519};
 use acdp::types::ContentHash;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use napi::bindgen_prelude::*;
@@ -66,6 +66,35 @@ impl AcdpVerifier {
             .try_into()
             .map_err(|_| Error::from_reason("public key must decode to 32 bytes"))?;
         verify_ed25519(&arr, &sig_b64, &content_hash)
+            .map(|_| true)
+            .map_err(|e| Error::from_reason(format!("signature invalid: {e}")))
+    }
+
+    /// Verify an ECDSA-P256 signature over a `content_hash` string.
+    ///
+    /// The counterpart to `AcdpP256Producer` signing. The signing input
+    /// per RFC-ACDP-0001 §5.8 is the ASCII bytes of the full
+    /// `"sha256:<hex>"` string — NOT the raw 32-byte digest. The wire
+    /// signature is IEEE 1363 `r‖s` (64 bytes, base64), NOT DER.
+    ///
+    /// * `pubKeySec1B64` — standard base64 of the 65-byte
+    ///   SEC1-uncompressed public key (`0x04 || x || y`), the same shape
+    ///   as `AcdpP256Producer.publicKeySec1B64`.
+    /// * `sigB64` — the `body.signature.value` field from the wire
+    ///   format (88-char base64 of the 64-byte `r‖s`).
+    /// * `contentHash` — the `body.content_hash` string.
+    ///
+    /// Returns `true` on success; throws on failure.
+    #[napi]
+    pub fn verify_signature_p256(
+        pub_key_sec1_b64: String,
+        sig_b64: String,
+        content_hash: String,
+    ) -> Result<bool> {
+        let pub_bytes: Vec<u8> = STANDARD
+            .decode(&pub_key_sec1_b64)
+            .map_err(|e| Error::from_reason(format!("invalid pubKeySec1B64: {e}")))?;
+        verify_ecdsa_p256(&pub_bytes, &sig_b64, &content_hash)
             .map(|_| true)
             .map_err(|e| Error::from_reason(format!("signature invalid: {e}")))
     }

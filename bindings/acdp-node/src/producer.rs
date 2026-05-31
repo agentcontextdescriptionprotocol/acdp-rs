@@ -6,14 +6,17 @@
 //! shape are JS-idiomatic.
 
 use acdp::crypto::{P256SigningKey, SigningKey};
-use acdp::producer::Producer;
+use acdp::producer::{Producer, RequestBuilder};
 use acdp::types::{AgentDid, Body, CtxId};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use zeroize::Zeroizing;
 
-use crate::helpers::{parse_context_type, parse_visibility};
+use crate::helpers::{
+    parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id, parse_timestamp,
+    parse_visibility,
+};
 
 /// Options for `buildPublishRequest`. Field names map directly to the
 /// PublishRequest wire schema (camelCase on the JS side).
@@ -47,6 +50,20 @@ pub struct PublishOpts {
     pub schema_uri: Option<String>,
     /// Contributors (DIDs, ≤ 100 unique).
     pub contributors: Option<Vec<String>>,
+    /// Data references — a JSON-encoded array of `acdp-data-ref` objects.
+    /// Part of ProducerContent, so it is included in the content_hash
+    /// preimage.
+    pub data_refs: Option<String>,
+    /// RFC 3339 timestamp after which the conclusions should no longer be
+    /// relied upon. Truncated to millisecond precision.
+    pub expires_at: Option<String>,
+    /// Time window the data covers — a JSON object
+    /// `{"start": <rfc3339>, "end": <rfc3339>}`. Both ends truncated to
+    /// millisecond precision.
+    pub data_period: Option<String>,
+    /// Self-verifying `lin:sha256:<hex>` lineage id. v2+ supersession
+    /// only — rejected on first-version publishes.
+    pub expected_lineage_id: Option<String>,
 }
 
 /// Options for `buildSupersedeRequest`. Any field omitted is carried
@@ -59,6 +76,109 @@ pub struct SupersedeOpts {
     pub tags: Option<Vec<String>>,
     pub domain: Option<String>,
     pub metadata: Option<String>,
+    /// JSON-encoded array of `acdp-data-ref` objects (replaces the
+    /// carried-over data refs when present).
+    pub data_refs: Option<String>,
+    /// RFC 3339 expiry timestamp.
+    pub expires_at: Option<String>,
+    /// JSON object `{"start": <rfc3339>, "end": <rfc3339>}`.
+    pub data_period: Option<String>,
+    /// Self-verifying `lin:sha256:<hex>` lineage id (v2+).
+    pub expected_lineage_id: Option<String>,
+}
+
+/// Apply the optional first-version `Body` fields shared by the Ed25519
+/// and P-256 publish paths. The complex fields cross the FFI boundary as
+/// JSON / RFC 3339 strings and are parsed into typed values here so both
+/// producers behave identically.
+fn apply_publish_fields(
+    mut b: RequestBuilder<'_>,
+    opts: PublishOpts,
+) -> Result<RequestBuilder<'_>> {
+    if let Some(d) = opts.description {
+        b = b.description(d);
+    }
+    if let Some(s) = opts.summary {
+        b = b.summary(s);
+    }
+    if let Some(t) = opts.tags {
+        b = b.tags(t);
+    }
+    if let Some(d) = opts.domain {
+        b = b.domain(d);
+    }
+    if let Some(u) = opts.schema_uri {
+        b = b.schema_uri(u);
+    }
+    if let Some(m) = opts.metadata {
+        let v: serde_json::Value = serde_json::from_str(&m)
+            .map_err(|e| Error::from_reason(format!("invalid metadata JSON: {e}")))?;
+        b = b.metadata(v);
+    }
+    if let Some(df) = opts.derived_from {
+        b = b.derived_from(df.into_iter().map(CtxId).collect());
+    }
+    if let Some(aud) = opts.audience {
+        b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());
+    }
+    if let Some(c) = opts.contributors {
+        b = b.contributors(c.into_iter().map(|d| AgentDid::new(&d)).collect());
+    }
+    if let Some(dr) = opts.data_refs {
+        b = b.data_refs(parse_data_refs(&dr)?);
+    }
+    if let Some(e) = opts.expires_at {
+        b = b.expires_at(parse_timestamp(&e)?);
+    }
+    if let Some(dp) = opts.data_period {
+        b = b.data_period(parse_data_period(&dp)?);
+    }
+    if let Some(l) = opts.expected_lineage_id {
+        b = b.expected_lineage_id(parse_lineage_id(&l)?);
+    }
+    Ok(b)
+}
+
+/// Apply the optional override fields shared by the supersession paths.
+/// Any field left `None` is carried over from the previous body by
+/// `new_version_from`.
+fn apply_supersede_fields(
+    mut b: RequestBuilder<'_>,
+    opts: SupersedeOpts,
+) -> Result<RequestBuilder<'_>> {
+    if let Some(t) = opts.title {
+        b = b.title(t);
+    }
+    if let Some(s) = opts.summary {
+        b = b.summary(s);
+    }
+    if let Some(d) = opts.description {
+        b = b.description(d);
+    }
+    if let Some(t) = opts.tags {
+        b = b.tags(t);
+    }
+    if let Some(d) = opts.domain {
+        b = b.domain(d);
+    }
+    if let Some(m) = opts.metadata {
+        let v: serde_json::Value = serde_json::from_str(&m)
+            .map_err(|e| Error::from_reason(format!("invalid metadata JSON: {e}")))?;
+        b = b.metadata(v);
+    }
+    if let Some(dr) = opts.data_refs {
+        b = b.data_refs(parse_data_refs(&dr)?);
+    }
+    if let Some(e) = opts.expires_at {
+        b = b.expires_at(parse_timestamp(&e)?);
+    }
+    if let Some(dp) = opts.data_period {
+        b = b.data_period(parse_data_period(&dp)?);
+    }
+    if let Some(l) = opts.expected_lineage_id {
+        b = b.expected_lineage_id(parse_lineage_id(&l)?);
+    }
+    Ok(b)
 }
 
 /// An ACDP producer: an Ed25519 signing key and its did:web identity.
@@ -143,41 +263,12 @@ impl AcdpProducer {
         let ctx_type = parse_context_type(&opts.context_type)?;
         let vis = parse_visibility(opts.visibility.as_deref().unwrap_or("public"))?;
 
-        let mut b = producer
+        let b = producer
             .publish_request()
-            .title(opts.title)
+            .title(opts.title.clone())
             .context_type(ctx_type)
             .visibility(vis);
-
-        if let Some(d) = opts.description {
-            b = b.description(d);
-        }
-        if let Some(s) = opts.summary {
-            b = b.summary(s);
-        }
-        if let Some(t) = opts.tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = opts.domain {
-            b = b.domain(d);
-        }
-        if let Some(u) = opts.schema_uri {
-            b = b.schema_uri(u);
-        }
-        if let Some(m) = opts.metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| Error::from_reason(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
-        if let Some(df) = opts.derived_from {
-            b = b.derived_from(df.into_iter().map(CtxId).collect());
-        }
-        if let Some(aud) = opts.audience {
-            b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
-        if let Some(c) = opts.contributors {
-            b = b.contributors(c.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
+        let b = apply_publish_fields(b, opts)?;
 
         let req = b.build().map_err(|e| Error::from_reason(e.to_string()))?;
         serde_json::to_string(&req).map_err(|e| Error::from_reason(e.to_string()))
@@ -199,27 +290,8 @@ impl AcdpProducer {
         let previous: Body = serde_json::from_str(&previous_body_json)
             .map_err(|e| Error::from_reason(format!("invalid body JSON: {e}")))?;
 
-        let mut b = producer.new_version_from(&previous);
-        if let Some(t) = opts.title {
-            b = b.title(t);
-        }
-        if let Some(s) = opts.summary {
-            b = b.summary(s);
-        }
-        if let Some(d) = opts.description {
-            b = b.description(d);
-        }
-        if let Some(t) = opts.tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = opts.domain {
-            b = b.domain(d);
-        }
-        if let Some(m) = opts.metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| Error::from_reason(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
+        let b = producer.new_version_from(&previous);
+        let b = apply_supersede_fields(b, opts)?;
 
         let req = b.build().map_err(|e| Error::from_reason(e.to_string()))?;
         serde_json::to_string(&req).map_err(|e| Error::from_reason(e.to_string()))
@@ -244,7 +316,8 @@ impl AcdpProducer {
 /// form. Use this when the producer's `did:web` verification method
 /// declares a P-256 key. The DID document MUST declare the P-256
 /// algorithm so consumers don't reject the signature on
-/// algorithm-downgrade grounds (RFC-ACDP-0008 §3.9).
+/// algorithm-downgrade grounds (RFC-ACDP-0008 §3.9); use
+/// [`AcdpP256Producer::did_verification_method`] to mint that entry.
 #[napi]
 pub struct AcdpP256Producer {
     /// Raw 32-byte P-256 private scalar (big-endian). Reconstructs
@@ -307,6 +380,36 @@ impl AcdpP256Producer {
         Ok(STANDARD.encode(key.verifying_key_sec1()))
     }
 
+    /// The producer's P-256 public key as a JWK
+    /// (`{"kty":"EC","crv":"P-256","x":…,"y":…}`), returned as a JSON
+    /// object string. Drop this straight into a did:web `JsonWebKey2020`
+    /// verification method's `publicKeyJwk`.
+    #[napi(getter)]
+    pub fn public_key_jwk(&self) -> Result<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        serde_json::to_string(&key.verifying_key_jwk())
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// A complete `verificationMethod` entry (JSON object string) for a
+    /// did:web DID document, of type `JsonWebKey2020`.
+    ///
+    /// * `methodId` — the full DID URL for this key (e.g.
+    ///   `"did:web:agents.example.com:alice#key-1"`).
+    /// * `controller` — the bare DID that owns the key (no fragment).
+    ///
+    /// Consumers resolve the signature algorithm from this entry, so
+    /// publishing it is what keeps a P-256 signature from being rejected
+    /// on algorithm-downgrade grounds (RFC-ACDP-0008 §3.9).
+    #[napi]
+    pub fn did_verification_method(&self, method_id: String, controller: String) -> Result<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        serde_json::to_string(&key.did_verification_method(&method_id, &controller))
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
     /// The raw 32-byte private scalar, for storage in a key vault.
     /// Returns a fresh `Buffer` each call — JS owns the bytes.
     #[napi]
@@ -326,41 +429,12 @@ impl AcdpP256Producer {
         let ctx_type = parse_context_type(&opts.context_type)?;
         let vis = parse_visibility(opts.visibility.as_deref().unwrap_or("public"))?;
 
-        let mut b = producer
+        let b = producer
             .publish_request()
-            .title(opts.title)
+            .title(opts.title.clone())
             .context_type(ctx_type)
             .visibility(vis);
-
-        if let Some(d) = opts.description {
-            b = b.description(d);
-        }
-        if let Some(s) = opts.summary {
-            b = b.summary(s);
-        }
-        if let Some(t) = opts.tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = opts.domain {
-            b = b.domain(d);
-        }
-        if let Some(u) = opts.schema_uri {
-            b = b.schema_uri(u);
-        }
-        if let Some(m) = opts.metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| Error::from_reason(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
-        if let Some(df) = opts.derived_from {
-            b = b.derived_from(df.into_iter().map(CtxId).collect());
-        }
-        if let Some(aud) = opts.audience {
-            b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
-        if let Some(c) = opts.contributors {
-            b = b.contributors(c.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
+        let b = apply_publish_fields(b, opts)?;
 
         let req = b.build().map_err(|e| Error::from_reason(e.to_string()))?;
         serde_json::to_string(&req).map_err(|e| Error::from_reason(e.to_string()))
@@ -383,27 +457,8 @@ impl AcdpP256Producer {
         let previous: Body = serde_json::from_str(&previous_body_json)
             .map_err(|e| Error::from_reason(format!("invalid body JSON: {e}")))?;
 
-        let mut b = producer.new_version_from(&previous);
-        if let Some(t) = opts.title {
-            b = b.title(t);
-        }
-        if let Some(s) = opts.summary {
-            b = b.summary(s);
-        }
-        if let Some(d) = opts.description {
-            b = b.description(d);
-        }
-        if let Some(t) = opts.tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = opts.domain {
-            b = b.domain(d);
-        }
-        if let Some(m) = opts.metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| Error::from_reason(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
+        let b = producer.new_version_from(&previous);
+        let b = apply_supersede_fields(b, opts)?;
 
         let req = b.build().map_err(|e| Error::from_reason(e.to_string()))?;
         serde_json::to_string(&req).map_err(|e| Error::from_reason(e.to_string()))
