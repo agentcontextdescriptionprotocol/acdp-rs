@@ -102,6 +102,14 @@ const methods = {
       p.content_hash,
     ),
   }),
+
+  verify_signature_p256: (p) => ({
+    ok: AcdpVerifier.verifySignatureP256(
+      p.pub_key_sec1_b64,
+      p.sig_b64,
+      p.content_hash,
+    ),
+  }),
 };
 
 const rl = createInterface({ input: process.stdin });

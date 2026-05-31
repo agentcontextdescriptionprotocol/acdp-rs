@@ -14,14 +14,133 @@
 #![allow(clippy::too_many_arguments)]
 
 use acdp::crypto::{P256SigningKey, SigningKey};
-use acdp::producer::Producer;
+use acdp::producer::{Producer, RequestBuilder};
 use acdp::types::{AgentDid, Body, CtxId};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use zeroize::Zeroizing;
 
-use crate::helpers::{parse_context_type, parse_visibility};
+use crate::helpers::{
+    parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id, parse_timestamp,
+    parse_visibility,
+};
+
+/// Apply the optional first-version `Body` fields shared by the Ed25519
+/// and P-256 publish paths. The complex fields (`data_refs`,
+/// `data_period`, `expires_at`, `expected_lineage_id`) cross the FFI
+/// boundary as JSON / RFC 3339 strings and are parsed into typed values
+/// here so both producers behave identically.
+fn apply_publish_fields(
+    mut b: RequestBuilder<'_>,
+    description: Option<String>,
+    summary: Option<String>,
+    tags: Option<Vec<String>>,
+    domain: Option<String>,
+    metadata: Option<String>,
+    derived_from: Option<Vec<String>>,
+    audience: Option<Vec<String>>,
+    schema_uri: Option<String>,
+    contributors: Option<Vec<String>>,
+    data_refs: Option<String>,
+    expires_at: Option<String>,
+    data_period: Option<String>,
+    expected_lineage_id: Option<String>,
+) -> PyResult<RequestBuilder<'_>> {
+    if let Some(d) = description {
+        b = b.description(d);
+    }
+    if let Some(s) = summary {
+        b = b.summary(s);
+    }
+    if let Some(t) = tags {
+        b = b.tags(t);
+    }
+    if let Some(d) = domain {
+        b = b.domain(d);
+    }
+    if let Some(u) = schema_uri {
+        b = b.schema_uri(u);
+    }
+    if let Some(m) = metadata {
+        let v: serde_json::Value = serde_json::from_str(&m)
+            .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
+        b = b.metadata(v);
+    }
+    if let Some(df) = derived_from {
+        b = b.derived_from(df.into_iter().map(CtxId).collect());
+    }
+    if let Some(aud) = audience {
+        b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());
+    }
+    if let Some(c) = contributors {
+        b = b.contributors(c.into_iter().map(|d| AgentDid::new(&d)).collect());
+    }
+    if let Some(dr) = data_refs {
+        b = b.data_refs(parse_data_refs(&dr)?);
+    }
+    if let Some(e) = expires_at {
+        b = b.expires_at(parse_timestamp(&e)?);
+    }
+    if let Some(dp) = data_period {
+        b = b.data_period(parse_data_period(&dp)?);
+    }
+    if let Some(l) = expected_lineage_id {
+        b = b.expected_lineage_id(parse_lineage_id(&l)?);
+    }
+    Ok(b)
+}
+
+/// Apply the optional override fields shared by the supersession paths.
+/// Any field left `None` is carried over from the previous body by
+/// `new_version_from`.
+fn apply_supersede_fields(
+    mut b: RequestBuilder<'_>,
+    title: Option<String>,
+    summary: Option<String>,
+    description: Option<String>,
+    tags: Option<Vec<String>>,
+    domain: Option<String>,
+    metadata: Option<String>,
+    data_refs: Option<String>,
+    expires_at: Option<String>,
+    data_period: Option<String>,
+    expected_lineage_id: Option<String>,
+) -> PyResult<RequestBuilder<'_>> {
+    if let Some(t) = title {
+        b = b.title(t);
+    }
+    if let Some(s) = summary {
+        b = b.summary(s);
+    }
+    if let Some(d) = description {
+        b = b.description(d);
+    }
+    if let Some(t) = tags {
+        b = b.tags(t);
+    }
+    if let Some(d) = domain {
+        b = b.domain(d);
+    }
+    if let Some(m) = metadata {
+        let v: serde_json::Value = serde_json::from_str(&m)
+            .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
+        b = b.metadata(v);
+    }
+    if let Some(dr) = data_refs {
+        b = b.data_refs(parse_data_refs(&dr)?);
+    }
+    if let Some(e) = expires_at {
+        b = b.expires_at(parse_timestamp(&e)?);
+    }
+    if let Some(dp) = data_period {
+        b = b.data_period(parse_data_period(&dp)?);
+    }
+    if let Some(l) = expected_lineage_id {
+        b = b.expected_lineage_id(parse_lineage_id(&l)?);
+    }
+    Ok(b)
+}
 
 /// An ACDP producer: an Ed25519 signing key and its did:web identity.
 ///
@@ -114,13 +233,18 @@ impl PyAcdpProducer {
     /// is optional and follows the kwargs convention.
     /// `metadata` MUST be a JSON-encoded object string (it's re-parsed
     /// into `serde_json::Value` so it lands in the request as a JSON
-    /// object, not a quoted string).
+    /// object, not a quoted string). `data_refs` MUST be a JSON-encoded
+    /// array of `acdp-data-ref` objects; `data_period` a JSON object
+    /// `{"start": <rfc3339>, "end": <rfc3339>}`; `expires_at` an RFC 3339
+    /// timestamp string; `expected_lineage_id` a `lin:sha256:<hex>`
+    /// string (v2+ only — rejected on first-version publishes).
     #[pyo3(signature = (
         title, context_type,
         visibility=None, description=None, summary=None,
         tags=None, domain=None, metadata=None,
         derived_from=None, audience=None, schema_uri=None,
-        contributors=None
+        contributors=None, data_refs=None, expires_at=None,
+        data_period=None, expected_lineage_id=None
     ))]
     fn build_publish_request(
         &self,
@@ -136,6 +260,10 @@ impl PyAcdpProducer {
         audience: Option<Vec<String>>,
         schema_uri: Option<String>,
         contributors: Option<Vec<String>>,
+        data_refs: Option<String>,
+        expires_at: Option<String>,
+        data_period: Option<String>,
+        expected_lineage_id: Option<String>,
     ) -> PyResult<String> {
         let key = SigningKey::from_bytes(&self.seed);
         let did = AgentDid::new(&self.agent_did);
@@ -143,41 +271,27 @@ impl PyAcdpProducer {
         let ctx_type = parse_context_type(&context_type)?;
         let vis = parse_visibility(visibility.as_deref().unwrap_or("public"))?;
 
-        let mut b = producer
+        let b = producer
             .publish_request()
             .title(title)
             .context_type(ctx_type)
             .visibility(vis);
-
-        if let Some(d) = description {
-            b = b.description(d);
-        }
-        if let Some(s) = summary {
-            b = b.summary(s);
-        }
-        if let Some(t) = tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = domain {
-            b = b.domain(d);
-        }
-        if let Some(u) = schema_uri {
-            b = b.schema_uri(u);
-        }
-        if let Some(m) = metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
-        if let Some(df) = derived_from {
-            b = b.derived_from(df.into_iter().map(CtxId).collect());
-        }
-        if let Some(aud) = audience {
-            b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
-        if let Some(c) = contributors {
-            b = b.contributors(c.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
+        let b = apply_publish_fields(
+            b,
+            description,
+            summary,
+            tags,
+            domain,
+            metadata,
+            derived_from,
+            audience,
+            schema_uri,
+            contributors,
+            data_refs,
+            expires_at,
+            data_period,
+            expected_lineage_id,
+        )?;
 
         let req = b
             .build()
@@ -196,7 +310,9 @@ impl PyAcdpProducer {
     #[pyo3(signature = (
         previous_body_json,
         title=None, summary=None, description=None,
-        tags=None, domain=None, metadata=None
+        tags=None, domain=None, metadata=None,
+        data_refs=None, expires_at=None, data_period=None,
+        expected_lineage_id=None
     ))]
     fn build_supersede_request(
         &self,
@@ -207,6 +323,10 @@ impl PyAcdpProducer {
         tags: Option<Vec<String>>,
         domain: Option<String>,
         metadata: Option<String>,
+        data_refs: Option<String>,
+        expires_at: Option<String>,
+        data_period: Option<String>,
+        expected_lineage_id: Option<String>,
     ) -> PyResult<String> {
         let key = SigningKey::from_bytes(&self.seed);
         let did = AgentDid::new(&self.agent_did);
@@ -215,27 +335,20 @@ impl PyAcdpProducer {
         let previous: Body = serde_json::from_str(previous_body_json)
             .map_err(|e| PyValueError::new_err(format!("invalid body JSON: {e}")))?;
 
-        let mut b = producer.new_version_from(&previous);
-        if let Some(t) = title {
-            b = b.title(t);
-        }
-        if let Some(s) = summary {
-            b = b.summary(s);
-        }
-        if let Some(d) = description {
-            b = b.description(d);
-        }
-        if let Some(t) = tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = domain {
-            b = b.domain(d);
-        }
-        if let Some(m) = metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
+        let b = producer.new_version_from(&previous);
+        let b = apply_supersede_fields(
+            b,
+            title,
+            summary,
+            description,
+            tags,
+            domain,
+            metadata,
+            data_refs,
+            expires_at,
+            data_period,
+            expected_lineage_id,
+        )?;
 
         let req = b
             .build()
@@ -268,8 +381,8 @@ impl PyAcdpProducer {
 ///
 /// The DID document's verification method MUST declare the P-256
 /// algorithm so consumers don't reject the signature on
-/// algorithm-downgrade grounds (RFC-ACDP-0008 §3.9). See
-/// `P256SigningKey::did_verification_method` on the Rust side.
+/// algorithm-downgrade grounds (RFC-ACDP-0008 §3.9). Use
+/// [`PyAcdpP256Producer::did_verification_method`] to mint that entry.
 #[pyclass(name = "AcdpP256Producer")]
 pub struct PyAcdpP256Producer {
     /// Raw 32-byte P-256 private scalar (big-endian). Reconstructs
@@ -342,6 +455,35 @@ impl PyAcdpP256Producer {
         Ok(STANDARD.encode(key.verifying_key_sec1()))
     }
 
+    /// The producer's P-256 public key as a JWK
+    /// (`{"kty":"EC","crv":"P-256","x":…,"y":…}`), returned as a JSON
+    /// object string. Drop this straight into a did:web `JsonWebKey2020`
+    /// verification method's `publicKeyJwk`.
+    #[getter]
+    fn public_key_jwk(&self) -> PyResult<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        serde_json::to_string(&key.verifying_key_jwk())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// A complete `verificationMethod` entry (JSON object string) for a
+    /// did:web DID document, of type `JsonWebKey2020`.
+    ///
+    /// * `method_id` — the full DID URL for this key (e.g.
+    ///   `"did:web:agents.example.com:alice#key-1"`).
+    /// * `controller` — the bare DID that owns the key (no fragment).
+    ///
+    /// Consumers resolve the signature algorithm from this entry, so
+    /// publishing it is what keeps a P-256 signature from being rejected
+    /// on algorithm-downgrade grounds (RFC-ACDP-0008 §3.9).
+    fn did_verification_method(&self, method_id: &str, controller: &str) -> PyResult<String> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        serde_json::to_string(&key.did_verification_method(method_id, controller))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// The raw 32-byte private scalar, for storage in a key vault.
     ///
     /// Returns a fresh `bytes` copy each call — Python owns the buffer.
@@ -358,7 +500,8 @@ impl PyAcdpP256Producer {
         visibility=None, description=None, summary=None,
         tags=None, domain=None, metadata=None,
         derived_from=None, audience=None, schema_uri=None,
-        contributors=None
+        contributors=None, data_refs=None, expires_at=None,
+        data_period=None, expected_lineage_id=None
     ))]
     fn build_publish_request(
         &self,
@@ -374,6 +517,10 @@ impl PyAcdpP256Producer {
         audience: Option<Vec<String>>,
         schema_uri: Option<String>,
         contributors: Option<Vec<String>>,
+        data_refs: Option<String>,
+        expires_at: Option<String>,
+        data_period: Option<String>,
+        expected_lineage_id: Option<String>,
     ) -> PyResult<String> {
         let key = P256SigningKey::from_bytes(&self.seed)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -382,41 +529,27 @@ impl PyAcdpP256Producer {
         let ctx_type = parse_context_type(&context_type)?;
         let vis = parse_visibility(visibility.as_deref().unwrap_or("public"))?;
 
-        let mut b = producer
+        let b = producer
             .publish_request()
             .title(title)
             .context_type(ctx_type)
             .visibility(vis);
-
-        if let Some(d) = description {
-            b = b.description(d);
-        }
-        if let Some(s) = summary {
-            b = b.summary(s);
-        }
-        if let Some(t) = tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = domain {
-            b = b.domain(d);
-        }
-        if let Some(u) = schema_uri {
-            b = b.schema_uri(u);
-        }
-        if let Some(m) = metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
-        if let Some(df) = derived_from {
-            b = b.derived_from(df.into_iter().map(CtxId).collect());
-        }
-        if let Some(aud) = audience {
-            b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
-        if let Some(c) = contributors {
-            b = b.contributors(c.into_iter().map(|d| AgentDid::new(&d)).collect());
-        }
+        let b = apply_publish_fields(
+            b,
+            description,
+            summary,
+            tags,
+            domain,
+            metadata,
+            derived_from,
+            audience,
+            schema_uri,
+            contributors,
+            data_refs,
+            expires_at,
+            data_period,
+            expected_lineage_id,
+        )?;
 
         let req = b
             .build()
@@ -430,7 +563,9 @@ impl PyAcdpP256Producer {
     #[pyo3(signature = (
         previous_body_json,
         title=None, summary=None, description=None,
-        tags=None, domain=None, metadata=None
+        tags=None, domain=None, metadata=None,
+        data_refs=None, expires_at=None, data_period=None,
+        expected_lineage_id=None
     ))]
     fn build_supersede_request(
         &self,
@@ -441,6 +576,10 @@ impl PyAcdpP256Producer {
         tags: Option<Vec<String>>,
         domain: Option<String>,
         metadata: Option<String>,
+        data_refs: Option<String>,
+        expires_at: Option<String>,
+        data_period: Option<String>,
+        expected_lineage_id: Option<String>,
     ) -> PyResult<String> {
         let key = P256SigningKey::from_bytes(&self.seed)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -450,27 +589,20 @@ impl PyAcdpP256Producer {
         let previous: Body = serde_json::from_str(previous_body_json)
             .map_err(|e| PyValueError::new_err(format!("invalid body JSON: {e}")))?;
 
-        let mut b = producer.new_version_from(&previous);
-        if let Some(t) = title {
-            b = b.title(t);
-        }
-        if let Some(s) = summary {
-            b = b.summary(s);
-        }
-        if let Some(d) = description {
-            b = b.description(d);
-        }
-        if let Some(t) = tags {
-            b = b.tags(t);
-        }
-        if let Some(d) = domain {
-            b = b.domain(d);
-        }
-        if let Some(m) = metadata {
-            let v: serde_json::Value = serde_json::from_str(&m)
-                .map_err(|e| PyValueError::new_err(format!("invalid metadata JSON: {e}")))?;
-            b = b.metadata(v);
-        }
+        let b = producer.new_version_from(&previous);
+        let b = apply_supersede_fields(
+            b,
+            title,
+            summary,
+            description,
+            tags,
+            domain,
+            metadata,
+            data_refs,
+            expires_at,
+            data_period,
+            expected_lineage_id,
+        )?;
 
         let req = b
             .build()

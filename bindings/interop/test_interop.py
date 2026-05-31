@@ -374,3 +374,79 @@ def test_p256_sign_challenge_is_deterministic_across_bindings(node):
         signing_input=signing_input,
     )["signature"]
     assert py_sig == node_sig
+
+
+def test_node_verifies_python_p256_signature(node):
+    """A P-256 PublishRequest built in Python verifies through the Node
+    `verifySignatureP256` path — proves the new verifier surface is
+    cross-compatible with the producer surface."""
+    raw = _python_p256_publish({**P256_MINIMAL, "context_type": "data_snapshot"})
+    req = json.loads(raw)
+    pub_sec1 = acdp.AcdpP256Producer.from_seed(
+        P256_SEED, AGENT_DID, KEY_ID
+    ).public_key_sec1_b64
+    assert node.call(
+        "verify_signature_p256",
+        pub_key_sec1_b64=pub_sec1,
+        sig_b64=req["signature"]["value"],
+        content_hash=req["content_hash"],
+    )["ok"]
+
+
+def test_python_verifies_node_p256_signature(node):
+    """And the reverse: a Node-built P-256 request verifies in Python."""
+    producer = node.call(
+        "new_p256_producer", agent_did=AGENT_DID, key_id=KEY_ID, seed=list(P256_SEED)
+    )
+    raw = node.call(
+        "build_publish_request",
+        producer=producer["handle"],
+        opts={**P256_MINIMAL, "contextType": "data_snapshot"},
+    )["raw"]
+    req = json.loads(raw)
+    assert acdp.AcdpVerifier.verify_signature_p256(
+        producer["public_key_sec1_b64"],
+        req["signature"]["value"],
+        req["content_hash"],
+    )
+
+
+def test_extended_body_fields_are_byte_identical_across_bindings(node):
+    """data_refs / data_period / expires_at land in the content_hash
+    preimage; both bindings must parse and canonicalize them identically,
+    so the hash and signature match byte-for-byte."""
+    data_refs = json.dumps(
+        [{"type": "primary_result", "location": "https://example.com/d.parquet"}]
+    )
+    data_period = json.dumps(
+        {"start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z"}
+    )
+    expires_at = "2026-06-01T00:00:00Z"
+
+    py_raw = _python_publish(
+        {
+            "title": "Extended body",
+            "context_type": "data_snapshot",
+            "data_refs": data_refs,
+            "data_period": data_period,
+            "expires_at": expires_at,
+        }
+    )
+    node_raw = _node_publish(
+        node,
+        {
+            "title": "Extended body",
+            "contextType": "data_snapshot",
+            "dataRefs": data_refs,
+            "dataPeriod": data_period,
+            "expiresAt": expires_at,
+        },
+    )
+    py_req = json.loads(py_raw)
+    node_req = json.loads(node_raw)
+    assert py_req["content_hash"] == node_req["content_hash"]
+    assert py_req["signature"]["value"] == node_req["signature"]["value"]
+    # And the fields actually made it onto the wire.
+    assert py_req["data_refs"][0]["location"] == "https://example.com/d.parquet"
+    assert py_req["data_period"] == node_req["data_period"]
+    assert py_req["expires_at"] == node_req["expires_at"]
