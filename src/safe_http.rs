@@ -1,6 +1,17 @@
 //! SSRF defenses for server-side cross-registry resolution
 //! (RFC-ACDP-0006 §7).
 //!
+//! ## Single source of SSRF policy
+//!
+//! This module is the **single source of truth** for ACDP's SSRF policy
+//! across both the `client` and `server` features. The server-scoped
+//! path (`crate::registry::safe_http`) does not reimplement any of this
+//! — it only *re-exports* [`SsrfPolicy`] from here (see
+//! `src/registry/safe_http.rs`). Any change to blocked IP ranges, the
+//! HTTPS-only rule, redirect limits, or DNS-rebinding handling therefore
+//! applies to client and server alike; there is no second copy to keep
+//! in sync. Do not add a divergent implementation under `registry/`.
+//!
 //! When a registry resolves a foreign `acdp://` reference on behalf of a
 //! consumer, it must defend against attacker-supplied URIs that target the
 //! registry's own internal network. This module implements the policy

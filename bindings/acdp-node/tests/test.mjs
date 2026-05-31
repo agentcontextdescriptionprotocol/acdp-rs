@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AcdpProducer, AcdpVerifier } from '../index.js';
+import { AcdpProducer, AcdpP256Producer, AcdpVerifier } from '../index.js';
 
 const AGENT_DID = 'did:web:registry.example.com:agents:test-agent';
 const KEY_ID = `${AGENT_DID}#key-1`;
@@ -204,4 +204,90 @@ test('supersede request bumps version and carries lineage_id', () => {
   assert.equal(v2.supersedes, body.ctx_id);
   assert.equal(v2.lineage_id, body.lineage_id);
   assert.equal(v2.title, 'v2');
+});
+
+// ── ECDSA-P256 producer (AcdpP256Producer) ──────────────────────────────
+
+// sig-002 golden vector: private scalar = 1 (public key = the P-256
+// generator G). RFC 6979 makes the signature value reproducible.
+const P256_GOLDEN_SEED = Buffer.concat([Buffer.alloc(31), Buffer.from([1])]);
+const P256_GOLDEN_HASH =
+  'sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5';
+const P256_GOLDEN_SIG =
+  'O+b+E5OIecgwCnjDyTqsiwwy3VTdBHbVhiRR9k3FAPZHvLJ5dyYYVPPUWbl0dKDdgKMw2dWrnKWRANJVoS9vNw==';
+
+test('p256 generate produces distinct keys', () => {
+  const a = AcdpP256Producer.generate(AGENT_DID, KEY_ID);
+  const b = AcdpP256Producer.generate(AGENT_DID, KEY_ID);
+  assert.notEqual(a.publicKeySec1B64, b.publicKeySec1B64);
+});
+
+test('p256 fromSeed is deterministic + round-trips through seedBytes', () => {
+  const seed = Buffer.alloc(32, 7);
+  const a = AcdpP256Producer.fromSeed(seed, AGENT_DID, KEY_ID);
+  const b = AcdpP256Producer.fromSeed(seed, AGENT_DID, KEY_ID);
+  assert.equal(a.publicKeySec1B64, b.publicKeySec1B64);
+  assert.deepEqual(Buffer.from(a.seedBytes()), seed);
+});
+
+test('p256 fromSeed rejects wrong length', () => {
+  assert.throws(() =>
+    AcdpP256Producer.fromSeed(Buffer.alloc(31), AGENT_DID, KEY_ID),
+  );
+});
+
+test('p256 public key is SEC1 uncompressed (generator for scalar 1)', () => {
+  const p = AcdpP256Producer.fromSeed(P256_GOLDEN_SEED, AGENT_DID, KEY_ID);
+  const sec1 = Buffer.from(p.publicKeySec1B64, 'base64');
+  assert.equal(sec1.length, 65);
+  assert.equal(sec1[0], 0x04);
+  assert.equal(
+    sec1.toString('hex'),
+    '046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296' +
+      '4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5',
+  );
+});
+
+test('p256 golden content_hash + signature match sig-002', () => {
+  const p = AcdpP256Producer.fromSeed(
+    P256_GOLDEN_SEED,
+    'did:web:agents.example.com:test-producer',
+    'did:web:agents.example.com:test-producer#key-1',
+  );
+  const req = JSON.parse(
+    p.buildPublishRequest({
+      title: 'Golden test vector — minimal first version',
+      contextType: 'data_snapshot',
+    }),
+  );
+  assert.equal(req.content_hash, P256_GOLDEN_HASH);
+  assert.equal(req.signature.algorithm, 'ecdsa-p256');
+  assert.equal(req.signature.value, P256_GOLDEN_SIG);
+});
+
+test('p256 minimal publish request structure', () => {
+  const p = AcdpP256Producer.generate(AGENT_DID, KEY_ID);
+  const req = JSON.parse(
+    p.buildPublishRequest({ title: 'P256', contextType: 'analysis' }),
+  );
+  assert.equal(req.signature.algorithm, 'ecdsa-p256');
+  // IEEE 1363 r‖s is 64 raw bytes → 88 base64 chars.
+  assert.equal(req.signature.value.length, 88);
+  assert.equal(Buffer.from(req.signature.value, 'base64').length, 64);
+});
+
+test('p256 content_hash verifies through the (algorithm-agnostic) verifier', () => {
+  const p = AcdpP256Producer.generate(AGENT_DID, KEY_ID);
+  const raw = p.buildPublishRequest({
+    title: 'T',
+    contextType: 'data_snapshot',
+  });
+  const req = JSON.parse(raw);
+  assert.equal(AcdpVerifier.verifyContentHash(raw, req.content_hash), true);
+});
+
+test('p256 signChallenge returns a 64-byte signature', () => {
+  const p = AcdpP256Producer.generate(AGENT_DID, KEY_ID);
+  const sig = p.signChallenge('acdp-registry-auth:v1:nonce:did:web:x:reg:123');
+  assert.equal(Buffer.from(sig, 'base64').length, 64);
 });

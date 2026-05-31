@@ -72,14 +72,21 @@ fn write_number(n: &serde_json::Number, out: &mut Vec<u8>) {
             return;
         }
         // JSON cannot represent NaN or Infinity. In practice
-        // `serde_json::Number::from_f64` rejects these (returns None),
-        // so this branch is unreachable on input that was deserialized
-        // from JSON. We keep a `null` fallback for defensive parity if
-        // an unsafe-built Number ever reaches us — but emitting `null`
-        // means the canonical bytes silently disagree with the in-memory
-        // value. Producers writing custom numeric paths SHOULD detect
-        // non-finite floats *before* canonicalization rather than rely
-        // on this fallback.
+        // `serde_json::Number::from_f64` rejects these (returns None) and
+        // this crate does not enable `arbitrary_precision`, so a
+        // non-finite `Number` cannot be constructed through the safe API
+        // and this branch is unreachable on real input. Emitting `null`
+        // would let the canonical bytes silently disagree with the
+        // in-memory value (a corrupted hash preimage), so we refuse
+        // non-finite input loudly in debug and test builds; the `null`
+        // fallback remains only as a release-build last resort so
+        // canonicalization stays total. Producers writing custom numeric
+        // paths MUST detect non-finite floats *before* canonicalization.
+        debug_assert!(
+            f.is_finite(),
+            "non-finite f64 reached JCS canonicalization ({f}); reject \
+             non-finite numbers before hashing (RFC 8785 §3.2.2.3)"
+        );
         if f.is_nan() || f.is_infinite() {
             out.extend_from_slice(b"null");
             return;
@@ -178,5 +185,81 @@ mod tests {
             h,
             "5f8d88d6758cfd43be875d49edc9eaa494de8ec645bf7de6c592b15bbb1e2e3c"
         );
+    }
+
+    // ── RFC 8785 numeric serialization vectors (Appendix B subset) ──────
+    //
+    // RFC 8785 §3.2.2.3 / Appendix B pin the serialization of JSON
+    // numbers. ACDP wire bodies only ever carry *integers* (version
+    // numbers, counts) and the occasional plain decimal — never the
+    // exponential / integer-valued-float forms (e.g. `1e21`, `1.0`) whose
+    // ECMAScript `Number::toString` output diverges from serde_json's
+    // shortest-float Display. We therefore pin the cases that actually
+    // occur on the wire and that this canonicalizer guarantees, plus the
+    // negative-zero rule that is the most common JCS bug. (Full ES6
+    // exponent formatting is intentionally out of scope; nothing in the
+    // ACDP schema can produce those tokens.)
+
+    /// Helper: canonicalize a single JSON number token (parsed from
+    /// text, so integers stay integers) and return the emitted string.
+    fn canon_number(json_token: &str) -> String {
+        let v: serde_json::Value = serde_json::from_str(json_token).unwrap();
+        String::from_utf8(canonicalize_value(&v)).unwrap()
+    }
+
+    #[test]
+    fn rfc8785_integer_vectors() {
+        // Integers serialize with no decimal point, no leading zeros,
+        // no plus sign — exactly their canonical decimal form.
+        for (input, expected) in [
+            ("0", "0"),
+            ("-0", "0"), // negative-zero *integer* normalizes to "0"
+            ("1", "1"),
+            ("-1", "-1"),
+            ("100", "100"),
+            ("9007199254740992", "9007199254740992"), // 2^53
+            ("9007199254740993", "9007199254740993"), // 2^53 + 1 (exact as i64)
+            ("18446744073709551615", "18446744073709551615"), // u64::MAX
+            ("-9223372036854775808", "-9223372036854775808"), // i64::MIN
+        ] {
+            assert_eq!(canon_number(input), expected, "input={input}");
+        }
+    }
+
+    #[test]
+    fn rfc8785_negative_zero_float_becomes_zero() {
+        // RFC 8785 §3.2.2.3: -0.0 MUST serialize as "0".
+        assert_eq!(canon_number("-0.0"), "0");
+        // And nested inside a structure (the realistic case). The other
+        // entries are integers to avoid the integer-valued-float case
+        // (`0.0` → "0.0") that is out of scope per the note above.
+        let v = json!({"a": [-0.0_f64, 1], "b": -0.0_f64});
+        let s = String::from_utf8(canonicalize_value(&v)).unwrap();
+        assert_eq!(s, r#"{"a":[0,1],"b":0}"#);
+    }
+
+    #[test]
+    fn rfc8785_plain_decimal_vectors() {
+        // Plain decimals whose shortest representation is unambiguous and
+        // identical under ES6 and serde_json's Display.
+        for (input, expected) in [
+            ("0.1", "0.1"),
+            ("1.5", "1.5"),
+            ("-2.5", "-2.5"),
+            ("123.456", "123.456"),
+        ] {
+            assert_eq!(canon_number(input), expected, "input={input}");
+        }
+    }
+
+    #[test]
+    fn rfc8785_numeric_serialization_is_idempotent() {
+        // Re-canonicalizing the emitted form reproduces it byte-for-byte
+        // (no drift across a parse → serialize round trip).
+        for token in ["0", "-0", "42", "9007199254740993", "0.1", "-2.5", "-0.0"] {
+            let once = canon_number(token);
+            let twice = canon_number(&once);
+            assert_eq!(once, twice, "token={token}");
+        }
     }
 }

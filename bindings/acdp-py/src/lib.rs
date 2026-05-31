@@ -23,10 +23,12 @@ mod verifier;
 
 use pyo3::prelude::*;
 
-/// The `acdp` Python module — exposes `AcdpProducer` and `AcdpVerifier`.
+/// The `acdp` Python module — exposes `AcdpProducer`,
+/// `AcdpP256Producer`, and `AcdpVerifier`.
 #[pymodule]
 fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<producer::PyAcdpProducer>()?;
+    m.add_class::<producer::PyAcdpP256Producer>()?;
     m.add_class::<verifier::PyAcdpVerifier>()?;
     Ok(())
 }

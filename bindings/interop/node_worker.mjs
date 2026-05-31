@@ -25,8 +25,9 @@ const mod = await import(
   pathToFileURL(join(here, '..', 'acdp-node', 'index.js')).href
 );
 const AcdpProducer = mod.AcdpProducer ?? mod.default?.AcdpProducer;
+const AcdpP256Producer = mod.AcdpP256Producer ?? mod.default?.AcdpP256Producer;
 const AcdpVerifier = mod.AcdpVerifier ?? mod.default?.AcdpVerifier;
-if (!AcdpProducer || !AcdpVerifier) {
+if (!AcdpProducer || !AcdpP256Producer || !AcdpVerifier) {
   throw new Error(
     'acdp-node binding not built — run `npm run build:debug` in bindings/acdp-node/',
   );
@@ -56,8 +57,25 @@ const methods = {
     };
   },
 
+  // Returns { handle, agent_did, key_id, public_key_sec1_b64 }. The
+  // returned handle is accepted by build_publish_request / sign_challenge
+  // exactly like an Ed25519 producer handle (both classes share the
+  // method surface).
+  new_p256_producer: (p) => {
+    const producer = p.seed
+      ? AcdpP256Producer.fromSeed(Buffer.from(p.seed), p.agent_did, p.key_id)
+      : AcdpP256Producer.generate(p.agent_did, p.key_id);
+    return {
+      handle: store(producer),
+      agent_did: producer.agentDid,
+      key_id: producer.keyId,
+      public_key_sec1_b64: producer.publicKeySec1B64,
+    };
+  },
+
   // opts is the JS-side PublishOpts (camelCase). Returns the wire JSON
   // string (so byte equality with the Python side is observable).
+  // Works for both Ed25519 and P-256 producer handles.
   build_publish_request: (p) => ({
     raw: registry.get(p.producer).buildPublishRequest(p.opts),
   }),

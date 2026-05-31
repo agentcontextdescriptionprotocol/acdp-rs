@@ -291,3 +291,86 @@ def test_sign_challenge_is_deterministic_across_bindings(node):
         signing_input=signing_input,
     )["signature"]
     assert py_sig == node_sig
+
+
+# ── ECDSA-P256 cross-language parity ─────────────────────────────────────
+
+# sig-002 golden vector: private scalar = 1 (public key = the P-256
+# generator G). ECDSA-P256 here is RFC 6979 deterministic in both
+# bindings (both wrap the same Rust `p256` crate), so the signature
+# value is reproducible AND byte-identical across languages.
+P256_SEED = bytes(31) + bytes([1])
+P256_GOLDEN_HASH = GOLDEN_HASH  # content_hash excludes the signature
+P256_GOLDEN_SIG = (
+    "O+b+E5OIecgwCnjDyTqsiwwy3VTdBHbVhiRR9k3FAPZHvLJ5dyYYVPPUWbl0dKDdgKMw2dWrnKWRANJVoS9vNw=="
+)
+P256_MINIMAL = {"title": "Golden test vector — minimal first version"}
+
+
+def _python_p256_publish(opts: dict) -> str:
+    p = acdp.AcdpP256Producer.from_seed(P256_SEED, AGENT_DID, KEY_ID)
+    return p.build_publish_request(**opts)
+
+
+def _node_p256_publish(node, opts_camel: dict) -> str:
+    producer = node.call(
+        "new_p256_producer", agent_did=AGENT_DID, key_id=KEY_ID, seed=list(P256_SEED)
+    )
+    return node.call(
+        "build_publish_request",
+        producer=producer["handle"],
+        opts=opts_camel,
+    )["raw"]
+
+
+def test_p256_python_matches_golden():
+    req = json.loads(
+        _python_p256_publish({**P256_MINIMAL, "context_type": "data_snapshot"})
+    )
+    assert req["content_hash"] == P256_GOLDEN_HASH
+    assert req["signature"]["algorithm"] == "ecdsa-p256"
+    assert req["signature"]["value"] == P256_GOLDEN_SIG
+
+
+def test_p256_node_matches_golden(node):
+    req = json.loads(
+        _node_p256_publish(node, {**P256_MINIMAL, "contextType": "data_snapshot"})
+    )
+    assert req["content_hash"] == P256_GOLDEN_HASH
+    assert req["signature"]["algorithm"] == "ecdsa-p256"
+    assert req["signature"]["value"] == P256_GOLDEN_SIG
+
+
+def test_p256_python_and_node_emit_byte_identical_requests(node):
+    """RFC 6979 deterministic ECDSA over P-256 MUST match byte-for-byte
+    across both bindings given the same seed and inputs."""
+    py_req = json.loads(
+        _python_p256_publish({**P256_MINIMAL, "context_type": "data_snapshot"})
+    )
+    node_req = json.loads(
+        _node_p256_publish(node, {**P256_MINIMAL, "contextType": "data_snapshot"})
+    )
+    assert py_req["content_hash"] == node_req["content_hash"]
+    assert py_req["signature"]["value"] == node_req["signature"]["value"]
+    assert py_req["signature"]["algorithm"] == node_req["signature"]["algorithm"] == "ecdsa-p256"
+
+
+def test_p256_sign_challenge_is_deterministic_across_bindings(node):
+    """RFC 6979 makes P-256 challenge signing reproducible, so both
+    bindings MUST produce the same signature for the same input."""
+    signing_input = (
+        "acdp-registry-auth:v1:nonce-abc:"
+        f"{AGENT_DID}:registry.example.com:1748000000"
+    )
+    py_sig = acdp.AcdpP256Producer.from_seed(
+        P256_SEED, AGENT_DID, KEY_ID
+    ).sign_challenge(signing_input)
+    producer = node.call(
+        "new_p256_producer", agent_did=AGENT_DID, key_id=KEY_ID, seed=list(P256_SEED)
+    )
+    node_sig = node.call(
+        "sign_challenge",
+        producer=producer["handle"],
+        signing_input=signing_input,
+    )["signature"]
+    assert py_sig == node_sig
