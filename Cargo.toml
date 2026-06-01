@@ -102,7 +102,7 @@ proptest = "1"
 # and fed-001..006 can be bound to behavioral assertions without going
 # over the network. Kept in dev-dependencies so they don't propagate to
 # downstream consumers.
-rcgen        = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+rcgen        = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 axum         = { version = "0.7", default-features = false, features = ["json"] }
 axum-server  = { version = "0.7", default-features = false, features = ["tls-rustls"] }
 # rustls 0.23 requires the process to install a crypto provider before
