@@ -67,7 +67,7 @@ zeroize       = { version = "1", features = ["derive"] }
 # RNG trait used by both ed25519-dalek and p256 for key generation.
 # Already a transitive dep — promoted to direct so `SigningKey::generate()`
 # and `P256SigningKey::generate()` can plumb `OsRng` through both libraries.
-rand_core     = { version = "0.6", features = ["std"] }
+rand_core     = { version = "0.9", features = ["std"] }
 
 # Identity / time
 chrono      = { version = "0.4", features = ["serde"] }

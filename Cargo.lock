@@ -17,7 +17,7 @@ dependencies = [
  "lru",
  "p256",
  "proptest",
- "rand_core 0.6.4",
+ "rand_core 0.9.5",
  "rcgen",
  "reqwest",
  "rustls",
