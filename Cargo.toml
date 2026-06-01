@@ -103,7 +103,7 @@ proptest = "1"
 # over the network. Kept in dev-dependencies so they don't propagate to
 # downstream consumers.
 rcgen        = { version = "0.13", default-features = false, features = ["pem", "ring"] }
-axum         = { version = "0.7", default-features = false, features = ["json"] }
+axum         = { version = "0.8", default-features = false, features = ["json"] }
 axum-server  = { version = "0.7", default-features = false, features = ["tls-rustls"] }
 # rustls 0.23 requires the process to install a crypto provider before
 # the first TLS handshake — there's no auto-detect when more than one
