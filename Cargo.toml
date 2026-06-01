@@ -55,7 +55,12 @@ required-features = ["cli"]
 [dependencies]
 # Serialisation
 serde      = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+# `float_roundtrip` makes float PARSING correctly-rounded (bit-accurate)
+# rather than serde_json's default ~17-significant-digit approximation.
+# JCS / RFC 8785 number canonicalization (see `crypto::jcs`) requires the
+# exact IEEE-754 value so the ECMAScript `Number::toString` shortest form
+# matches the spec vectors (e.g. `1.23e+25`, not `1.2299999999999998e+25`).
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 # Cryptography
 sha2          = "0.10"
