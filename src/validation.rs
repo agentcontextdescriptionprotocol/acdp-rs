@@ -19,7 +19,7 @@
 //! Each function is independently usable; [`validate_publish_request`] and
 //! [`validate_body`] aggregate everything for end-to-end validation.
 
-use crate::crypto::canonicalize_value;
+use crate::crypto::try_canonicalize_value;
 use crate::error::AcdpError;
 use crate::types::body::Body;
 use crate::types::data_ref::{DataRef, EmbeddedContent, EmbeddedEncoding, Location};
@@ -304,6 +304,11 @@ fn validate_body_inner(body: &Body, check_embedded_hashes: bool) -> Result<(), A
         validate_metadata(meta)?;
     }
 
+    // Forward-compat `extensions` (`#[serde(flatten)]`) are producer-
+    // controlled and flow into JCS + content_hash; cap them like metadata
+    // so they cannot bypass the §3.3 size/count/depth limits (P1-3).
+    validate_extensions(&body.extensions)?;
+
     for dr in &body.data_refs {
         if check_embedded_hashes {
             validate_data_ref(dr)?;
@@ -516,7 +521,7 @@ fn validate_embedded(emb: &EmbeddedContent) -> Result<(), AcdpError> {
 /// - `base64` → base64-decoded bytes of the string
 pub fn embedded_decoded_bytes(emb: &EmbeddedContent) -> Result<Vec<u8>, AcdpError> {
     Ok(match emb.encoding {
-        EmbeddedEncoding::Json => canonicalize_value(&emb.content),
+        EmbeddedEncoding::Json => try_canonicalize_value(&emb.content)?,
         EmbeddedEncoding::Utf8 => {
             let s = emb.content.as_str().ok_or_else(|| {
                 AcdpError::SchemaViolation("utf8 embedded content must be a JSON string".into())
@@ -569,12 +574,20 @@ pub fn verify_embedded_hash(dr: &DataRef) -> Result<(), AcdpError> {
 /// Validate `metadata`'s runtime invariants per RFC-ACDP-0002 §3.3:
 /// max 100 top-level properties, max 8 nesting levels, max 64 KB JCS size.
 pub fn validate_metadata(value: &serde_json::Value) -> Result<(), AcdpError> {
+    validate_json_object_limits(value, "metadata")
+}
+
+/// Shared object-limit check for any producer-controlled free-form JSON
+/// object (`metadata` and the flattened `extensions`): max 100 top-level
+/// properties, max 8 nesting levels, max 64 KB JCS size. Without this,
+/// `extensions` (P1-3) would carry unbounded keys/values into JCS+SHA-256.
+fn validate_json_object_limits(value: &serde_json::Value, field: &str) -> Result<(), AcdpError> {
     let obj = value
         .as_object()
-        .ok_or_else(|| AcdpError::SchemaViolation("metadata must be a JSON object".into()))?;
+        .ok_or_else(|| AcdpError::SchemaViolation(format!("{field} must be a JSON object")))?;
     if obj.len() > MAX_METADATA_PROPERTIES {
         return Err(AcdpError::SchemaViolation(format!(
-            "metadata has {} top-level properties, exceeds {} limit",
+            "{field} has {} top-level properties, exceeds {} limit",
             obj.len(),
             MAX_METADATA_PROPERTIES
         )));
@@ -582,27 +595,58 @@ pub fn validate_metadata(value: &serde_json::Value) -> Result<(), AcdpError> {
     let depth = json_depth(value);
     if depth > MAX_METADATA_DEPTH {
         return Err(AcdpError::SchemaViolation(format!(
-            "metadata nesting depth {depth} exceeds {MAX_METADATA_DEPTH}"
+            "{field} nesting depth {depth} exceeds {MAX_METADATA_DEPTH}"
         )));
     }
-    let canonical_size = canonicalize_value(value).len();
+    let canonical_size = try_canonicalize_value(value)?.len();
     if canonical_size > MAX_METADATA_JCS_BYTES {
         return Err(AcdpError::SchemaViolation(format!(
-            "metadata JCS-canonical size {canonical_size} bytes exceeds {MAX_METADATA_JCS_BYTES}"
+            "{field} JCS-canonical size {canonical_size} bytes exceeds {MAX_METADATA_JCS_BYTES}"
         )));
     }
     Ok(())
 }
 
+/// Validate the flattened forward-compatibility `extensions` object with
+/// the same property-count / depth / JCS-size caps as `metadata`.
+pub fn validate_extensions(
+    extensions: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), AcdpError> {
+    if extensions.is_empty() {
+        return Ok(());
+    }
+    // Borrow into a `Value::Object` without cloning the map.
+    let value = serde_json::Value::Object(extensions.clone());
+    validate_json_object_limits(&value, "extensions")
+}
+
 /// Depth measured per RFC-ACDP-0002 §3.3: nested-object/array count,
 /// not counting leaf scalars. The cap of 8 is inclusive (`≤ 8`).
 /// `meta-003` pins this boundary.
+///
+/// Recursion is bounded by `MAX_JSON_DEPTH_SCAN` (well above the §3.3 cap
+/// of 8 and serde_json's 128-level parse limit) so a pathologically deep
+/// programmatically-built `Value` cannot blow the stack here. Any value
+/// that reaches the budget already exceeds `MAX_METADATA_DEPTH`, so the
+/// caller rejects it regardless of the exact (clamped) count.
 fn json_depth(v: &serde_json::Value) -> usize {
-    match v {
-        serde_json::Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
-        serde_json::Value::Array(arr) => 1 + arr.iter().map(json_depth).max().unwrap_or(0),
-        _ => 0,
+    /// Above §3.3's cap of 8 and serde's 128 parse limit; bounds stack use.
+    const MAX_JSON_DEPTH_SCAN: usize = 256;
+    fn go(v: &serde_json::Value, budget: usize) -> usize {
+        if budget == 0 {
+            return 1; // stop descending; already far over MAX_METADATA_DEPTH
+        }
+        match v {
+            serde_json::Value::Object(map) => {
+                1 + map.values().map(|x| go(x, budget - 1)).max().unwrap_or(0)
+            }
+            serde_json::Value::Array(arr) => {
+                1 + arr.iter().map(|x| go(x, budget - 1)).max().unwrap_or(0)
+            }
+            _ => 0,
+        }
     }
+    go(v, MAX_JSON_DEPTH_SCAN)
 }
 
 // ── Visibility ───────────────────────────────────────────────────────────────
@@ -1355,5 +1399,66 @@ mod tests {
         ];
         let err = validate_unique_array("audience", &dup, MAX_AUDIENCE).unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    // ── P1-3: extensions caps + bounded walkers ──────────────────────────────
+
+    #[test]
+    fn extensions_empty_ok() {
+        validate_extensions(&serde_json::Map::new()).unwrap();
+    }
+
+    #[test]
+    fn extensions_small_forward_compat_accepted() {
+        // The can-008/can-009 shape: a couple of unknown producer fields.
+        let mut ext = serde_json::Map::new();
+        ext.insert("priority".into(), json!("high"));
+        ext.insert("custom".into(), json!({"k": [1, 2, 3]}));
+        validate_extensions(&ext).unwrap();
+    }
+
+    #[test]
+    fn extensions_too_many_properties_rejected() {
+        let mut ext = serde_json::Map::new();
+        for i in 0..(MAX_METADATA_PROPERTIES + 1) {
+            ext.insert(format!("k{i}"), json!(i));
+        }
+        let err = validate_extensions(&ext).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn extensions_oversized_jcs_rejected() {
+        let mut ext = serde_json::Map::new();
+        ext.insert("blob".into(), json!("x".repeat(MAX_METADATA_JCS_BYTES + 1)));
+        let err = validate_extensions(&ext).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn extensions_too_deep_rejected() {
+        // Build a value nested past MAX_METADATA_DEPTH.
+        let mut v = json!(0);
+        for _ in 0..(MAX_METADATA_DEPTH + 2) {
+            v = json!({ "n": v });
+        }
+        let mut ext = serde_json::Map::new();
+        ext.insert("deep".into(), v);
+        let err = validate_extensions(&ext).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn json_depth_clamps_past_scan_budget() {
+        // Deeper than the 256-frame scan budget but shallow enough that
+        // building/dropping the Value is itself safe. `json_depth` must
+        // bound its own recursion and still report a value over the §3.3
+        // cap, and the canonicalizer must refuse it rather than overflow.
+        let mut v = json!(0);
+        for _ in 0..400 {
+            v = json!([v]);
+        }
+        assert!(json_depth(&v) > MAX_METADATA_DEPTH);
+        assert!(crate::crypto::try_canonicalize_value(&v).is_err());
     }
 }

@@ -102,7 +102,7 @@ async fn capabilities_happy_path() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let caps = client.capabilities().await.expect("capabilities call");
 
     assert_eq!(caps.acdp_version, "0.1.0");
@@ -130,7 +130,7 @@ async fn publish_returns_assigned_ids() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let resp = client.publish(&sample_publish_request()).await.unwrap();
 
     assert_eq!(resp.ctx_id.as_str(), "acdp://registry.example.com/uuid-1");
@@ -156,7 +156,7 @@ async fn publish_idempotent_sends_header() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     client
         .publish_idempotent(&sample_publish_request(), "key-123")
         .await
@@ -179,7 +179,7 @@ async fn publish_error_surfaces_wire_error() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.publish(&sample_publish_request()).await.unwrap_err();
 
     match err {
@@ -200,7 +200,7 @@ async fn publish_unknown_error_body_falls_back_to_unknown_code() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.publish(&sample_publish_request()).await.unwrap_err();
     match err {
         AcdpError::Registry(w) => assert_eq!(w.error.code, "unknown"),
@@ -228,7 +228,7 @@ async fn retrieve_full_context() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let ctx = client.retrieve(&CtxId(ctx_id.into())).await.unwrap();
     assert_eq!(ctx.body.title, "test");
     assert_eq!(
@@ -251,7 +251,7 @@ async fn retrieve_body_only() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let body = client.retrieve_body(&CtxId(ctx_id.into())).await.unwrap();
     assert_eq!(body.version, 1);
 }
@@ -269,7 +269,7 @@ async fn retrieve_not_found_maps_to_registry_error() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.retrieve(&CtxId(ctx_id.into())).await.unwrap_err();
     match err {
         AcdpError::NotFound(_) => {}
@@ -287,7 +287,7 @@ async fn rate_limited_maps_to_typed_variant() {
         })))
         .mount(&server)
         .await;
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.publish(&sample_publish_request()).await.unwrap_err();
     assert!(matches!(err, AcdpError::RateLimited(_)));
 }
@@ -306,7 +306,7 @@ async fn superseded_target_maps_with_reason() {
         })))
         .mount(&server)
         .await;
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.publish(&sample_publish_request()).await.unwrap_err();
     match err {
         AcdpError::SupersededTarget { reason, .. } => {
@@ -336,7 +336,7 @@ async fn lineage_current_returns_latest() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let ctx = client.current(&LineageId(lineage.into())).await.unwrap();
     assert_eq!(ctx.body.title, "test");
 }
@@ -361,7 +361,7 @@ async fn search_passes_query_string() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let params = SearchParams {
         q: Some("revenue".into()),
         context_type: Some("data_snapshot".into()),
@@ -389,7 +389,7 @@ async fn search_response_with_results_key_rejected() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.search(&SearchParams::default()).await.unwrap_err();
     match err {
         AcdpError::Serialization(_) => {}
@@ -420,7 +420,7 @@ async fn search_response_with_matches_and_full_summary() {
         })))
         .mount(&server)
         .await;
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let resp = client.search(&SearchParams::default()).await.unwrap();
     assert_eq!(resp.matches.len(), 1);
     assert_eq!(
@@ -442,7 +442,7 @@ async fn cross_authority_redirect_rejected() {
         )
         .mount(&server)
         .await;
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.capabilities().await.unwrap_err();
     // Reqwest surfaces the policy rejection as an Http error.
     assert!(matches!(err, AcdpError::Http(_)));
@@ -464,7 +464,7 @@ async fn oversize_response_body_aborted() {
         )
         .mount(&server)
         .await;
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let err = client.search(&SearchParams::default()).await.unwrap_err();
     assert!(matches!(err, AcdpError::PayloadTooLarge(_)));
 }
@@ -487,7 +487,7 @@ async fn trailing_slash_is_normalized() {
         .await;
 
     let with_slash = format!("{}/", server.uri());
-    let client = RegistryClient::new(&with_slash).unwrap();
+    let client = RegistryClient::with_test_transport(&with_slash).unwrap();
     client.capabilities().await.unwrap();
 }
 
@@ -516,7 +516,7 @@ async fn capabilities_ttl_reflects_cache_control_max_age() {
         .mount(&server)
         .await;
 
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let (_caps, ttl) = client.capabilities_with_ttl().await.unwrap();
     assert_eq!(
         ttl,
@@ -547,7 +547,7 @@ async fn capabilities_ttl_clamps_to_3600_ceiling() {
         )
         .mount(&server)
         .await;
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let (_caps, ttl) = client.capabilities_with_ttl().await.unwrap();
     assert_eq!(ttl, std::time::Duration::from_secs(3600));
 }
@@ -571,7 +571,63 @@ async fn capabilities_ttl_default_when_cache_control_absent() {
         .respond_with(ResponseTemplate::new(200).set_body_json(caps_body))
         .mount(&server)
         .await;
-    let client = RegistryClient::new(&server.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&server.uri()).unwrap();
     let (_caps, ttl) = client.capabilities_with_ttl().await.unwrap();
     assert_eq!(ttl, std::time::Duration::from_secs(300));
+}
+
+// ── P0-1: RegistryClient enforces SSRF / HTTPS-only / DNS-rebinding ──────────
+//
+// `RegistryClient::new` is the entire `acdp-consumer` transport surface and
+// MUST apply the documented "applied automatically" posture (RFC-ACDP-0006
+// §7 / RFC-ACDP-0008 §4.8–4.9). These constructor-time checks mirror the
+// `did_ssrf_*` / `data_ref_ssrf_*` harness.
+
+#[test]
+fn new_rejects_plaintext_http() {
+    match RegistryClient::new("http://registry.example.com") {
+        Err(AcdpError::SchemaViolation(_)) => {}
+        Err(other) => panic!("expected SchemaViolation, got {other:?}"),
+        Ok(_) => panic!("plaintext http MUST be rejected"),
+    }
+}
+
+#[test]
+fn new_rejects_ip_literal_loopback() {
+    assert!(RegistryClient::new("https://127.0.0.1").is_err());
+    assert!(RegistryClient::new("https://[::1]").is_err());
+}
+
+#[test]
+fn new_rejects_imds_and_private_ip_literals() {
+    // AWS/GCP metadata endpoint and RFC 1918.
+    assert!(RegistryClient::new("https://169.254.169.254").is_err());
+    assert!(RegistryClient::new("https://10.0.0.1").is_err());
+    assert!(RegistryClient::new("https://192.168.1.1").is_err());
+}
+
+#[test]
+fn new_accepts_https_hostname() {
+    // A plausible public hostname passes the constructor-time URL check
+    // (DNS-time filtering still applies at connect).
+    assert!(RegistryClient::new("https://registry.example.com").is_ok());
+}
+
+/// DNS-rebinding: a hostname whose DNS answer is a forbidden internal IP
+/// MUST be refused at DNS time, before any connect. `localhost` resolves to
+/// loopback, which the default policy forbids.
+#[tokio::test]
+async fn new_refuses_hostname_resolving_to_loopback_at_dns_time() {
+    // Use a real mock server (binds loopback) but address it via the
+    // `localhost` *hostname* so resolution — not an IP literal — is what the
+    // SafeDnsResolver filters.
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let url = format!("https://localhost:{port}");
+    // Constructor succeeds (hostname is syntactically fine)...
+    let client = RegistryClient::new(&url).unwrap();
+    // ...but the request fails: localhost → 127.0.0.1 is filtered at DNS time.
+    let err = client.capabilities().await.unwrap_err();
+    // Any non-success is acceptable; it must not connect to loopback.
+    let _ = err;
 }

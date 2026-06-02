@@ -506,7 +506,7 @@ async fn fetch_report_happy_path() {
         .mount(&registry)
         .await;
 
-    let client = RegistryClient::new(&registry.uri()).expect("client");
+    let client = RegistryClient::with_test_transport(&registry.uri()).expect("client");
     let resolver = test_resolver(&tls.root_cert_pem);
 
     let (_verified, report) =
@@ -621,7 +621,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
         .respond_with(ResponseTemplate::new(200).set_body_json(full_value))
         .mount(&registry)
         .await;
-    let client = RegistryClient::new(&registry.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&registry.uri()).unwrap();
     let resolver = test_resolver(&tls.root_cert_pem);
 
     // Default policy: structural validation enabled → MUST fail.
@@ -769,7 +769,7 @@ async fn fetch_report_records_embedded_hash_failure() {
         .respond_with(ResponseTemplate::new(200).set_body_json(full_value))
         .mount(&registry)
         .await;
-    let client = RegistryClient::new(&registry.uri()).expect("client");
+    let client = RegistryClient::with_test_transport(&registry.uri()).expect("client");
     let resolver = test_resolver(&tls.root_cert_pem);
 
     let (_verified, report) =
@@ -892,7 +892,7 @@ async fn fetch_report_diagnose_records_forged_signature() {
         .respond_with(ResponseTemplate::new(200).set_body_json(full_value))
         .mount(&registry)
         .await;
-    let client = RegistryClient::new(&registry.uri()).unwrap();
+    let client = RegistryClient::with_test_transport(&registry.uri()).unwrap();
     let resolver = test_resolver(&tls.root_cert_pem);
 
     // Diagnose: MUST succeed with a populated report.
