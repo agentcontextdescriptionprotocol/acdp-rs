@@ -51,7 +51,7 @@ impl RegistryClient {
     /// the RFC-ACDP-0006 §7.4 default timeouts (5s connect, 30s total)
     /// and §7.5 redirect policy (max 3 follows, same authority only).
     pub fn new(base_url: &str) -> Result<Self, AcdpError> {
-        Self::build(base_url, None, None)
+        Self::build(base_url, None, None, SsrfPolicy::default())
     }
 
     /// Connect to a registry that trusts the given PEM-encoded root
@@ -62,7 +62,28 @@ impl RegistryClient {
     /// fixtures `fed-001..006` can drive `CrossRegistryResolver`
     /// end-to-end without going over the network.
     pub fn with_root_cert_pem(base_url: &str, pem: &[u8]) -> Result<Self, AcdpError> {
-        Self::build(base_url, Some(pem), None)
+        // Drives an in-process HTTPS server on loopback, so the SSRF
+        // policy must permit a loopback-resolved answer. All other
+        // forbidden ranges (RFC 1918, IMDS, …) still apply.
+        Self::build(base_url, Some(pem), None, SsrfPolicy::allow_test_loopback())
+    }
+
+    /// Test-only permissive transport: allows `http://`, IP-literal hosts,
+    /// and loopback so the crate's in-process mock HTTP servers (e.g.
+    /// `wiremock`, which binds `http://127.0.0.1:<port>`) can be driven.
+    ///
+    /// Production MUST use [`Self::new`], which applies the full
+    /// RFC-ACDP-0006 §7 / RFC-ACDP-0008 SSRF + HTTPS-only + DNS-rebinding
+    /// posture. This constructor exists solely to keep the test harness on
+    /// loopback HTTP.
+    #[doc(hidden)]
+    pub fn with_test_transport(base_url: &str) -> Result<Self, AcdpError> {
+        let policy = SsrfPolicy {
+            reject_ip_literals: false,
+            allow_http: true,
+            allow_loopback_resolved: true,
+        };
+        Self::build(base_url, None, None, policy)
     }
 
     /// Connect to a registry whose `<authority>` in `base_url` is routed
@@ -82,15 +103,30 @@ impl RegistryClient {
         target: std::net::SocketAddr,
         pem: &[u8],
     ) -> Result<Self, AcdpError> {
-        Self::build(base_url, Some(pem), Some(target))
+        // Pins a logical hostname to a loopback test endpoint; permit the
+        // loopback answer while keeping every other forbidden range live.
+        Self::build(
+            base_url,
+            Some(pem),
+            Some(target),
+            SsrfPolicy::allow_test_loopback(),
+        )
     }
 
     fn build(
         base_url: &str,
         extra_root_pem: Option<&[u8]>,
         resolve_target: Option<std::net::SocketAddr>,
+        policy_ssrf: SsrfPolicy,
     ) -> Result<Self, AcdpError> {
         let base = base_url.trim_end_matches('/').to_string();
+        // RFC-ACDP-0006 §7 / RFC-ACDP-0008 §4.8–4.9: reject non-HTTPS,
+        // IP-literal, and malformed base URLs up front, then filter every
+        // resolved IP at DNS time (below) so DNS-rebinding answers in
+        // forbidden ranges are refused before connect. Previously `new()`
+        // applied neither, contradicting the documented "applied
+        // automatically by the public client APIs" guarantee (P0-1).
+        policy_ssrf.check_url(&base)?;
         let original_authority = url::Url::parse(&base)
             .ok()
             .and_then(|u| u.host_str().map(str::to_string));
@@ -120,7 +156,11 @@ impl RegistryClient {
             .use_rustls_tls()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .redirect(policy);
+            .redirect(policy)
+            // DNS-time SSRF filtering for every connection (incl. redirects
+            // and reconnects), defeating DNS rebinding — RFC-ACDP-0006 §7.6.
+            // Mirrors `WebResolver::build_http_client` / `HttpsDataRefFetcher`.
+            .dns_resolver(crate::safe_http::SafeDnsResolver::arc(policy_ssrf));
 
         if let Some(pem) = extra_root_pem {
             let cert = reqwest::Certificate::from_pem(pem)

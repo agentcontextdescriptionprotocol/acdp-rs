@@ -17,7 +17,13 @@ use wiremock::{
 };
 
 fn acdp_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_acdp"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_acdp"));
+    // The CLI applies the full SSRF / HTTPS-only posture by default
+    // (P0-1). These tests drive an in-process `wiremock` registry over
+    // plain HTTP on loopback, so opt into the documented test-only
+    // permissive transport.
+    cmd.env("ACDP_INSECURE_TRANSPORT", "1");
+    cmd
 }
 
 /// Run the CLI with the given args + stdin, return `(exit_code, stdout, stderr)`.

@@ -2,7 +2,8 @@
 //!
 //! Implemented inline to avoid an external dependency and to guarantee
 //! correct handling of all edge cases, especially:
-//!   - Object key sorting (lexicographic Unicode code-point order)
+//!   - Object key sorting (RFC 8785 §3.2.1 UTF-16 code-unit order; all
+//!     ACDP keys are ASCII, where this coincides with byte/`str` order)
 //!   - No whitespace
 //!   - Negative zero (`-0.0`) MUST become `0`  (the most common bug)
 //!   - Non-ASCII characters emitted as-is, not `\uXXXX`-escaped
@@ -12,24 +13,49 @@ use std::io::Write;
 use crate::error::AcdpError;
 use serde::Serialize;
 
+/// Hard recursion ceiling for the JCS walker. Far above any real ACDP
+/// body (metadata depth is capped at 8) and above serde_json's default
+/// 128-level parse limit, so a value that parsed off the wire can never
+/// hit it — the wire/golden-vector form is unchanged. The cap only
+/// guards against stack overflow from a pathologically deep
+/// programmatically-built `Value` (defense-in-depth, RFC-ACDP P1-3).
+const MAX_JCS_DEPTH: usize = 256;
+
 /// Canonicalize any serializable value to JCS bytes.
 ///
 /// The returned bytes are the canonical UTF-8 JSON representation.
 pub fn canonicalize<T: Serialize>(value: &T) -> Result<Vec<u8>, AcdpError> {
     let v = serde_json::to_value(value).map_err(|e| AcdpError::Canonicalization(e.to_string()))?;
+    try_canonicalize_value(&v)
+}
+
+/// Canonicalize a pre-parsed `serde_json::Value`, returning an error if
+/// nesting exceeds the internal recursion ceiling (`MAX_JCS_DEPTH`).
+/// Prefer this on any path that may canonicalize untrusted /
+/// programmatically-built input.
+pub fn try_canonicalize_value(value: &serde_json::Value) -> Result<Vec<u8>, AcdpError> {
     let mut out = Vec::with_capacity(256);
-    write_value(&v, &mut out);
+    write_value(value, &mut out, 0)?;
     Ok(out)
 }
 
 /// Canonicalize a pre-parsed `serde_json::Value`.
+///
+/// Infallible back-compat wrapper. Panics only on input nested past the
+/// internal recursion ceiling (`MAX_JCS_DEPTH`, unreachable from parsed
+/// wire data); callers handling untrusted input should use
+/// [`try_canonicalize_value`].
 pub fn canonicalize_value(value: &serde_json::Value) -> Vec<u8> {
-    let mut out = Vec::with_capacity(256);
-    write_value(value, &mut out);
-    out
+    try_canonicalize_value(value)
+        .expect("JCS canonicalization exceeded depth limit; use try_canonicalize_value")
 }
 
-fn write_value(v: &serde_json::Value, out: &mut Vec<u8>) {
+fn write_value(v: &serde_json::Value, out: &mut Vec<u8>, depth: usize) -> Result<(), AcdpError> {
+    if depth > MAX_JCS_DEPTH {
+        return Err(AcdpError::Canonicalization(format!(
+            "JSON nesting depth exceeds {MAX_JCS_DEPTH}"
+        )));
+    }
     match v {
         serde_json::Value::Null => out.extend_from_slice(b"null"),
         serde_json::Value::Bool(true) => out.extend_from_slice(b"true"),
@@ -42,12 +68,14 @@ fn write_value(v: &serde_json::Value, out: &mut Vec<u8>) {
                 if i > 0 {
                     out.push(b',');
                 }
-                write_value(elem, out);
+                write_value(elem, out, depth + 1)?;
             }
             out.push(b']');
         }
         serde_json::Value::Object(map) => {
-            // Collect and sort keys in Unicode code-point (lexicographic) order
+            // Sort keys in RFC 8785 §3.2.1 UTF-16 code-unit order. ACDP
+            // keys are ASCII, where Rust's `str` (byte/scalar) ordering
+            // coincides with UTF-16 code-unit ordering.
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
             out.push(b'{');
@@ -57,11 +85,12 @@ fn write_value(v: &serde_json::Value, out: &mut Vec<u8>) {
                 }
                 write_string(key, out);
                 out.push(b':');
-                write_value(&map[key.as_str()], out);
+                write_value(&map[key.as_str()], out, depth + 1)?;
             }
             out.push(b'}');
         }
     }
+    Ok(())
 }
 
 fn write_number(n: &serde_json::Number, out: &mut Vec<u8>) {

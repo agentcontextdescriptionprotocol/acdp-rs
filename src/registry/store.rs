@@ -474,6 +474,29 @@ impl RegistryStore for InMemoryStore {
                 }
             })?;
 
+            // Producer-continuity: only the predecessor's producer (or a
+            // declared contributor) may publish a successor in its lineage.
+            // Signature verification only proves the *requester* signed
+            // their own request — it does not bind `supersedes` to the
+            // predecessor's owner. Without this check any signer could
+            // supersede another producer's context (`Superseded` side
+            // effect below + `current(lineage)` re-pointing), a full
+            // lineage takeover. RFC-ACDP-0001 §5.9 supersession is
+            // producer-scoped.
+            let is_owner = req.agent_id == prev_full.body.agent_id
+                || prev_full.body.contributors.contains(&req.agent_id);
+            if !is_owner {
+                // Uniform with the genuine not-found case above: a
+                // non-owner learns neither that the predecessor exists nor
+                // its version / superseded status (supersession existence
+                // oracle). Anyone who can legitimately read the
+                // predecessor learns nothing new from this shape.
+                return Err(AcdpError::SupersededTarget {
+                    reason: crate::error::SupersessionReason::NotFound,
+                    message: format!("supersedes target '{prev}' not found in this registry"),
+                });
+            }
+
             // Lineage coherence — when the producer self-verifies.
             if let Some(declared) = &req.lineage_id {
                 if declared != &prev_full.body.lineage_id {
@@ -785,7 +808,11 @@ impl RegistryStore for InMemoryStore {
             });
         }
 
-        let limit = params.limit.unwrap_or(50).min(100) as usize;
+        // Clamp into [1, 100]: `limit` is attacker-controlled and never
+        // lower-bounded. `limit=0` with ≥1 match would compute `limit - 1`
+        // below → debug-build subtraction panic (request-thread DoS) /
+        // release-build wrap to usize::MAX → broken pagination.
+        let limit = params.limit.unwrap_or(50).clamp(1, 100) as usize;
         let next_cursor = if matches.len() > limit {
             matches.get(limit - 1).map(|c| {
                 encode_cursor(c.body.created_at.timestamp_millis(), c.body.ctx_id.as_str())
@@ -1180,6 +1207,35 @@ mod tests {
             "total_estimate MUST reflect total matches across all pages, got {:?}",
             p1.total_estimate
         );
+    }
+
+    #[test]
+    fn search_limit_zero_does_not_underflow() {
+        // P1-1: limit=0 with ≥1 match previously computed `limit - 1`
+        // (debug panic / release wrap). It MUST be clamped to ≥1.
+        let s = InMemoryStore::new();
+        let lin = "lin:sha256:8888888888888888888888888888888888888888888888888888888888888888";
+        for i in 0..3u8 {
+            let body = fake_body(
+                &format!("acdp://r/12345678-1234-4321-8123-00000000020{i}"),
+                lin,
+                "match",
+            );
+            s.put(body).unwrap();
+        }
+        let page = s
+            .search(
+                &SearchParams {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+                None,
+                true,
+            )
+            .expect("limit=0 must not panic or error");
+        // Clamped to 1: one result, and a cursor since more remain.
+        assert_eq!(page.matches.len(), 1);
+        assert!(page.next_cursor.is_some());
     }
 
     #[test]

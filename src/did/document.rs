@@ -17,20 +17,44 @@ pub struct DidDocument {
 }
 
 impl DidDocument {
-    /// Find a verification method by its `#fragment` (the part after `#`).
+    /// The fragment (substring after the final `#`) of a DID-URL, or
+    /// `None` if it carries no fragment.
+    fn fragment_of(id: &str) -> Option<&str> {
+        id.rsplit_once('#').map(|(_, frag)| frag)
+    }
+
+    /// Resolve a verification-method reference to an absolute DID URL. A
+    /// relative `#fragment` ref is resolved against this document's `id`;
+    /// an already-absolute ref is returned unchanged.
+    fn absolutize(&self, vm_ref: &str) -> String {
+        match vm_ref.strip_prefix('#') {
+            Some(frag) => format!("{}#{frag}", self.id),
+            None => vm_ref.to_string(),
+        }
+    }
+
+    /// Find a verification method whose `#fragment` is **exactly** `fragment`.
+    ///
+    /// Compares the fragment for equality rather than `ends_with`: a
+    /// loose suffix match would let an unlisted `…#evil-key-1` satisfy a
+    /// lookup for `key-1` (authorization-scope escalation within a DID).
     pub fn find_by_fragment(&self, fragment: &str) -> Option<&VerificationMethod> {
         self.verification_methods
             .iter()
-            .find(|m| m.id.ends_with(&format!("#{fragment}")) || m.id == format!("#{fragment}"))
+            .find(|m| Self::fragment_of(&m.id) == Some(fragment))
     }
 
     /// Returns `true` if `vm_id` is listed in `assertionMethod`.
+    ///
+    /// Both `vm_id` and each `assertionMethod` entry are normalized to
+    /// absolute DID URLs and compared for **exact** equality. The prior
+    /// `vm_id.ends_with(id)` form authorized any `…#evil-key-1` against a
+    /// relative `#key-1` entry.
     pub fn is_assertion_method(&self, vm_id: &str) -> bool {
+        let target = self.absolutize(vm_id);
         self.assertion_method.iter().any(|r| match r {
-            AssertionMethodRef::Id(id) => {
-                id == vm_id || (id.starts_with('#') && vm_id.ends_with(id))
-            }
-            AssertionMethodRef::Embedded(m) => m.id == vm_id,
+            AssertionMethodRef::Id(id) => self.absolutize(id) == target,
+            AssertionMethodRef::Embedded(m) => self.absolutize(&m.id) == target,
         })
     }
 }
@@ -341,5 +365,38 @@ mod tests {
         };
         assert!(doc.find_by_fragment("key-1").is_some());
         assert!(doc.find_by_fragment("key-2").is_none());
+    }
+
+    #[test]
+    fn find_by_fragment_no_loose_suffix_match() {
+        // P1-2: an unlisted `…#evil-key-1` MUST NOT satisfy a lookup for
+        // `key-1` via `ends_with`.
+        let doc = DidDocument {
+            id: "did:web:example.com".into(),
+            verification_methods: vec![VerificationMethod {
+                id: "did:web:example.com#evil-key-1".into(),
+                method_type: "Ed25519VerificationKey2020".into(),
+                controller: "did:web:example.com".into(),
+                public_key_jwk: None,
+                public_key_multibase: None,
+            }],
+            assertion_method: vec![],
+        };
+        assert!(doc.find_by_fragment("key-1").is_none());
+        assert!(doc.find_by_fragment("evil-key-1").is_some());
+    }
+
+    #[test]
+    fn assertion_method_no_loose_suffix_match() {
+        // P1-2: assertionMethod `#key-1` MUST NOT authorize `…#evil-key-1`.
+        let doc = DidDocument {
+            id: "did:web:example.com".into(),
+            verification_methods: vec![],
+            assertion_method: vec![AssertionMethodRef::Id("#key-1".into())],
+        };
+        assert!(doc.is_assertion_method("did:web:example.com#key-1"));
+        assert!(!doc.is_assertion_method("did:web:example.com#evil-key-1"));
+        // A different DID sharing the fragment must not match either.
+        assert!(!doc.is_assertion_method("did:web:attacker.com#key-1"));
     }
 }

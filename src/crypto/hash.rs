@@ -1,6 +1,6 @@
 //! content_hash and lineage_id computation per RFC-ACDP-0001 §5.7 / §5.6.
 
-use super::jcs::canonicalize_value;
+use super::jcs::try_canonicalize_value;
 use crate::error::AcdpError;
 use crate::types::primitives::{ContentHash, CtxId, LineageId};
 use sha2::{Digest, Sha256};
@@ -35,7 +35,7 @@ pub fn compute_content_hash(body_value: &serde_json::Value) -> Result<ContentHas
         map.remove(*key);
     }
 
-    let canonical = canonicalize_value(&serde_json::Value::Object(map));
+    let canonical = try_canonicalize_value(&serde_json::Value::Object(map))?;
     let digest = Sha256::digest(&canonical);
     Ok(ContentHash(format!("sha256:{}", hex::encode(digest))))
 }

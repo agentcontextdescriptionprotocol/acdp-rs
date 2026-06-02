@@ -576,6 +576,78 @@ mod tests {
     }
 
     #[test]
+    fn hostile_supersession_by_non_owner_rejected_predecessor_unchanged() {
+        // P0-2: an attacker controlling their own DID must not be able to
+        // supersede a victim's context. Without the producer-continuity
+        // check this marks the victim's context `Superseded` and re-points
+        // `current(lineage)` at the attacker's body — a lineage takeover.
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let victim = producer_for(7, "did:web:agents.example.com:victim");
+        let v1_req = victim
+            .publish_request()
+            .title("v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let v1 = server.publish_unverified_for_tests(&v1_req).unwrap();
+
+        // Attacker signs their own valid v2, omitting lineage_id (the only
+        // self-declared coherence arm), supersedes = victim's v1.
+        let attacker = producer_for(9, "did:web:evil.example.com:attacker");
+        let v2_req = attacker
+            .supersede(v1.ctx_id.clone())
+            .version(2)
+            .title("hijacked")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let err = server.publish_unverified_for_tests(&v2_req).unwrap_err();
+        // Uniform with not-found: no existence / version / status oracle.
+        match err {
+            AcdpError::SupersededTarget { reason, .. } => {
+                assert_eq!(reason, crate::error::SupersessionReason::NotFound);
+            }
+            other => panic!("expected uniform SupersededTarget::NotFound, got {other:?}"),
+        }
+        // Predecessor MUST be untouched: still current, not superseded.
+        let cur = server.current(&v1.lineage_id, None).unwrap().unwrap();
+        assert_eq!(cur.body.ctx_id, v1.ctx_id);
+        assert_eq!(cur.body.title, "v1");
+        assert_eq!(
+            cur.registry_state.status,
+            crate::types::primitives::Status::Active
+        );
+    }
+
+    #[test]
+    fn owner_supersession_still_succeeds_after_ownership_check() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let v1_req = p
+            .publish_request()
+            .title("v1")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let v1 = server.publish_unverified_for_tests(&v1_req).unwrap();
+        let v2_req = p
+            .supersede(v1.ctx_id.clone())
+            .version(2)
+            .title("v2")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let v2 = server.publish_unverified_for_tests(&v2_req).unwrap();
+        assert_eq!(v2.version, 2);
+        let cur = server.current(&v1.lineage_id, None).unwrap().unwrap();
+        assert_eq!(cur.body.ctx_id, v2.ctx_id);
+    }
+
+    #[test]
     fn supersession_with_unknown_target_rejected_as_not_found() {
         let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
         let p = producer();

@@ -374,15 +374,29 @@ fn is_unsafe_v6(ip: Ipv6Addr) -> bool {
         return true;
     }
     let segments = ip.segments();
-    // ::ffff:0:0/96 — IPv4-mapped: re-check the embedded v4
-    if segments[0..6] == [0, 0, 0, 0, 0, 0xffff] {
+    // Embedded-IPv4 forms — both IPv4-mapped (`::ffff:a.b.c.d`) and the
+    // deprecated IPv4-compatible (`::a.b.c.d`, RFC 4291) carry an IPv4
+    // address in the low 32 bits with the high 80 bits zero. Decode it
+    // and re-run the v4 filter so e.g. `::127.0.0.1` / `::ffff:10.0.0.1`
+    // are caught. The non-zero guard keeps `::` (unspecified, already
+    // handled above) and `::1` (loopback) from being misclassified.
+    if segments[0..5] == [0, 0, 0, 0, 0] && (segments[5] == 0 || segments[5] == 0xffff) {
         let v4 = Ipv4Addr::new(
             (segments[6] >> 8) as u8,
             (segments[6] & 0xff) as u8,
             (segments[7] >> 8) as u8,
             (segments[7] & 0xff) as u8,
         );
-        return is_unsafe_v4(v4);
+        if !v4.is_unspecified() {
+            return is_unsafe_v4(v4);
+        }
+    }
+    // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) and the local-use
+    // 64:ff9b:1::/48 prefix (RFC 8215): a hostile AAAA answer such as
+    // `64:ff9b::a9fe:a9fe` translates to IMDS `169.254.169.254` through a
+    // NAT64/DNS64 gateway, which is routable in IPv6-only / cloud networks.
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        return true;
     }
     // fc00::/7 — unique local
     if (segments[0] & 0xfe00) == 0xfc00 {
@@ -438,8 +452,17 @@ mod tests {
         assert!(check_safe_ip("fe80::1".parse().unwrap()).is_err());
         // IPv4-mapped private
         assert!(check_safe_ip("::ffff:10.0.0.1".parse().unwrap()).is_err());
+        // IPv4-compatible (deprecated `::a.b.c.d`) decoding to loopback / IMDS
+        assert!(check_safe_ip("::127.0.0.1".parse().unwrap()).is_err());
+        assert!(check_safe_ip("::7f00:1".parse().unwrap()).is_err());
+        assert!(check_safe_ip("::169.254.169.254".parse().unwrap()).is_err());
+        // NAT64 well-known prefix translating to IMDS 169.254.169.254
+        assert!(check_safe_ip("64:ff9b::a9fe:a9fe".parse().unwrap()).is_err());
+        assert!(check_safe_ip("64:ff9b::169.254.169.254".parse().unwrap()).is_err());
         // Public v6
         assert!(check_safe_ip("2001:db8::1".parse().unwrap()).is_ok());
+        // IPv4-compatible decoding to a *public* v4 stays allowed
+        assert!(check_safe_ip("::93.184.216.34".parse().unwrap()).is_ok());
     }
 
     #[test]

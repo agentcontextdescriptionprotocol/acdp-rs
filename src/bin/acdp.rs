@@ -182,11 +182,28 @@ fn classify(e: &AcdpError) -> &'static str {
 
 // ── Subcommand implementations ───────────────────────────────────────────────
 
+/// Build the registry transport client.
+///
+/// Production applies the full RFC-ACDP-0006 §7 / RFC-ACDP-0008 SSRF +
+/// HTTPS-only + DNS-rebinding posture via [`RegistryClient::new`]. The
+/// `ACDP_INSECURE_TRANSPORT=1` escape hatch downgrades to a permissive
+/// transport (plain HTTP, IP literals, loopback) and exists **only** so
+/// the crate's subprocess integration tests can drive an in-process HTTP
+/// mock registry. It is intentionally undocumented in `--help`; never set
+/// it outside tests.
+fn registry_client(url: &str) -> Result<RegistryClient, AcdpError> {
+    if std::env::var_os("ACDP_INSECURE_TRANSPORT").is_some() {
+        RegistryClient::with_test_transport(url)
+    } else {
+        RegistryClient::new(url)
+    }
+}
+
 async fn cmd_capabilities(rest: &[String]) -> Result<(), CliError> {
     let url = rest
         .first()
         .ok_or_else(|| CliError::Usage("`capabilities` requires <registry-url>".into()))?;
-    let client = RegistryClient::new(url)?;
+    let client = registry_client(url)?;
     let caps = client.capabilities().await?;
     println!("{}", serde_json::to_string_pretty(&caps)?);
     Ok(())
@@ -199,7 +216,7 @@ async fn cmd_retrieve(rest: &[String]) -> Result<(), CliError> {
     let id = rest
         .get(1)
         .ok_or_else(|| CliError::Usage("`retrieve` requires <ctx_id>".into()))?;
-    let client = RegistryClient::new(url)?;
+    let client = registry_client(url)?;
     let resolver = WebResolver::new();
     let ctx = VerifiedContext::fetch(&client, &resolver, &CtxId(id.clone())).await?;
     println!("{}", serde_json::to_string_pretty(&ctx.inner)?);
@@ -213,7 +230,7 @@ async fn cmd_body(rest: &[String]) -> Result<(), CliError> {
     let id = rest
         .get(1)
         .ok_or_else(|| CliError::Usage("`body` requires <ctx_id>".into()))?;
-    let client = RegistryClient::new(url)?;
+    let client = registry_client(url)?;
     let body = client.retrieve_body(&CtxId(id.clone())).await?;
     println!("{}", serde_json::to_string_pretty(&body)?);
     Ok(())
@@ -289,7 +306,7 @@ async fn cmd_search(rest: &[String]) -> Result<(), CliError> {
             other => return Err(CliError::Usage(format!("unknown search flag '{other}'"))),
         }
     }
-    let client = RegistryClient::new(url)?;
+    let client = registry_client(url)?;
     let resp = client.search(&params).await?;
     println!("{}", serde_json::to_string_pretty(&resp.matches)?);
     Ok(())
@@ -657,7 +674,7 @@ async fn cmd_publish(rest: &[String]) -> Result<(), CliError> {
 
     let req: PublishRequest = builder.build()?;
 
-    let client = RegistryClient::new(url)?;
+    let client = registry_client(url)?;
     let resp = if let Some(key) = idempotency_key {
         client.publish_idempotent(&req, &key).await?
     } else {
