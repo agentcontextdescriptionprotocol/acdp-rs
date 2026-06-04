@@ -130,8 +130,31 @@ impl VerificationMethod {
                     _ => None,
                 }
             }
-            _ => None,
+            // #21: for a `type` this version doesn't special-case (e.g. the
+            // W3C 2023 `Multikey`), still derive the algorithm from the
+            // `publicKeyMultibase` multicodec prefix when present, so the
+            // algorithm-downgrade guard (RFC-ACDP-0008 §3.9) is not silently
+            // skipped for multibase keys. `None` only when nothing carries an
+            // algorithm signal.
+            _ => self
+                .public_key_multibase
+                .as_deref()
+                .and_then(multicodec_algorithm),
         }
+    }
+}
+
+/// Map a `publicKeyMultibase` value to its canonical algorithm string via the
+/// multicodec prefix of the decoded key (`0xed01` → ed25519, `0x1200` →
+/// ecdsa-p256). Returns `None` if the value isn't base58btc or the codec is
+/// unrecognized.
+fn multicodec_algorithm(mb: &str) -> Option<&'static str> {
+    let rest = mb.strip_prefix('z')?;
+    let decoded = bs58::decode(rest).into_vec().ok()?;
+    match decoded.get(0..2) {
+        Some([0xed, 0x01]) => Some("ed25519"),
+        Some([0x12, 0x00]) => Some("ecdsa-p256"),
+        _ => None,
     }
 }
 

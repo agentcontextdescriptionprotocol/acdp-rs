@@ -189,6 +189,23 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         idempotency_key: Option<&str>,
         resolver: &crate::did::WebResolver,
     ) -> Result<PublishResponse, AcdpError> {
+        self.publish_verified_in_tenant(req, idempotency_key, resolver, None)
+            .await
+    }
+
+    /// Like [`Self::publish_verified`] but binds the publish to a tenant so a
+    /// multi-tenant store persists `tenant_id` atomically with the context row
+    /// (rather than via a separate, non-transactional stamping UPDATE that a
+    /// crash could leave stranded in the default bucket). `tenant = None` is
+    /// identical to [`Self::publish_verified`].
+    #[cfg(feature = "client")]
+    pub async fn publish_verified_in_tenant(
+        &self,
+        req: &PublishRequest,
+        idempotency_key: Option<&str>,
+        resolver: &crate::did::WebResolver,
+        tenant: Option<&str>,
+    ) -> Result<PublishResponse, AcdpError> {
         // Rate-limit gate runs before any expensive work — RFC-ACDP-0008 §4.3.
         self.rate_limiter.check_publish(&req.agent_id)?;
 
@@ -206,7 +223,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // critical section. Two concurrent publishes against the same
         // `supersedes` (or the same `Idempotency-Key`) can no longer
         // both succeed.
-        self.commit_via_store(req, idempotency_key)
+        self.commit_via_store(req, idempotency_key, tenant)
     }
 
     /// **NOT RFC-conformant.** Skips DID resolution and signature
@@ -228,7 +245,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
         let _validated = validator.validate_post_schema(req, raw_bytes)?;
-        self.commit_via_store(req, None)
+        self.commit_via_store(req, None, None)
     }
 
     /// Drive `RegistryStore::commit_publish` from a validated request.
@@ -239,6 +256,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         &self,
         req: &PublishRequest,
         idempotency_key: Option<&str>,
+        tenant: Option<&str>,
     ) -> Result<PublishResponse, AcdpError> {
         let idempotency = if self.caps.supports_idempotency_key {
             idempotency_key.map(|key| crate::registry::store::PendingIdempotencyCommit {
@@ -259,6 +277,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
                 req,
                 authority: &self.authority,
                 idempotency,
+                tenant,
             })?;
         Ok(match outcome {
             crate::registry::store::PublishCommitOutcome::Inserted(r)

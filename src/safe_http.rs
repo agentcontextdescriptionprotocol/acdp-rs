@@ -305,6 +305,35 @@ impl SafeDnsResolver {
     }
 }
 
+/// Build a `reqwest::Client` hardened against SSRF for outbound POSTs to
+/// operator-configured endpoints (webhook delivery, federation feeds).
+///
+/// Every resolved IP is filtered through `policy` at DNS time via
+/// [`SafeDnsResolver`] — defeating DNS rebinding (RFC-ACDP-0008 §4.8) — and
+/// redirects are refused outright: such an endpoint must respond directly, not
+/// bounce the registry to an internal host (e.g. cloud IMDS). `connect` and
+/// request timeouts are bounded. Use [`SsrfPolicy::default`] in production and
+/// [`SsrfPolicy::allow_test_loopback`] in tests that POST to a local listener.
+#[cfg(feature = "client")]
+pub fn safe_client(
+    policy: &SsrfPolicy,
+    timeout: std::time::Duration,
+) -> Result<reqwest::Client, AcdpError> {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        // Each outbound POST to an operator endpoint is independent; a fresh
+        // connection per request avoids reusing a pooled connection to an
+        // endpoint that has since gone away (and re-runs the SafeDnsResolver
+        // check every time rather than pinning a once-resolved IP).
+        .pool_max_idle_per_host(0)
+        .dns_resolver(SafeDnsResolver::arc(policy.clone()))
+        .build()
+        .map_err(|e| AcdpError::Http(e.to_string()))
+}
+
 #[cfg(feature = "client")]
 impl reqwest::dns::Resolve for SafeDnsResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
@@ -412,6 +441,34 @@ fn is_unsafe_v6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// safe_client built with the default policy refuses a loopback target at
+    /// DNS time — the SafeDnsResolver rejects 127.0.0.1 before any connect, so
+    /// the request errors. This is the SSRF guard the webhook delivery client
+    /// relies on (#6).
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn safe_client_default_refuses_loopback() {
+        let client =
+            safe_client(&SsrfPolicy::default(), std::time::Duration::from_secs(2)).unwrap();
+        let result = client.get("http://127.0.0.1:9/").send().await;
+        assert!(
+            result.is_err(),
+            "default policy must refuse a loopback target"
+        );
+    }
+
+    /// allow_test_loopback permits loopback so tests can POST to a local
+    /// listener.
+    #[cfg(feature = "client")]
+    #[test]
+    fn safe_client_builds_with_loopback_policy() {
+        assert!(safe_client(
+            &SsrfPolicy::allow_test_loopback(),
+            std::time::Duration::from_secs(2)
+        )
+        .is_ok());
+    }
 
     #[test]
     fn https_only_by_default() {
