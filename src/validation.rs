@@ -615,7 +615,9 @@ pub fn validate_extensions(
     if extensions.is_empty() {
         return Ok(());
     }
-    // Borrow into a `Value::Object` without cloning the map.
+    // Wrap in a `Value::Object` (clones the map) so the shared
+    // object-limit walker can scan it; `extensions` is small and capped,
+    // so the clone is negligible.
     let value = serde_json::Value::Object(extensions.clone());
     validate_json_object_limits(&value, "extensions")
 }
