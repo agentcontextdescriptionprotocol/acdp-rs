@@ -168,6 +168,13 @@ pub struct PublishCommit<'a> {
     /// `caps.supports_idempotency_key` and the request carries an
     /// `Idempotency-Key`.
     pub idempotency: Option<PendingIdempotencyCommit<'a>>,
+    /// Tenant this publish is scoped to, if the registry is multi-tenant.
+    /// `None` means untenanted (single-tenant / V0). A multi-tenant store
+    /// MUST persist this atomically with the context row so the tenancy is
+    /// never observable as the default bucket (and never stranded there on a
+    /// crash between insert and a separate stamping UPDATE). Stores that do
+    /// not implement tenancy ignore it.
+    pub tenant: Option<&'a str>,
 }
 
 /// Idempotency parameters threaded through [`PublishCommit`].
@@ -438,6 +445,9 @@ impl RegistryStore for InMemoryStore {
             req,
             authority,
             idempotency,
+            // InMemoryStore does not model tenancy (it is a single-tenant
+            // reference/test backend); the durable backends honor this.
+            tenant: _,
         } = commit;
         let now = chrono::Utc::now();
         let mut g = self.lock();

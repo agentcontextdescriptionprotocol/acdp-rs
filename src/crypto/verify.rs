@@ -116,11 +116,18 @@ async fn verify_signature_envelope(
     content_hash: &ContentHash,
     resolver: &WebResolver,
 ) -> Result<(), AcdpError> {
-    // Step 1: parse key_id — must contain a '#' fragment
+    // Step 1: parse key_id — must contain a non-empty '#' fragment
+    // (RFC-ACDP-0001 §5.11 step 1). An empty fragment (`did:web:x#`) is
+    // rejected rather than used as a lookup key (#22).
     let key_id = &signature.key_id;
     let (did_part, fragment) = key_id.split_once('#').ok_or_else(|| {
         AcdpError::KeyResolution(format!("signature.key_id '{key_id}' has no '#fragment'"))
     })?;
+    if fragment.is_empty() {
+        return Err(AcdpError::KeyResolution(format!(
+            "signature.key_id '{key_id}' has an empty '#fragment'"
+        )));
+    }
 
     // Step 1.5: `key_id` DID portion MUST be did:web for v0.1.0
     // (RFC-ACDP-0001 §5.4). A key_id pointing to e.g. did:key would mean
