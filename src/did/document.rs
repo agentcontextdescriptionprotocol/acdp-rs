@@ -145,15 +145,16 @@ impl VerificationMethod {
 }
 
 /// Map a `publicKeyMultibase` value to its canonical algorithm string via the
-/// multicodec prefix of the decoded key (`0xed01` → ed25519, `0x1200` →
-/// ecdsa-p256). Returns `None` if the value isn't base58btc or the codec is
-/// unrecognized.
+/// multicodec prefix of the decoded key. The prefix is the multicodec code in
+/// unsigned-varint encoding: `ed25519-pub` (code `0xed`) → bytes `0xed 0x01`,
+/// `p256-pub` (code `0x1200`) → bytes `0x80 0x24`. Returns `None` if the value
+/// isn't base58btc or the codec is unrecognized.
 fn multicodec_algorithm(mb: &str) -> Option<&'static str> {
     let rest = mb.strip_prefix('z')?;
     let decoded = bs58::decode(rest).into_vec().ok()?;
     match decoded.get(0..2) {
         Some([0xed, 0x01]) => Some("ed25519"),
-        Some([0x12, 0x00]) => Some("ecdsa-p256"),
+        Some([0x80, 0x24]) => Some("ecdsa-p256"),
         _ => None,
     }
 }
@@ -421,5 +422,38 @@ mod tests {
         assert!(!doc.is_assertion_method("did:web:example.com#evil-key-1"));
         // A different DID sharing the fragment must not match either.
         assert!(!doc.is_assertion_method("did:web:attacker.com#key-1"));
+    }
+
+    /// #21: the algorithm-downgrade guard must derive an algorithm from a
+    /// `Multikey`/multibase verification method whose `type` isn't otherwise
+    /// recognized. The prefix is the multicodec code in *unsigned-varint*
+    /// encoding, so `p256-pub` (code `0x1200`) decodes to bytes `0x80 0x24`
+    /// — a literal `0x12 0x00` would never match a real key, silently
+    /// skipping the guard.
+    #[test]
+    fn declared_algorithm_from_multibase_multicodec() {
+        let mk = |prefix: &[u8], body_len: usize| {
+            let mut prefixed = prefix.to_vec();
+            prefixed.resize(prefix.len() + body_len, 0u8);
+            let mb = format!("z{}", bs58::encode(&prefixed).into_string());
+            VerificationMethod {
+                id: "did:web:example.com#key-1".into(),
+                method_type: "Multikey".into(),
+                controller: "did:web:example.com".into(),
+                public_key_jwk: None,
+                public_key_multibase: Some(mb),
+            }
+        };
+        // ed25519-pub: varint(0xed) = [0xed, 0x01], 32-byte key.
+        assert_eq!(mk(&[0xed, 0x01], 32).declared_algorithm(), Some("ed25519"));
+        // p256-pub: varint(0x1200) = [0x80, 0x24], 33-byte compressed key.
+        assert_eq!(
+            mk(&[0x80, 0x24], 33).declared_algorithm(),
+            Some("ecdsa-p256")
+        );
+        // The incorrect big-endian-code prefix must NOT be treated as p256.
+        assert_eq!(mk(&[0x12, 0x00], 33).declared_algorithm(), None);
+        // Unknown codec → no algorithm signal.
+        assert_eq!(mk(&[0xe7, 0x01], 33).declared_algorithm(), None);
     }
 }
