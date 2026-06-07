@@ -103,6 +103,8 @@ jobs:
           path: bindings/acdp-node/artifacts
           pattern: bindings-*
           merge-multiple: true
+      - name: Scaffold per-platform npm package dirs
+        run: npx napi create-npm-dir -t .
       - name: Assemble per-platform npm dirs
         run: npx napi artifacts --dir artifacts
       - name: List what will be published
