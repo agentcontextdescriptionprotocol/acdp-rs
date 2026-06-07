@@ -49,8 +49,11 @@ sdk-node-build:
 
 # ── Interop ─────────────────────────────────────────────────────────────
 # Builds both bindings first, then runs the cross-language pytest suite.
+# Runs the whole interop dir: cross-language behavioral parity
+# (test_interop.py) AND the API-surface / version drift guards
+# (test_parity.py). A new parity test file is picked up automatically.
 interop: sdk-py-build sdk-node-build
-	cd $(INTEROP) && pytest test_interop.py
+	cd $(INTEROP) && pytest
 
 # What the CI workflow runs locally. Useful before pushing.
 ci-bindings: test sdk-py sdk-node interop

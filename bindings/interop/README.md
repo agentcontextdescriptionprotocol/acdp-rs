@@ -40,3 +40,28 @@ match. If the Python and Node bindings disagree on JCS canonicalization
 — even in something as small as how an unset optional field is
 serialized — they emit different `content_hash` values and registries
 reject one of the two. These tests pin that invariant in CI.
+
+## Drift guard (`test_parity.py`)
+
+Behavioral interop only catches divergence in code paths a test happens to
+exercise. `test_parity.py` adds structural guards so the two SDKs can
+never silently drift:
+
+* **API-surface parity** — `expected_surface.json` is the single source of
+  truth for the public surface. The test asserts the Python binding, the
+  Node binding (introspected over the worker's `describe` RPC), and the
+  manifest all expose the same classes and methods (names normalized to
+  snake_case, so Node's camelCase compares equal). Add a method to one
+  binding without the other — or without updating the manifest — and the
+  test fails.
+* **Behavioral parity for the sync primitives** — `AcdpCanonicalizer`
+  (`canonicalize` / `content_hash`) and `AcdpSsrfPolicy` (the stable
+  reason taxonomy: Python's `SsrfRejected.reason` vs Node's `Error.code`)
+  are cross-checked across both bindings in `test_interop.py`.
+* **Version parity** — `pyproject.toml`, both `Cargo.toml`s, and
+  `package.json` must all carry the same version.
+
+When you intentionally change the public API, update
+`expected_surface.json` (and both bindings) in the same change. The guard
+runs as part of `make interop` and the `bindings` CI workflow, so drift
+fails the build locally and in CI.

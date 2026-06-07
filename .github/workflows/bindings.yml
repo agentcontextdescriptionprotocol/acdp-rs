@@ -130,6 +130,9 @@ jobs:
         run: |
           npm install
           npm run build:debug
-      - name: Cross-language interop pytest
+      # Whole dir: cross-language behavioral parity (test_interop.py) AND
+      # the API-surface + version drift guards (test_parity.py). Fails the
+      # build if the two SDKs ever diverge in surface, behavior, or version.
+      - name: Cross-language interop + parity pytest
         working-directory: bindings/interop
-        run: pytest test_interop.py -v
+        run: pytest -v

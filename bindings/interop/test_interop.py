@@ -450,3 +450,118 @@ def test_extended_body_fields_are_byte_identical_across_bindings(node):
     assert py_req["data_refs"][0]["location"] == "https://example.com/d.parquet"
     assert py_req["data_period"] == node_req["data_period"]
     assert py_req["expires_at"] == node_req["expires_at"]
+
+
+# ── AcdpCanonicalizer cross-language parity ──────────────────────────────
+
+# JCS is deterministic, so both bindings MUST emit byte-identical
+# canonical forms and content hashes for the same JSON input.
+_CANON_INPUTS = [
+    '{ "b": 1, "a": 2 }',
+    '{"x": -0.0}',  # negative-zero normalization (the classic JCS bug)
+    '{"z": [3, 2, 1], "a": {"d": 4, "c": 3}}',
+    '{"k": "café — π", "n": 42, "deep": {"arr": [1, 2, {"q": true}]}}',
+]
+
+
+@pytest.mark.parametrize("doc", _CANON_INPUTS)
+def test_canonicalize_is_byte_identical_across_bindings(node, doc):
+    py_out = acdp.AcdpCanonicalizer.canonicalize(doc)
+    node_out = node.call("canonicalize", json=doc)["result"]
+    assert py_out == node_out
+
+
+@pytest.mark.parametrize("doc", _CANON_INPUTS)
+def test_content_hash_is_identical_across_bindings(node, doc):
+    py_out = acdp.AcdpCanonicalizer.content_hash(doc)
+    node_out = node.call("content_hash", json=doc)["result"]
+    assert py_out == node_out
+    assert py_out.startswith("sha256:")
+
+
+# ── AcdpSsrfPolicy cross-language reason parity ──────────────────────────
+
+# Each binding surfaces the same stable reason taxonomy — Python on
+# `SsrfRejected.reason`, Node on `Error.code`. The verdict (allowed vs
+# rejected) and the reason code MUST match across both for every input.
+def _py_ssrf_url(url: str) -> dict:
+    pol = acdp.AcdpSsrfPolicy.production()
+    try:
+        pol.check_url(url)
+        return {"allowed": True}
+    except acdp.SsrfRejected as e:
+        return {"allowed": False, "reason": e.reason}
+
+
+def _py_ssrf_ip(ip: str) -> dict:
+    pol = acdp.AcdpSsrfPolicy.production()
+    try:
+        pol.check_ip(ip)
+        return {"allowed": True}
+    except acdp.SsrfRejected as e:
+        return {"allowed": False, "reason": e.reason}
+
+
+def _py_ssrf_redirect(from_url: str, to_url: str) -> dict:
+    pol = acdp.AcdpSsrfPolicy.production()
+    try:
+        pol.check_redirect_authority(from_url, to_url)
+        return {"allowed": True}
+    except acdp.SsrfRejected as e:
+        return {"allowed": False, "reason": e.reason}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://registry.example.com",  # allowed
+        "http://registry.example.com",  # non_https
+        "https://192.168.1.1",  # ip_literal
+        "https://[::1]",  # ip_literal
+        "not a url",  # invalid_url
+    ],
+)
+def test_ssrf_check_url_reason_matches_across_bindings(node, url):
+    py = _py_ssrf_url(url)
+    nd = node.call("ssrf_check_url", url=url)
+    assert py["allowed"] == nd["allowed"]
+    assert py.get("reason") == nd.get("reason")
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "127.0.0.1",  # loopback
+        "10.0.0.1",  # private
+        "169.254.169.254",  # imds
+        "239.0.0.1",  # multicast_or_reserved
+        "8.8.8.8",  # allowed
+        "fc00::1",  # private
+        "fe80::1",  # imds
+        "64:ff9b::a9fe:a9fe",  # imds (NAT64)
+        "::ffff:10.0.0.1",  # private (v4-mapped)
+        "2001:db8::1",  # allowed
+    ],
+)
+def test_ssrf_check_ip_reason_matches_across_bindings(node, ip):
+    py = _py_ssrf_ip(ip)
+    nd = node.call("ssrf_check_ip", ip=ip)
+    assert py["allowed"] == nd["allowed"]
+    assert py.get("reason") == nd.get("reason")
+
+
+@pytest.mark.parametrize(
+    "from_url,to_url",
+    [
+        ("https://a.example/x", "https://a.example/y"),  # allowed
+        ("https://a.example/x", "https://a.example:443/y"),  # allowed (:443)
+        ("https://a.example/x", "https://b.example/y"),  # cross_authority
+        ("https://a.example/x", "https://a.example:8443/y"),  # cross_authority
+        ("https://a.example/x", "http://a.example/y"),  # cross_authority
+    ],
+)
+def test_ssrf_check_redirect_reason_matches_across_bindings(node, from_url, to_url):
+    py = _py_ssrf_redirect(from_url, to_url)
+    nd = node.call("ssrf_check_redirect", from_url=from_url, to_url=to_url)
+    assert py["allowed"] == nd["allowed"]
+    assert py.get("reason") == nd.get("reason")
