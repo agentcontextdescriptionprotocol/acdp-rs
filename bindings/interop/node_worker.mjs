@@ -29,12 +29,16 @@ const AcdpP256Producer = mod.AcdpP256Producer ?? mod.default?.AcdpP256Producer;
 const AcdpVerifier = mod.AcdpVerifier ?? mod.default?.AcdpVerifier;
 const AcdpCanonicalizer = mod.AcdpCanonicalizer ?? mod.default?.AcdpCanonicalizer;
 const AcdpSsrfPolicy = mod.AcdpSsrfPolicy ?? mod.default?.AcdpSsrfPolicy;
+const AcdpDid = mod.AcdpDid ?? mod.default?.AcdpDid;
+const AcdpDidDocument = mod.AcdpDidDocument ?? mod.default?.AcdpDidDocument;
 if (
   !AcdpProducer ||
   !AcdpP256Producer ||
   !AcdpVerifier ||
   !AcdpCanonicalizer ||
-  !AcdpSsrfPolicy
+  !AcdpSsrfPolicy ||
+  !AcdpDid ||
+  !AcdpDidDocument
 ) {
   throw new Error(
     'acdp-node binding not built (or missing classes) — run `npm run build:debug` in bindings/acdp-node/',
@@ -90,6 +94,8 @@ const methods = {
       AcdpVerifier: describeClass(AcdpVerifier),
       AcdpCanonicalizer: describeClass(AcdpCanonicalizer),
       AcdpSsrfPolicy: describeClass(AcdpSsrfPolicy),
+      AcdpDid: describeClass(AcdpDid),
+      AcdpDidDocument: describeClass(AcdpDidDocument),
     },
   }),
 
@@ -177,6 +183,31 @@ const methods = {
       p.content_hash,
     ),
   }),
+
+  // ── did:web helpers (AcdpDid / AcdpDidDocument) ───────────────────────
+  did_web_to_url: (p) => ({ result: AcdpDid.webToUrl(p.did) }),
+
+  did_strip_fragment: (p) => ({ result: AcdpDid.stripFragment(p.did_url) }),
+
+  // Parse a DID document and resolve a key. Returns { ok, key } on
+  // success, or { ok: false, reason } carrying the stable Error.code so
+  // the Python side can assert the reason vocabulary matches.
+  did_key_for_algorithm: (p) => {
+    try {
+      const doc = AcdpDidDocument.parse(p.doc_json, p.expected_did);
+      const k = doc.keyForAlgorithm(p.requested_key_id, p.requested_alg);
+      return {
+        ok: true,
+        key: {
+          key_id: k.keyId,
+          algorithm: k.algorithm,
+          public_key_b64: k.publicKeyB64,
+        },
+      };
+    } catch (err) {
+      return { ok: false, reason: err?.code ?? null };
+    }
+  },
 };
 
 const rl = createInterface({ input: process.stdin });

@@ -1,16 +1,39 @@
 {
   "name": "acdp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Agent Context Description Protocol — Node.js SDK",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentcontextdescriptionprotocol/acdp-rs.git",
+    "directory": "bindings/acdp-node"
+  },
+  "homepage": "https://github.com/agentcontextdescriptionprotocol/acdp-rs/tree/main/bindings/acdp-node",
   "main": "index.js",
   "types": "index.d.ts",
   "type": "commonjs",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
   "napi": {
-    "name": "acdp"
+    "name": "acdp",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ]
+    }
   },
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "napi prepublish -t npm",
+    "version": "napi version",
     "test": "node --test tests/*.mjs"
   },
   "devDependencies": {
@@ -18,5 +41,15 @@
   },
   "engines": {
     "node": ">=16"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "optionalDependencies": {
+    "acdp-darwin-x64": "0.3.0",
+    "acdp-darwin-arm64": "0.3.0",
+    "acdp-linux-x64-gnu": "0.3.0",
+    "acdp-linux-arm64-gnu": "0.3.0"
   }
 }

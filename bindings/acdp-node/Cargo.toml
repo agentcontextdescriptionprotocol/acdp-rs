@@ -7,7 +7,7 @@
 # never makes HTTP calls; host code is expected to use fetch / undici.
 [package]
 name        = "acdp-node"
-version     = "0.2.0"
+version     = "0.3.0"
 edition     = "2021"
 description = "Agent Context Description Protocol — Node.js SDK"
 license     = "MIT OR Apache-2.0"

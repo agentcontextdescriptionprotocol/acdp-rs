@@ -565,3 +565,92 @@ def test_ssrf_check_redirect_reason_matches_across_bindings(node, from_url, to_u
     nd = node.call("ssrf_check_redirect", from_url=from_url, to_url=to_url)
     assert py["allowed"] == nd["allowed"]
     assert py.get("reason") == nd.get("reason")
+
+
+# ── did:web helpers (AcdpDid / AcdpDidDocument) ─────────────────────────
+
+import base64  # noqa: E402  (kept local to the did helpers below)
+
+_DID = "did:web:agents.example.com"
+_DID_KEY_ID = f"{_DID}#key-1"
+
+
+def _did_doc_for(public_key_b64: str, *, authorized: bool = True) -> str:
+    """A did:web document carrying `public_key_b64` as the `#key-1`
+    JsonWebKey2020 method, optionally authorized in assertionMethod."""
+    raw = base64.b64decode(public_key_b64)
+    x = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return json.dumps(
+        {
+            "id": _DID,
+            "verificationMethod": [
+                {
+                    "id": _DID_KEY_ID,
+                    "type": "JsonWebKey2020",
+                    "controller": _DID,
+                    "publicKeyJwk": {"kty": "OKP", "crv": "Ed25519", "x": x},
+                }
+            ],
+            "assertionMethod": [_DID_KEY_ID] if authorized else [],
+        }
+    )
+
+
+def _py_did_resolve(doc_json: str, key_id: str, alg: str) -> dict:
+    try:
+        doc = acdp.AcdpDidDocument.parse(doc_json, _DID)
+        k = doc.key_for_algorithm(key_id, alg)
+        return {"ok": True, "key": k}
+    except acdp.DidResolutionError as e:
+        return {"ok": False, "reason": e.reason}
+
+
+def test_did_web_to_url_matches_across_bindings(node):
+    for did in ("did:web:example.com", "did:web:example.com:users:alice"):
+        assert acdp.AcdpDid.web_to_url(did) == node.call("did_web_to_url", did=did)["result"]
+
+
+def test_did_key_extraction_matches_across_bindings(node):
+    """A document built from a deterministic producer's public key MUST
+    resolve to that same key on both bindings — proving the
+    assertionMethod gate + JWK extraction agree byte-for-byte."""
+    p = acdp.AcdpProducer.from_seed(SEED, _DID, _DID_KEY_ID)
+    doc_json = _did_doc_for(p.public_key_b64)
+
+    py = _py_did_resolve(doc_json, _DID_KEY_ID, "ed25519")
+    nd = node.call(
+        "did_key_for_algorithm",
+        doc_json=doc_json,
+        expected_did=_DID,
+        requested_key_id=_DID_KEY_ID,
+        requested_alg="ed25519",
+    )
+    assert py["ok"] and nd["ok"]
+    assert py["key"]["public_key_b64"] == nd["key"]["public_key_b64"] == p.public_key_b64
+
+
+@pytest.mark.parametrize(
+    "doc_authorized,key_id,alg,expected_reason",
+    [
+        (True, _DID_KEY_ID, "ecdsa-p256", "alg_mismatch"),  # downgrade defense
+        (False, _DID_KEY_ID, "ed25519", "key_not_authorized"),  # not in assertionMethod
+        (True, f"{_DID}#key-2", "ed25519", "key_not_found"),  # unknown fragment
+        (True, _DID_KEY_ID, "rsa", "unsupported_algorithm"),
+    ],
+)
+def test_did_rejection_reason_matches_across_bindings(
+    node, doc_authorized, key_id, alg, expected_reason
+):
+    p = acdp.AcdpProducer.from_seed(SEED, _DID, _DID_KEY_ID)
+    doc_json = _did_doc_for(p.public_key_b64, authorized=doc_authorized)
+
+    py = _py_did_resolve(doc_json, key_id, alg)
+    nd = node.call(
+        "did_key_for_algorithm",
+        doc_json=doc_json,
+        expected_did=_DID,
+        requested_key_id=key_id,
+        requested_alg=alg,
+    )
+    assert py["ok"] is False and nd["ok"] is False
+    assert py["reason"] == nd["reason"] == expected_reason
