@@ -1,0 +1,45 @@
+{
+  "_comment": "Single source of truth for the ACDP SDK public surface. test_parity.py asserts BOTH the Python (acdp-py) and Node (acdp-node) bindings expose exactly these classes and methods, with names normalized to snake_case (Node's camelCase is converted). Adding a method to one binding without the other — or without updating this file — fails the parity test in `make interop` and CI. When you intentionally add/remove public API, update this file in the same change.",
+  "classes": {
+    "AcdpProducer": [
+      "agent_did",
+      "build_publish_request",
+      "build_supersede_request",
+      "from_seed",
+      "generate",
+      "key_id",
+      "public_key_b64",
+      "seed_bytes",
+      "sign_challenge"
+    ],
+    "AcdpP256Producer": [
+      "agent_did",
+      "build_publish_request",
+      "build_supersede_request",
+      "did_verification_method",
+      "from_seed",
+      "generate",
+      "key_id",
+      "public_key_jwk",
+      "public_key_sec1_b64",
+      "seed_bytes",
+      "sign_challenge"
+    ],
+    "AcdpVerifier": [
+      "verify_content_hash",
+      "verify_signature",
+      "verify_signature_p256"
+    ],
+    "AcdpCanonicalizer": [
+      "canonicalize",
+      "content_hash"
+    ],
+    "AcdpSsrfPolicy": [
+      "allow_test_loopback",
+      "check_ip",
+      "check_redirect_authority",
+      "check_url",
+      "production"
+    ]
+  }
+}

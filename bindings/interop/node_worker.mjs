@@ -17,20 +17,56 @@
 // opaque to the caller.
 
 import { createInterface } from 'node:readline';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const mod = await import(
-  pathToFileURL(join(here, '..', 'acdp-node', 'index.js')).href
-);
+const nodeDir = join(here, '..', 'acdp-node');
+const mod = await import(pathToFileURL(join(nodeDir, 'index.js')).href);
 const AcdpProducer = mod.AcdpProducer ?? mod.default?.AcdpProducer;
 const AcdpP256Producer = mod.AcdpP256Producer ?? mod.default?.AcdpP256Producer;
 const AcdpVerifier = mod.AcdpVerifier ?? mod.default?.AcdpVerifier;
-if (!AcdpProducer || !AcdpP256Producer || !AcdpVerifier) {
+const AcdpCanonicalizer = mod.AcdpCanonicalizer ?? mod.default?.AcdpCanonicalizer;
+const AcdpSsrfPolicy = mod.AcdpSsrfPolicy ?? mod.default?.AcdpSsrfPolicy;
+if (
+  !AcdpProducer ||
+  !AcdpP256Producer ||
+  !AcdpVerifier ||
+  !AcdpCanonicalizer ||
+  !AcdpSsrfPolicy
+) {
   throw new Error(
-    'acdp-node binding not built — run `npm run build:debug` in bindings/acdp-node/',
+    'acdp-node binding not built (or missing classes) — run `npm run build:debug` in bindings/acdp-node/',
   );
+}
+const pkgVersion = JSON.parse(
+  readFileSync(join(nodeDir, 'package.json'), 'utf8'),
+).version;
+
+// Reflect a class's public surface as snake_case names (static methods +
+// instance methods + getters) so the Python parity test can compare it
+// against the Python binding and the shared manifest without caring about
+// JS camelCase. Mirrors the filtering in test_parity.py.
+const SKIP = new Set(['length', 'name', 'prototype', 'arguments', 'caller']);
+const toSnake = (s) => s.replace(/([A-Z])/g, '_$1').toLowerCase();
+function describeClass(Cls) {
+  const statics = Object.getOwnPropertyNames(Cls).filter((n) => !SKIP.has(n));
+  const proto = Object.getOwnPropertyNames(Cls.prototype).filter(
+    (n) => n !== 'constructor',
+  );
+  return [...new Set([...statics, ...proto])].map(toSnake).sort();
+}
+
+// Run an SSRF check and report a verdict comparable to the Python side:
+// allowed (no throw) or rejected with the stable reason on Error.code.
+function ssrfVerdict(fn) {
+  try {
+    fn();
+    return { allowed: true };
+  } catch (err) {
+    return { allowed: false, reason: err?.code ?? null };
+  }
 }
 
 const registry = new Map();
@@ -42,7 +78,38 @@ const store = (obj) => {
 };
 
 const methods = {
-  ping: () => ({ sdk: 'acdp-node', version: '0.1.0' }),
+  ping: () => ({ sdk: 'acdp-node', version: pkgVersion }),
+
+  // Reflect the Node binding's public surface for the parity test:
+  // { version, classes: { ClassName: [snake_case method names...] } }.
+  describe: () => ({
+    version: pkgVersion,
+    classes: {
+      AcdpProducer: describeClass(AcdpProducer),
+      AcdpP256Producer: describeClass(AcdpP256Producer),
+      AcdpVerifier: describeClass(AcdpVerifier),
+      AcdpCanonicalizer: describeClass(AcdpCanonicalizer),
+      AcdpSsrfPolicy: describeClass(AcdpSsrfPolicy),
+    },
+  }),
+
+  // ── Sync primitives (AcdpCanonicalizer / AcdpSsrfPolicy) ──────────────
+  canonicalize: (p) => ({ result: AcdpCanonicalizer.canonicalize(p.json) }),
+
+  content_hash: (p) => ({ result: AcdpCanonicalizer.contentHash(p.json) }),
+
+  // Each returns { allowed } or { allowed: false, reason } so the Python
+  // side can assert the stable reason codes match across bindings.
+  ssrf_check_url: (p) =>
+    ssrfVerdict(() => AcdpSsrfPolicy.production().checkUrl(p.url)),
+
+  ssrf_check_ip: (p) =>
+    ssrfVerdict(() => AcdpSsrfPolicy.production().checkIp(p.ip)),
+
+  ssrf_check_redirect: (p) =>
+    ssrfVerdict(() =>
+      AcdpSsrfPolicy.production().checkRedirectAuthority(p.from_url, p.to_url),
+    ),
 
   // Returns { handle, agent_did, key_id, public_key_b64 }.
   new_producer: (p) => {
