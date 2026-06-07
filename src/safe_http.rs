@@ -463,7 +463,7 @@ impl SafeDnsResolver {
 /// operator-configured endpoints (webhook delivery, federation feeds).
 ///
 /// Every resolved IP is filtered through `policy` at DNS time via
-/// [`SafeDnsResolver`] — defeating DNS rebinding (RFC-ACDP-0008 §4.8) — and
+/// `SafeDnsResolver` — defeating DNS rebinding (RFC-ACDP-0008 §4.8) — and
 /// redirects are refused outright: such an endpoint must respond directly, not
 /// bounce the registry to an internal host (e.g. cloud IMDS). `connect` and
 /// request timeouts are bounded. Use [`SsrfPolicy::default`] in production and
