@@ -8,7 +8,7 @@
 # requests — so we deliberately keep `default-features = false`.
 [package]
 name        = "acdp-py"
-version     = "0.1.0"
+version     = "0.2.0"
 edition     = "2021"
 description = "Agent Context Description Protocol — Python SDK"
 license     = "MIT OR Apache-2.0"
@@ -39,6 +39,10 @@ chrono     = { version = "0.4", features = ["serde"] }
 # `Zeroizing<[u8; 32]>` wipes the seed when the pyclass is dropped, so
 # we don't strip the protection the Rust `SigningKey` provides.
 zeroize    = "1"
+# `AcdpCanonicalizer.content_hash` hashes the JCS form. Versions match the
+# parent crate so the digest is byte-identical to the core content_hash.
+sha2       = "0.10"
+hex        = "0.4"
 
 [profile.release]
 lto           = true

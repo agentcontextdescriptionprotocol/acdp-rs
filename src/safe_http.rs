@@ -44,6 +44,93 @@ use std::sync::Arc;
 // Re-exported from [`crate::limits`] for back-compat.
 pub use crate::limits::{MAX_CONTEXT_BYTES, MAX_METADATA_BYTES, MAX_REDIRECTS};
 
+/// Stable, machine-readable reason an SSRF check rejected a target.
+///
+/// Surfaced by the [`SsrfPolicy::classify_url`] / [`SsrfPolicy::classify_ip`]
+/// / [`SsrfPolicy::classify_redirect`] family so callers can react
+/// programmatically — and so language bindings can map a rejection to a
+/// typed exception — instead of string-matching the free-form detail
+/// message. Maps to RFC-ACDP-0006 §7 / RFC-ACDP-0008 §4.8.
+///
+/// `#[non_exhaustive]`: future spec revisions may add ranges; match with a
+/// wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SsrfReason {
+    /// URL scheme is not `https` (and `allow_http` is off).
+    NonHttps,
+    /// URL embeds an IP literal; a hostname (forcing DNS) is required.
+    IpLiteral,
+    /// URL could not be parsed, has no host, or has an invalid hostname.
+    InvalidUrl,
+    /// Loopback range — IPv4 `127.0.0.0/8` or IPv6 `::1`.
+    Loopback,
+    /// Private range — RFC 1918 (`10/8`, `172.16/12`, `192.168/16`),
+    /// CGNAT `100.64/10`, or IPv6 ULA `fc00::/7`.
+    Private,
+    /// Link-local / cloud instance-metadata reach — IPv4 `169.254.0.0/16`
+    /// (incl. `169.254.169.254`), IPv6 `fe80::/10`, and the NAT64
+    /// well-known prefix `64:ff9b::/96` (which can translate to IMDS).
+    Imds,
+    /// Multicast or otherwise reserved/unusable range (`0.0.0.0/8`,
+    /// `192.0.0.0/24`, `198.18.0.0/15`, `224.0.0.0/4`, `240.0.0.0/4`,
+    /// IPv6 multicast / unspecified).
+    MulticastOrReserved,
+    /// A redirect target whose scheme, host, or effective port differs
+    /// from the originating request's authority (RFC-ACDP-0006 §7.5).
+    CrossAuthority,
+}
+
+impl SsrfReason {
+    /// The stable snake_case identifier for this reason — the contract
+    /// language bindings expose to host code.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SsrfReason::NonHttps => "non_https",
+            SsrfReason::IpLiteral => "ip_literal",
+            SsrfReason::InvalidUrl => "invalid_url",
+            SsrfReason::Loopback => "loopback",
+            SsrfReason::Private => "private",
+            SsrfReason::Imds => "imds",
+            SsrfReason::MulticastOrReserved => "multicast_or_reserved",
+            SsrfReason::CrossAuthority => "cross_authority",
+        }
+    }
+}
+
+impl std::fmt::Display for SsrfReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A rejection produced by the `classify_*` SSRF checks: a stable
+/// [`SsrfReason`] discriminant plus a human-readable detail.
+///
+/// Converts to [`AcdpError::SchemaViolation`] (carrying `detail`) via
+/// `From`, so the back-compat `check_*` wrappers preserve their existing
+/// error shape exactly.
+#[derive(Debug, Clone)]
+pub struct SsrfRejection {
+    /// Stable machine-readable reason code.
+    pub reason: SsrfReason,
+    /// Human-readable explanation (the message the legacy `check_*`
+    /// methods surfaced).
+    pub detail: String,
+}
+
+impl std::fmt::Display for SsrfRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} [{}]", self.detail, self.reason)
+    }
+}
+
+impl From<SsrfRejection> for AcdpError {
+    fn from(r: SsrfRejection) -> Self {
+        AcdpError::SchemaViolation(r.detail)
+    }
+}
+
 /// SSRF policy applied to outbound HTTP requests.
 #[derive(Debug, Clone)]
 pub struct SsrfPolicy {
@@ -91,43 +178,72 @@ impl SsrfPolicy {
 
 impl SsrfPolicy {
     /// Validate a URL string (scheme + host) before issuing a request.
+    ///
+    /// Back-compat wrapper over [`Self::classify_url`]: a rejection maps
+    /// to [`AcdpError::SchemaViolation`] with the same detail message
+    /// callers have always seen.
     pub fn check_url(&self, url: &str) -> Result<(), AcdpError> {
-        let parsed = url::Url::parse(url)
-            .map_err(|e| AcdpError::SchemaViolation(format!("invalid URL: {e}")))?;
+        self.classify_url(url).map_err(AcdpError::from)
+    }
+
+    /// Validate a URL string, returning a stable [`SsrfRejection`]
+    /// (reason code + detail) on failure.
+    ///
+    /// Checks scheme (HTTPS-only unless `allow_http`), IP-literal
+    /// rejection, per-IP range filtering for literal hosts, and hostname
+    /// length. Prefer this over [`Self::check_url`] when the caller needs
+    /// to branch on *why* the URL was rejected (e.g. a language binding
+    /// mapping to a typed exception).
+    pub fn classify_url(&self, url: &str) -> Result<(), SsrfRejection> {
+        let parsed = url::Url::parse(url).map_err(|e| SsrfRejection {
+            reason: SsrfReason::InvalidUrl,
+            detail: format!("invalid URL: {e}"),
+        })?;
 
         if !self.allow_http && parsed.scheme() != "https" {
-            return Err(AcdpError::SchemaViolation(format!(
-                "SSRF policy: scheme '{}' not permitted; only https",
-                parsed.scheme()
-            )));
+            return Err(SsrfRejection {
+                reason: SsrfReason::NonHttps,
+                detail: format!(
+                    "SSRF policy: scheme '{}' not permitted; only https",
+                    parsed.scheme()
+                ),
+            });
         }
 
-        let host = parsed
-            .host()
-            .ok_or_else(|| AcdpError::SchemaViolation(format!("URL has no host: {url}")))?;
+        let host = parsed.host().ok_or_else(|| SsrfRejection {
+            reason: SsrfReason::InvalidUrl,
+            detail: format!("URL has no host: {url}"),
+        })?;
 
         match host {
             url::Host::Ipv4(v4) => {
                 if self.reject_ip_literals {
-                    return Err(AcdpError::SchemaViolation(format!(
-                        "SSRF policy: IPv4 literal '{v4}' not permitted; use a hostname"
-                    )));
+                    return Err(SsrfRejection {
+                        reason: SsrfReason::IpLiteral,
+                        detail: format!(
+                            "SSRF policy: IPv4 literal '{v4}' not permitted; use a hostname"
+                        ),
+                    });
                 }
-                self.check_ip(IpAddr::V4(v4))?;
+                self.classify_ip(IpAddr::V4(v4))?;
             }
             url::Host::Ipv6(v6) => {
                 if self.reject_ip_literals {
-                    return Err(AcdpError::SchemaViolation(format!(
-                        "SSRF policy: IPv6 literal '{v6}' not permitted; use a hostname"
-                    )));
+                    return Err(SsrfRejection {
+                        reason: SsrfReason::IpLiteral,
+                        detail: format!(
+                            "SSRF policy: IPv6 literal '{v6}' not permitted; use a hostname"
+                        ),
+                    });
                 }
-                self.check_ip(IpAddr::V6(v6))?;
+                self.classify_ip(IpAddr::V6(v6))?;
             }
             url::Host::Domain(name) => {
                 if name.is_empty() || name.len() > 253 {
-                    return Err(AcdpError::SchemaViolation(format!(
-                        "SSRF policy: invalid hostname length: {name}"
-                    )));
+                    return Err(SsrfRejection {
+                        reason: SsrfReason::InvalidUrl,
+                        detail: format!("SSRF policy: invalid hostname length: {name}"),
+                    });
                 }
             }
         }
@@ -144,29 +260,39 @@ impl SsrfPolicy {
 
     /// Range filter for a single [`IpAddr`], respecting the policy's
     /// [`Self::allow_loopback_resolved`] flag.
+    ///
+    /// Back-compat wrapper over [`Self::classify_ip`].
     pub fn check_ip(&self, ip: IpAddr) -> Result<(), AcdpError> {
-        let bad = match ip {
+        self.classify_ip(ip).map_err(AcdpError::from)
+    }
+
+    /// Range filter for a single [`IpAddr`], returning a stable
+    /// [`SsrfRejection`] (reason code + detail) when the address falls in
+    /// a forbidden range. Respects [`Self::allow_loopback_resolved`].
+    pub fn classify_ip(&self, ip: IpAddr) -> Result<(), SsrfRejection> {
+        let reason = match ip {
             IpAddr::V4(v4) => {
                 if self.allow_loopback_resolved && v4.is_loopback() {
-                    false
+                    None
                 } else {
-                    is_unsafe_v4(v4)
+                    classify_unsafe_v4(v4)
                 }
             }
             IpAddr::V6(v6) => {
                 if self.allow_loopback_resolved && v6.is_loopback() {
-                    false
+                    None
                 } else {
-                    is_unsafe_v6(v6)
+                    classify_unsafe_v6(v6)
                 }
             }
         };
-        if bad {
-            return Err(AcdpError::SchemaViolation(format!(
-                "SSRF policy: IP address '{ip}' is in a forbidden range"
-            )));
+        match reason {
+            Some(reason) => Err(SsrfRejection {
+                reason,
+                detail: format!("SSRF policy: IP address '{ip}' is in a forbidden range"),
+            }),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// DNS rebinding protection per RFC-ACDP-0006 §7.6.
@@ -219,14 +345,42 @@ impl SsrfPolicy {
         original_url: &url::Url,
         redirect_url: &str,
     ) -> Result<(), AcdpError> {
-        let redirect = url::Url::parse(redirect_url)
-            .map_err(|e| AcdpError::SchemaViolation(format!("invalid redirect URL: {e}")))?;
+        self.classify_redirect_authority(original_url, redirect_url)
+            .map_err(AcdpError::from)
+    }
+
+    /// Same-authority redirect check returning a stable [`SsrfRejection`].
+    /// See [`Self::check_redirect_authority`].
+    pub fn classify_redirect_authority(
+        &self,
+        original_url: &url::Url,
+        redirect_url: &str,
+    ) -> Result<(), SsrfRejection> {
+        let redirect = url::Url::parse(redirect_url).map_err(|e| SsrfRejection {
+            reason: SsrfReason::InvalidUrl,
+            detail: format!("invalid redirect URL: {e}"),
+        })?;
         if !same_fetch_authority(original_url, &redirect) {
-            return Err(AcdpError::SchemaViolation(format!(
-                "SSRF policy: cross-authority redirect rejected: {original_url} → {redirect}"
-            )));
+            return Err(SsrfRejection {
+                reason: SsrfReason::CrossAuthority,
+                detail: format!(
+                    "SSRF policy: cross-authority redirect rejected: {original_url} → {redirect}"
+                ),
+            });
         }
         Ok(())
+    }
+
+    /// String-in/string-in convenience over [`Self::classify_redirect_authority`]
+    /// for FFI callers that hold both endpoints as strings (no `url::Url`
+    /// on the boundary). Parses `from_url` as the origin authority, then
+    /// applies the same scheme + host + effective-port equality.
+    pub fn classify_redirect(&self, from_url: &str, to_url: &str) -> Result<(), SsrfRejection> {
+        let original = url::Url::parse(from_url).map_err(|e| SsrfRejection {
+            reason: SsrfReason::InvalidUrl,
+            detail: format!("invalid origin URL: {e}"),
+        })?;
+        self.classify_redirect_authority(&original, to_url)
     }
 }
 
@@ -250,8 +404,8 @@ pub(crate) fn same_fetch_authority(a: &url::Url, b: &url::Url) -> bool {
 #[cfg(test)]
 fn check_safe_ip(ip: IpAddr) -> Result<(), AcdpError> {
     let bad = match ip {
-        IpAddr::V4(v4) => is_unsafe_v4(v4),
-        IpAddr::V6(v6) => is_unsafe_v6(v6),
+        IpAddr::V4(v4) => classify_unsafe_v4(v4).is_some(),
+        IpAddr::V6(v6) => classify_unsafe_v6(v6).is_some(),
     };
     if bad {
         return Err(AcdpError::SchemaViolation(format!(
@@ -372,35 +526,60 @@ impl reqwest::dns::Resolve for SafeDnsResolver {
     }
 }
 
-fn is_unsafe_v4(ip: Ipv4Addr) -> bool {
+/// Classify an IPv4 address against the forbidden ranges, returning the
+/// stable [`SsrfReason`] for the first range it falls in (or `None` when
+/// the address is safe to connect to). The set of rejected addresses is
+/// identical to the historical `is_unsafe_v4` predicate — only the reason
+/// granularity is new.
+fn classify_unsafe_v4(ip: Ipv4Addr) -> Option<SsrfReason> {
     let o = ip.octets();
-    // 0.0.0.0/8 — current network
-    o[0] == 0
+    if o[0] == 0 {
+        // 0.0.0.0/8 — current network
+        Some(SsrfReason::MulticastOrReserved)
+    } else if o[0] == 10 {
         // 10.0.0.0/8 — private
-        || o[0] == 10
+        Some(SsrfReason::Private)
+    } else if o[0] == 100 && (o[1] & 0xc0) == 64 {
         // 100.64.0.0/10 — CGNAT
-        || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        Some(SsrfReason::Private)
+    } else if o[0] == 127 {
         // 127.0.0.0/8 — loopback
-        || o[0] == 127
+        Some(SsrfReason::Loopback)
+    } else if o[0] == 169 && o[1] == 254 {
         // 169.254.0.0/16 — link-local + AWS/GCP IMDS
-        || (o[0] == 169 && o[1] == 254)
+        Some(SsrfReason::Imds)
+    } else if o[0] == 172 && (o[1] & 0xf0) == 16 {
         // 172.16.0.0/12 — private
-        || (o[0] == 172 && (o[1] & 0xf0) == 16)
+        Some(SsrfReason::Private)
+    } else if o[0] == 192 && o[1] == 0 && o[2] == 0 {
         // 192.0.0.0/24 — IETF protocol
-        || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+        Some(SsrfReason::MulticastOrReserved)
+    } else if o[0] == 192 && o[1] == 168 {
         // 192.168.0.0/16 — private
-        || (o[0] == 192 && o[1] == 168)
+        Some(SsrfReason::Private)
+    } else if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
         // 198.18.0.0/15 — benchmarking
-        || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+        Some(SsrfReason::MulticastOrReserved)
+    } else if o[0] >= 224 && o[0] <= 239 {
         // 224.0.0.0/4 — multicast
-        || (o[0] >= 224 && o[0] <= 239)
+        Some(SsrfReason::MulticastOrReserved)
+    } else if o[0] >= 240 {
         // 240.0.0.0/4 — reserved
-        || o[0] >= 240
+        Some(SsrfReason::MulticastOrReserved)
+    } else {
+        None
+    }
 }
 
-fn is_unsafe_v6(ip: Ipv6Addr) -> bool {
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-        return true;
+/// Classify an IPv6 address against the forbidden ranges. Mirrors
+/// [`classify_unsafe_v4`]; the rejected set matches the historical
+/// `is_unsafe_v6` predicate exactly.
+fn classify_unsafe_v6(ip: Ipv6Addr) -> Option<SsrfReason> {
+    if ip.is_loopback() {
+        return Some(SsrfReason::Loopback);
+    }
+    if ip.is_unspecified() || ip.is_multicast() {
+        return Some(SsrfReason::MulticastOrReserved);
     }
     let segments = ip.segments();
     // Embedded-IPv4 forms — both IPv4-mapped (`::ffff:a.b.c.d`) and the
@@ -417,7 +596,7 @@ fn is_unsafe_v6(ip: Ipv6Addr) -> bool {
             (segments[7] & 0xff) as u8,
         );
         if !v4.is_unspecified() {
-            return is_unsafe_v4(v4);
+            return classify_unsafe_v4(v4);
         }
     }
     // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052) and the local-use
@@ -425,17 +604,17 @@ fn is_unsafe_v6(ip: Ipv6Addr) -> bool {
     // `64:ff9b::a9fe:a9fe` translates to IMDS `169.254.169.254` through a
     // NAT64/DNS64 gateway, which is routable in IPv6-only / cloud networks.
     if segments[0] == 0x0064 && segments[1] == 0xff9b {
-        return true;
+        return Some(SsrfReason::Imds);
     }
     // fc00::/7 — unique local
     if (segments[0] & 0xfe00) == 0xfc00 {
-        return true;
+        return Some(SsrfReason::Private);
     }
     // fe80::/10 — link-local
     if (segments[0] & 0xffc0) == 0xfe80 {
-        return true;
+        return Some(SsrfReason::Imds);
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -645,6 +824,133 @@ mod tests {
             ..SsrfPolicy::default()
         };
         assert!(p.check_url("http://registry.example.com").is_ok());
+    }
+
+    // ── SsrfReason taxonomy (D1) ────────────────────────────────────────
+    fn reason_for_ip(s: &str) -> SsrfReason {
+        SsrfPolicy::default()
+            .classify_ip(s.parse().unwrap())
+            .unwrap_err()
+            .reason
+    }
+
+    #[test]
+    fn classify_ip_maps_stable_reasons() {
+        assert_eq!(reason_for_ip("127.0.0.1"), SsrfReason::Loopback);
+        assert_eq!(reason_for_ip("10.0.0.1"), SsrfReason::Private);
+        assert_eq!(reason_for_ip("172.16.5.5"), SsrfReason::Private);
+        assert_eq!(reason_for_ip("192.168.1.1"), SsrfReason::Private);
+        assert_eq!(reason_for_ip("100.64.0.1"), SsrfReason::Private);
+        assert_eq!(reason_for_ip("169.254.169.254"), SsrfReason::Imds);
+        assert_eq!(reason_for_ip("239.0.0.1"), SsrfReason::MulticastOrReserved);
+        assert_eq!(reason_for_ip("0.0.0.1"), SsrfReason::MulticastOrReserved);
+        assert_eq!(reason_for_ip("240.0.0.1"), SsrfReason::MulticastOrReserved);
+        // IPv6
+        assert_eq!(reason_for_ip("::1"), SsrfReason::Loopback);
+        assert_eq!(reason_for_ip("fc00::1"), SsrfReason::Private);
+        assert_eq!(reason_for_ip("fe80::1"), SsrfReason::Imds);
+        // NAT64 well-known prefix → IMDS reach.
+        assert_eq!(reason_for_ip("64:ff9b::a9fe:a9fe"), SsrfReason::Imds);
+        // IPv4-mapped private decodes through to the v4 reason.
+        assert_eq!(reason_for_ip("::ffff:10.0.0.1"), SsrfReason::Private);
+        // Public addresses classify clean.
+        assert!(SsrfPolicy::default()
+            .classify_ip("8.8.8.8".parse().unwrap())
+            .is_ok());
+        assert!(SsrfPolicy::default()
+            .classify_ip("2001:db8::1".parse().unwrap())
+            .is_ok());
+    }
+
+    #[test]
+    fn classify_reason_as_str_is_stable() {
+        assert_eq!(SsrfReason::NonHttps.as_str(), "non_https");
+        assert_eq!(SsrfReason::IpLiteral.as_str(), "ip_literal");
+        assert_eq!(SsrfReason::InvalidUrl.as_str(), "invalid_url");
+        assert_eq!(SsrfReason::Loopback.as_str(), "loopback");
+        assert_eq!(SsrfReason::Private.as_str(), "private");
+        assert_eq!(SsrfReason::Imds.as_str(), "imds");
+        assert_eq!(
+            SsrfReason::MulticastOrReserved.as_str(),
+            "multicast_or_reserved"
+        );
+        assert_eq!(SsrfReason::CrossAuthority.as_str(), "cross_authority");
+    }
+
+    #[test]
+    fn classify_url_maps_stable_reasons() {
+        let p = SsrfPolicy::default();
+        assert_eq!(
+            p.classify_url("http://registry.example.com")
+                .unwrap_err()
+                .reason,
+            SsrfReason::NonHttps
+        );
+        assert_eq!(
+            p.classify_url("https://192.168.1.1").unwrap_err().reason,
+            SsrfReason::IpLiteral
+        );
+        assert_eq!(
+            p.classify_url("https://[::1]").unwrap_err().reason,
+            SsrfReason::IpLiteral
+        );
+        assert_eq!(
+            p.classify_url("not a url").unwrap_err().reason,
+            SsrfReason::InvalidUrl
+        );
+        assert!(p.classify_url("https://registry.example.com").is_ok());
+    }
+
+    #[test]
+    fn classify_redirect_reasons_and_port_parity() {
+        let p = SsrfPolicy::default();
+        // Cross-host → cross_authority.
+        assert_eq!(
+            p.classify_redirect("https://a.example/x", "https://b.example/y")
+                .unwrap_err()
+                .reason,
+            SsrfReason::CrossAuthority
+        );
+        // Port change → cross_authority.
+        assert_eq!(
+            p.classify_redirect("https://a.example/x", "https://a.example:8443/y")
+                .unwrap_err()
+                .reason,
+            SsrfReason::CrossAuthority
+        );
+        // Scheme downgrade → cross_authority.
+        assert_eq!(
+            p.classify_redirect("https://a.example/x", "http://a.example/y")
+                .unwrap_err()
+                .reason,
+            SsrfReason::CrossAuthority
+        );
+        // D2: explicit :443 is equal to the implicit https default.
+        assert!(p
+            .classify_redirect("https://a.example/x", "https://a.example:443/y")
+            .is_ok());
+        // Same authority is allowed.
+        assert!(p
+            .classify_redirect("https://a.example/x", "https://a.example/y")
+            .is_ok());
+        // Unparseable origin → invalid_url.
+        assert_eq!(
+            p.classify_redirect("::not-a-url", "https://a.example/y")
+                .unwrap_err()
+                .reason,
+            SsrfReason::InvalidUrl
+        );
+    }
+
+    #[test]
+    fn check_wrappers_preserve_schema_violation() {
+        // The back-compat surface still produces SchemaViolation with the
+        // same detail string, so existing callers are unaffected.
+        let p = SsrfPolicy::default();
+        let err = p.check_url("http://registry.example.com").unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+        let err = p.check_ip("10.0.0.1".parse().unwrap()).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
     }
 
     /// FEAT-07 — `pin_resolved_ip` resolves localhost (which always maps

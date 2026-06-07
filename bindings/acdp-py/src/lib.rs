@@ -18,17 +18,26 @@
 #![allow(clippy::useless_conversion)]
 
 mod helpers;
+mod jcs;
 mod producer;
+mod safe_http;
 mod verifier;
 
 use pyo3::prelude::*;
 
 /// The `acdp` Python module — exposes `AcdpProducer`,
-/// `AcdpP256Producer`, and `AcdpVerifier`.
+/// `AcdpP256Producer`, `AcdpVerifier`, `AcdpCanonicalizer`,
+/// `AcdpSsrfPolicy`, and the `SsrfRejected` exception.
 #[pymodule]
 fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<producer::PyAcdpProducer>()?;
     m.add_class::<producer::PyAcdpP256Producer>()?;
     m.add_class::<verifier::PyAcdpVerifier>()?;
+    m.add_class::<jcs::PyAcdpCanonicalizer>()?;
+    m.add_class::<safe_http::PyAcdpSsrfPolicy>()?;
+    m.add(
+        "SsrfRejected",
+        m.py().get_type_bound::<safe_http::SsrfRejected>(),
+    )?;
     Ok(())
 }
