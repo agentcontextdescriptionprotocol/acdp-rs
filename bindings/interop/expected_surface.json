@@ -40,6 +40,15 @@
       "check_redirect_authority",
       "check_url",
       "production"
+    ],
+    "AcdpDid": [
+      "strip_fragment",
+      "web_to_url"
+    ],
+    "AcdpDidDocument": [
+      "id",
+      "key_for_algorithm",
+      "parse"
     ]
   }
 }

@@ -12,6 +12,7 @@
 //! export macros expand to `unsafe` glue. The underlying `acdp` crate
 //! keeps the forbid attribute.
 
+mod did;
 mod helpers;
 mod jcs;
 mod producer;

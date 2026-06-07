@@ -17,6 +17,7 @@
 // — a macro-expansion false positive, not our code.
 #![allow(clippy::useless_conversion)]
 
+mod did;
 mod helpers;
 mod jcs;
 mod producer;
@@ -27,7 +28,8 @@ use pyo3::prelude::*;
 
 /// The `acdp` Python module — exposes `AcdpProducer`,
 /// `AcdpP256Producer`, `AcdpVerifier`, `AcdpCanonicalizer`,
-/// `AcdpSsrfPolicy`, and the `SsrfRejected` exception.
+/// `AcdpSsrfPolicy`, `AcdpDid`, `AcdpDidDocument`, and the
+/// `SsrfRejected` / `DidResolutionError` exceptions.
 #[pymodule]
 fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<producer::PyAcdpProducer>()?;
@@ -35,9 +37,15 @@ fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<verifier::PyAcdpVerifier>()?;
     m.add_class::<jcs::PyAcdpCanonicalizer>()?;
     m.add_class::<safe_http::PyAcdpSsrfPolicy>()?;
+    m.add_class::<did::PyAcdpDid>()?;
+    m.add_class::<did::PyAcdpDidDocument>()?;
     m.add(
         "SsrfRejected",
         m.py().get_type_bound::<safe_http::SsrfRejected>(),
+    )?;
+    m.add(
+        "DidResolutionError",
+        m.py().get_type_bound::<did::DidResolutionError>(),
     )?;
     Ok(())
 }
