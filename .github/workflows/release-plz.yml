@@ -16,7 +16,7 @@ jobs:
   release-plz:
     name: release-plz
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'agentcontextdescriptionprotocol' }}
+    if: ${{ github.repository_owner == 'agentcontextdistributionprotocol' }}
     steps:
       - uses: actions/checkout@v4
         with:

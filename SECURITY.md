@@ -15,7 +15,7 @@ resolution). We take security reports seriously.
 
 **Please do not open a public GitHub issue.** Instead:
 
-- Use GitHub's [private vulnerability reporting](https://github.com/agentcontextdescriptionprotocol/acdp-rs/security/advisories/new) form, or
+- Use GitHub's [private vulnerability reporting](https://github.com/agentcontextdistributionprotocol/acdp-rs/security/advisories/new) form, or
 - Email the maintainers at `security@acdp.dev` (PGP key on request).
 
 Please include:

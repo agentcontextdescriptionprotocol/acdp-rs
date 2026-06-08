@@ -1,7 +1,7 @@
 //! Conformance tests against the canonical ACDP spec fixtures and examples.
 //!
 //! Locates the spec repo via the `ACDP_SPEC_DIR` environment variable, with
-//! a fallback to the sibling path `../agentcontextdescriptionprotocol` (the
+//! a fallback to the sibling path `../agentcontextdistributionprotocol` (the
 //! layout used in this monorepo). If neither path resolves, the tests
 //! gracefully skip with a notice — they don't fail the suite when the spec
 //! isn't co-located, so this crate remains buildable in isolation.
@@ -45,7 +45,7 @@ fn spec_root() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(sibling) = manifest_dir
         .parent()
-        .map(|p| p.join("agentcontextdescriptionprotocol"))
+        .map(|p| p.join("agentcontextdistributionprotocol"))
     {
         if sibling.exists() {
             return Some(sibling);

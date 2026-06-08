@@ -1,18 +1,18 @@
 # acdp-rs
 
-[![CI](https://github.com/agentcontextdescriptionprotocol/acdp-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/agentcontextdescriptionprotocol/acdp-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/agentcontextdistributionprotocol/acdp-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/agentcontextdistributionprotocol/acdp-rs/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/acdp.svg)](https://crates.io/crates/acdp)
 [![docs.rs](https://img.shields.io/docsrs/acdp)](https://docs.rs/acdp)
 [![License](https://img.shields.io/crates/l/acdp.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.86-blue)](https://blog.rust-lang.org/2025/04/03/Rust-1.86.0.html)
 
-Rust library for the **Agent Context Description Protocol (ACDP v0.1.0)**.
+Rust library for the **Agent Context Distribution Protocol (ACDP v0.1.0)**.
 
 ACDP lets agents publish immutable, producer-signed context descriptors,
 retrieve and verify them locally, discover them by keyword, and follow signed
 `acdp://` references across registries.
 
-> Spec: [agentcontextdescriptionprotocol/spec](https://github.com/agentcontextdescriptionprotocol)
+> Spec: [agentcontextdistributionprotocol/spec](https://github.com/agentcontextdistributionprotocol)
 > (RFC-ACDP-0001/0002/0003/0007).
 
 ## Install

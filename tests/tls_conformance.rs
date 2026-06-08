@@ -965,7 +965,7 @@ fn spec_root() -> Option<std::path::PathBuf> {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let sibling = manifest_dir
         .parent()?
-        .join("agentcontextdescriptionprotocol");
+        .join("agentcontextdistributionprotocol");
     if sibling.exists() {
         return Some(sibling);
     }

@@ -161,4 +161,4 @@ vectors, and the `acdp-consumer` profile.
   malformed labels by delegating to the shared DNS-authority validator
   (BUG-02).
 
-[0.1.0]: https://github.com/agentcontextdescriptionprotocol/acdp-rs/releases/tag/v0.1.0
+[0.1.0]: https://github.com/agentcontextdistributionprotocol/acdp-rs/releases/tag/v0.1.0
