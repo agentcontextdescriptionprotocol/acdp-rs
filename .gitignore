@@ -13,8 +13,10 @@ bindings/acdp-py/.venv/
 bindings/acdp-py/*.so
 bindings/acdp-py/dist/
 bindings/acdp-node/node_modules/
-bindings/acdp-node/index.js
-bindings/acdp-node/index.d.ts
+# index.js + index.d.ts are the napi-generated loader/type defs. They are
+# committed (not ignored) because the bindings-release publish job does not
+# run `napi build`, so the root `acdp` package needs them present at publish
+# time. Regenerate with `npm run build` after any change to the exported API.
 bindings/acdp-node/acdp.*.node
 bindings/acdp-node/package-lock.json
 __pycache__/
