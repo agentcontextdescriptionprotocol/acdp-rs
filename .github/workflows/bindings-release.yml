@@ -109,9 +109,25 @@ jobs:
         run: npx napi artifacts --dir artifacts
       - name: List what will be published
         run: ls -R npm && ls -la *.node 2>/dev/null || true
-      - name: Publish
+      # `napi prepublish` only publishes the per-platform binary packages
+      # (acdp-darwin-arm64, …). It does NOT publish the root loader package
+      # (@agentcontextdistributionprotocol/acdp) — that has to be published
+      # with `npm publish`. We do both, as two steps.
+      - name: Publish platform packages
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         run: npx napi prepublish -t npm --skip-gh-release
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
+      # `if: always()` so that re-running a partially-completed release (where
+      # the platform packages already exist and the step above errors with
+      # "cannot publish over existing version") still publishes the root.
+      # `--ignore-scripts` stops npm from re-running the `prepublishOnly` hook
+      # (which is `napi prepublish`) and republishing the platform packages.
+      - name: Publish root loader package
+        if: ${{ always() && (github.event_name == 'push' || !inputs.dry_run) }}
+        run: npm publish --access public --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
