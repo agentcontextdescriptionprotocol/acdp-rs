@@ -23,7 +23,7 @@ npm run build                # release mode (LTO + strip)
 ## Quickstart
 
 ```javascript
-import { AcdpProducer, AcdpVerifier } from 'acdp';
+import { AcdpProducer, AcdpVerifier } from '@agentcontextdistributionprotocol/acdp';
 
 const producer = AcdpProducer.generate(
   'did:web:agents.example.com:my-agent',
