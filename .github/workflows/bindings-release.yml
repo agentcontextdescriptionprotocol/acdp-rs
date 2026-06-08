@@ -64,7 +64,7 @@ jobs:
           workspaces: bindings/acdp-node
       - name: Install zig (cross targets)
         if: ${{ matrix.zig }}
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
       - name: Install dependencies
