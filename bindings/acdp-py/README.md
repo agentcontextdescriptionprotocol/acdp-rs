@@ -2,7 +2,7 @@
 
 Thin PyO3 binding over the [`acdp`](https://crates.io/crates/acdp) Rust
 library. Implements the producer- and consumer-side crypto for the Agent
-Context Description Protocol v0.1.0 (RFC-ACDP-0001/0003/0008). HTTP is
+Context Distribution Protocol v0.1.0 (RFC-ACDP-0001/0003/0008). HTTP is
 intentionally left to the caller — pair this with `httpx` / `requests`
 for transport.
 

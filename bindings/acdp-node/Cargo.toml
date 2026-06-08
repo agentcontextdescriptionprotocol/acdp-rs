@@ -9,7 +9,7 @@
 name        = "acdp-node"
 version     = "0.3.0"
 edition     = "2021"
-description = "Agent Context Description Protocol — Node.js SDK"
+description = "Agent Context Distribution Protocol — Node.js SDK"
 license     = "MIT OR Apache-2.0"
 publish     = false
 

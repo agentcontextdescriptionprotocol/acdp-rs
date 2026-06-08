@@ -1,14 +1,14 @@
 {
   "name": "acdp",
   "version": "0.3.0",
-  "description": "Agent Context Description Protocol — Node.js SDK",
+  "description": "Agent Context Distribution Protocol — Node.js SDK",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agentcontextdescriptionprotocol/acdp-rs.git",
+    "url": "git+https://github.com/agentcontextdistributionprotocol/acdp-rs.git",
     "directory": "bindings/acdp-node"
   },
-  "homepage": "https://github.com/agentcontextdescriptionprotocol/acdp-rs/tree/main/bindings/acdp-node",
+  "homepage": "https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/main/bindings/acdp-node",
   "main": "index.js",
   "types": "index.d.ts",
   "type": "commonjs",

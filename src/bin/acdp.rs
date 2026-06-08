@@ -51,7 +51,7 @@ use acdp::{
 
 fn print_usage() {
     eprintln!(
-        "acdp — Agent Context Description Protocol CLI\n\
+        "acdp — Agent Context Distribution Protocol CLI\n\
          \n\
          USAGE:\n\
          \tacdp capabilities <registry-url>\n\

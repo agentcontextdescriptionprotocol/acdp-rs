@@ -1,4 +1,4 @@
-//! # acdp — Rust library for the Agent Context Description Protocol
+//! # acdp — Rust library for the Agent Context Distribution Protocol
 //!
 //! Reference implementation of **ACDP v0.1.0 Final** (specification
 //! promoted to Final on 2026-05-19).
