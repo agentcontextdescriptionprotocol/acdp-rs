@@ -29,7 +29,11 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 acdp       = { path = "../..", default-features = false }
-pyo3       = "0.22"
+# abi3-py39: build a single forward-compatible wheel (cp39-abi3) per
+# platform that runs on CPython 3.9+ via the stable ABI, instead of one
+# wheel per interpreter version. Keeps the release matrix to one build
+# per OS/arch and matches `requires-python = ">=3.9"` in pyproject.toml.
+pyo3       = { version = "0.22", features = ["abi3-py39"] }
 serde_json = "1"
 base64     = "0.22"
 # Used only to parse the `expires_at` RFC 3339 string into the
