@@ -105,9 +105,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Install a checksum-verified prebuilt binary (with retries) and run
+      # `cargo deny` directly, rather than EmbarkStudios/cargo-deny-action,
+      # whose Docker image intermittently failed extracting the cargo-deny
+      # release tarball ("tar: Error is not recoverable") on several
+      # Dependabot PRs. Same install mechanism as the coverage job's
+      # cargo-llvm-cov.
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
 
   audit:
     name: cargo-audit
