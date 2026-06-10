@@ -1,0 +1,20 @@
+name: Notify Website of Doc Changes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'bindings/**'
+      - 'README.md'
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger website sync
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          repository: agentcontextdistributionprotocol/website
+          event-type: docs-updated
