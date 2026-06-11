@@ -315,4 +315,61 @@ mod tests {
         // the declared_algorithm() helper is the building block whose
         // mismatch produces the rejection.
     }
+
+    // ── verify_ed25519 error branches ──────────────────────────────────────
+
+    #[test]
+    fn verify_ed25519_rejects_malformed_base64() {
+        let pub_bytes: [u8; 32] = hex::decode(TEST_PUB_HEX).unwrap().try_into().unwrap();
+        let err = verify_ed25519(&pub_bytes, "not valid base64!!", "sha256:x").unwrap_err();
+        assert!(
+            matches!(err, AcdpError::InvalidSignature(ref m) if m.contains("base64")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_ed25519_rejects_wrong_length_signature() {
+        let pub_bytes: [u8; 32] = hex::decode(TEST_PUB_HEX).unwrap().try_into().unwrap();
+        // Valid base64 but decodes to 3 bytes, not the required 64.
+        let short = STANDARD.encode([1u8, 2, 3]);
+        let err = verify_ed25519(&pub_bytes, &short, "sha256:x").unwrap_err();
+        assert!(matches!(err, AcdpError::InvalidSignature(_)), "got {err:?}");
+    }
+
+    // ── verify_ecdsa_p256 error branches ───────────────────────────────────
+
+    #[test]
+    fn verify_ecdsa_p256_rejects_bad_public_key() {
+        // A 5-byte blob is not a valid SEC1 point.
+        let err = verify_ecdsa_p256(&[1, 2, 3, 4, 5], "AAAA", "sha256:x").unwrap_err();
+        assert!(
+            matches!(err, AcdpError::InvalidSignature(ref m) if m.contains("key parse")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_ecdsa_p256_rejects_malformed_base64() {
+        // Need a valid key so we get past the key-parse step to the b64 step.
+        let key = crate::crypto::sign::P256SigningKey::generate();
+        let err =
+            verify_ecdsa_p256(&key.verifying_key_sec1(), "not base64!!", "sha256:x").unwrap_err();
+        assert!(
+            matches!(err, AcdpError::InvalidSignature(ref m) if m.contains("base64")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_ecdsa_p256_rejects_wrong_length_signature() {
+        let key = crate::crypto::sign::P256SigningKey::generate();
+        // Valid base64 decoding to 10 bytes, not 64.
+        let short = STANDARD.encode([0u8; 10]);
+        let err = verify_ecdsa_p256(&key.verifying_key_sec1(), &short, "sha256:x").unwrap_err();
+        assert!(
+            matches!(err, AcdpError::InvalidSignature(ref m) if m.contains("64 bytes")),
+            "got {err:?}"
+        );
+    }
 }

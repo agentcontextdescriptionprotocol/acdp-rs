@@ -444,4 +444,131 @@ mod tests {
         assert_eq!(r.total_estimate, None);
         assert_eq!(r.next_cursor, None);
     }
+
+    /// Back-compat `results()` accessor returns the same slice as `matches`.
+    #[test]
+    fn results_accessor_aliases_matches() {
+        let r: SearchResponse = serde_json::from_value(serde_json::json!({
+            "matches": [base_result()],
+        }))
+        .unwrap();
+        assert_eq!(r.results().len(), 1);
+        assert_eq!(r.results().len(), r.matches.len());
+        assert_eq!(r.results()[0].ctx_id.as_str(), r.matches[0].ctx_id.as_str());
+    }
+
+    // ── SearchParamsBuilder ────────────────────────────────────────────────
+
+    /// An empty builder yields an all-`None` `SearchParams`, which
+    /// serializes to an empty object (every field is
+    /// `skip_serializing_if = "Option::is_none"`).
+    #[test]
+    fn builder_empty_serializes_to_empty_object() {
+        let params = SearchParamsBuilder::new().build();
+        let v = serde_json::to_value(&params).unwrap();
+        assert_eq!(v, serde_json::json!({}), "no field set ⇒ empty query");
+    }
+
+    /// `new()` and `default()` produce the same empty builder.
+    #[test]
+    fn builder_new_equals_default() {
+        let a = serde_json::to_value(SearchParamsBuilder::new().build()).unwrap();
+        let b = serde_json::to_value(SearchParamsBuilder::default().build()).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// Scalar setters populate the matching query-string keys, and
+    /// `context_type` is renamed to `type` per `SearchParams`.
+    #[test]
+    fn builder_sets_scalar_fields_with_wire_names() {
+        let params = SearchParamsBuilder::new()
+            .q("rainfall")
+            .context_type("data_snapshot")
+            .domain("weather")
+            .agent_id("did:web:agents.example.com:test")
+            .derived_from("acdp://r.example.com/abc")
+            .status("active")
+            .limit(25)
+            .cursor("opaque-cursor")
+            .build();
+        let v = serde_json::to_value(&params).unwrap();
+        assert_eq!(v["q"], "rainfall");
+        assert_eq!(v["type"], "data_snapshot", "context_type renames to `type`");
+        assert_eq!(v["domain"], "weather");
+        assert_eq!(v["agent_id"], "did:web:agents.example.com:test");
+        assert_eq!(v["derived_from"], "acdp://r.example.com/abc");
+        assert_eq!(v["status"], "active");
+        assert_eq!(v["limit"], 25);
+        assert_eq!(v["cursor"], "opaque-cursor");
+    }
+
+    /// `tag()` accumulates into a single comma-joined string for the
+    /// AND-semantics matcher (RFC-ACDP-0005 §2.1); a lone call leaves no
+    /// leading/trailing comma.
+    #[test]
+    fn builder_tag_accumulates_comma_joined() {
+        let one = SearchParamsBuilder::new().tag("alpha").build();
+        assert_eq!(one.tags.as_deref(), Some("alpha"));
+
+        let many = SearchParamsBuilder::new()
+            .tag("alpha")
+            .tag("beta")
+            .tag("gamma")
+            .build();
+        assert_eq!(many.tags.as_deref(), Some("alpha,beta,gamma"));
+    }
+
+    /// A prior `tags()` (bulk) value is extended by a later `tag()` call.
+    #[test]
+    fn builder_tag_extends_existing_bulk_tags() {
+        let params = SearchParamsBuilder::new().tags("a,b").tag("c").build();
+        assert_eq!(params.tags.as_deref(), Some("a,b,c"));
+    }
+
+    /// `tag()` after an explicitly empty `tags("")` replaces rather than
+    /// prefixing a stray comma (the `!existing.is_empty()` guard).
+    #[test]
+    fn builder_tag_after_empty_replaces_without_leading_comma() {
+        let params = SearchParamsBuilder::new().tags("").tag("c").build();
+        assert_eq!(params.tags.as_deref(), Some("c"));
+    }
+
+    /// `derived_from_ctx_id` accepts a typed `CtxId` and stores its string.
+    #[test]
+    fn builder_derived_from_ctx_id_uses_string_form() {
+        let id = CtxId("acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into());
+        let params = SearchParamsBuilder::new().derived_from_ctx_id(&id).build();
+        assert_eq!(params.derived_from.as_deref(), Some(id.as_str()));
+    }
+
+    /// Every date-bound setter emits RFC 3339 millisecond form (the
+    /// `fmt_rfc3339_ms` contract), and lands in the right query key.
+    #[test]
+    fn builder_date_filters_emit_rfc3339_ms() {
+        use chrono::TimeZone;
+        // A sub-millisecond instant proves truncation to ms precision.
+        let dt = Utc.timestamp_opt(1_700_000_000, 123_456_789).unwrap();
+        let params = SearchParamsBuilder::new()
+            .created_after(dt)
+            .created_before(dt)
+            .data_period_start_after(dt)
+            .data_period_end_before(dt)
+            .expires_after(dt)
+            .expires_before(dt)
+            .build();
+        let expected = fmt_rfc3339_ms(dt);
+        assert!(expected.ends_with(".123Z"), "ms-truncated form: {expected}");
+        assert_eq!(params.created_after.as_deref(), Some(expected.as_str()));
+        assert_eq!(params.created_before.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            params.data_period_start_after.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            params.data_period_end_before.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(params.expires_after.as_deref(), Some(expected.as_str()));
+        assert_eq!(params.expires_before.as_deref(), Some(expected.as_str()));
+    }
 }

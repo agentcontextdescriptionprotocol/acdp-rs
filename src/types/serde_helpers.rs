@@ -72,3 +72,66 @@ where
     }
     Ok(Some(v))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+
+    // A field wired to `de_present` (rejects null) and one wired to
+    // `de_present_object` (rejects null + any non-object).
+    #[derive(Debug, Deserialize)]
+    struct Holder {
+        #[serde(default, deserialize_with = "de_present")]
+        bare: Option<String>,
+        #[serde(default, deserialize_with = "de_present_object")]
+        obj: Option<serde_json::Value>,
+    }
+
+    #[test]
+    fn de_present_absent_key_yields_none() {
+        let h: Holder = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(h.bare, None);
+        assert_eq!(h.obj, None);
+    }
+
+    #[test]
+    fn de_present_accepts_real_value() {
+        let h: Holder = serde_json::from_value(json!({"bare": "x"})).unwrap();
+        assert_eq!(h.bare.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn de_present_rejects_explicit_null() {
+        let err = serde_json::from_value::<Holder>(json!({"bare": null})).unwrap_err();
+        assert!(
+            err.to_string().contains("null"),
+            "expected an 'invalid type: null' message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn de_present_object_accepts_object() {
+        let h: Holder = serde_json::from_value(json!({"obj": {"k": 1}})).unwrap();
+        assert_eq!(h.obj, Some(json!({"k": 1})));
+    }
+
+    #[test]
+    fn de_present_object_rejects_null_and_non_objects() {
+        // Each non-object JSON type names itself in the error message.
+        for (val, kind) in [
+            (json!(null), "null"),
+            (json!(true), "boolean"),
+            (json!(7), "number"),
+            (json!("s"), "string"),
+            (json!([1, 2]), "array"),
+        ] {
+            let err = serde_json::from_value::<Holder>(json!({"obj": val})).unwrap_err();
+            assert!(
+                err.to_string().contains(kind),
+                "obj={val} should be rejected naming {kind}, got: {err}"
+            );
+        }
+    }
+}

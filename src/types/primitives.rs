@@ -578,4 +578,145 @@ mod tests {
         AgentDid::parse_web("did:web:agents.example.com:test").unwrap();
         assert!(AgentDid::parse_web("did:key:z6Mki...").is_err());
     }
+
+    #[test]
+    fn agent_did_new_skips_validation() {
+        // `new` is the unchecked back-compat constructor — it must NOT reject.
+        let did = AgentDid::new("not-a-did");
+        assert_eq!(did.as_str(), "not-a-did");
+    }
+
+    #[test]
+    fn agent_did_parse_rejects_length_bounds() {
+        assert!(AgentDid::parse("did:w:").is_err(), "too short / empty id");
+        let long = format!("did:web:{}", "a".repeat(2100));
+        assert!(AgentDid::parse(long).is_err(), "over 2048 chars");
+    }
+
+    // ── ContextType ────────────────────────────────────────────────────────
+
+    #[test]
+    fn context_type_known_values_round_trip() {
+        for (s, expect) in [
+            ("data_snapshot", ContextType::DataSnapshot),
+            ("analysis", ContextType::Analysis),
+            ("prediction", ContextType::Prediction),
+            ("alert", ContextType::Alert),
+        ] {
+            let parsed: ContextType = serde_json::from_value(json!(s)).unwrap();
+            assert_eq!(parsed, expect);
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(s));
+        }
+    }
+
+    #[test]
+    fn context_type_accepts_namespaced_custom() {
+        let parsed: ContextType =
+            serde_json::from_value(json!("finance:portfolio_snapshot")).unwrap();
+        assert_eq!(
+            parsed,
+            ContextType::Custom("finance:portfolio_snapshot".into())
+        );
+        // Custom round-trips back to its exact wire string.
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            json!("finance:portfolio_snapshot")
+        );
+    }
+
+    #[test]
+    fn context_type_rejects_unnamespaced_unknown() {
+        // No colon and not a known keyword ⇒ schema-invalid.
+        for bad in [
+            "totally_unknown",
+            "Finance:x",
+            "finance:",
+            ":name",
+            "1ns:name",
+        ] {
+            let parsed: Result<ContextType, _> = serde_json::from_value(json!(bad));
+            assert!(parsed.is_err(), "context_type {bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn namespaced_context_type_helper_edges() {
+        assert!(is_namespaced_context_type("a:b"));
+        assert!(is_namespaced_context_type("ns1:name_2-x"));
+        assert!(!is_namespaced_context_type("nocolon"));
+        assert!(!is_namespaced_context_type("ns:Name")); // uppercase in name
+        assert!(!is_namespaced_context_type("ns:-bad")); // name starts with hyphen
+        assert!(!is_namespaced_context_type("ns:1bad")); // name starts with digit
+    }
+
+    // ── Status edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn status_parse_rejects_pattern_violations() {
+        for bad in ["Active", "has space", "", "UPPER", "trailing!"] {
+            assert!(
+                Status::parse(bad).is_err(),
+                "status {bad:?} violates ^[a-z][a-z0-9_]*$ and must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn status_deserialize_rejects_malformed() {
+        // Deserialization funnels through `Status::parse`.
+        let parsed: Result<Status, _> = serde_json::from_value(json!("Active"));
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn status_known_or_active_degrades_unknown() {
+        // Unknown ⇒ Active for read-side decisions (RFC-ACDP-0004 §4.1).
+        let other = Status::Other("retracted".into());
+        assert_eq!(other.known_or_active(), Status::Active);
+        // Known statuses are preserved unchanged.
+        assert_eq!(Status::Superseded.known_or_active(), Status::Superseded);
+        assert_eq!(Status::Expired.known_or_active(), Status::Expired);
+    }
+
+    #[test]
+    fn status_as_str_matches_wire_form() {
+        assert_eq!(Status::Active.as_str(), "active");
+        assert_eq!(Status::Superseded.as_str(), "superseded");
+        assert_eq!(Status::Expired.as_str(), "expired");
+        assert_eq!(Status::Other("custom".into()).as_str(), "custom");
+    }
+
+    // ── Visibility / Display ───────────────────────────────────────────────
+
+    #[test]
+    fn visibility_round_trips_snake_case() {
+        for (s, expect) in [
+            ("public", Visibility::Public),
+            ("restricted", Visibility::Restricted),
+            ("private", Visibility::Private),
+        ] {
+            let parsed: Visibility = serde_json::from_value(json!(s)).unwrap();
+            assert_eq!(parsed, expect);
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(s));
+        }
+        assert!(serde_json::from_value::<Visibility>(json!("Public")).is_err());
+    }
+
+    #[test]
+    fn identifier_display_matches_inner_string() {
+        let ctx = "acdp://r.example.com/12345678-1234-4321-8123-123456781234";
+        assert_eq!(CtxId(ctx.into()).to_string(), ctx);
+        let lin = "lin:sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        assert_eq!(LineageId(lin.into()).to_string(), lin);
+        let hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        assert_eq!(ContentHash(hash.into()).to_string(), hash);
+        assert_eq!(AgentDid::new("did:web:x").to_string(), "did:web:x");
+    }
+
+    #[test]
+    fn ctx_id_uuid_returns_none_for_malformed() {
+        // `uuid()` is best-effort: malformed input yields None, not a panic.
+        assert!(CtxId("not-a-ctx-id".into()).uuid().is_none());
+        assert!(CtxId("acdp://host/not-a-uuid".into()).uuid().is_none());
+    }
 }
