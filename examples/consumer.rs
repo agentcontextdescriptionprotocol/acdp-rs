@@ -1,13 +1,19 @@
 //! Example: retrieve and verify a context.
 //!
-//! Run with: `cargo run --example consumer --features client`
+//! Run with: `cargo run --example consumer`
+//!
+//! This example uses only the always-on core (crypto + types +
+//! validation), so it runs under `--no-default-features` too. The
+//! recommended network path it sketches needs the `client` feature — see
+//! `examples/end_to_end.rs` for a runnable version of that path.
 //!
 //! Two paths are shown:
 //!
 //! 1. **Recommended (network):** `VerifiedContext::fetch_report` runs
 //!    retrieve + schema + hash + DID + signature + per-DataRef recording in
 //!    one call, returning a structured `VerificationReport`. See the
-//!    commented sketch at the top of `main` for the call shape.
+//!    commented sketch at the top of `main` for the call shape, and
+//!    `examples/end_to_end.rs` for it running against a mock registry.
 //! 2. **Offline (this example):** for the sig-001 golden vector we bypass the
 //!    network and exercise the underlying primitives directly. Useful for
 //!    understanding what `fetch_report` does internally.

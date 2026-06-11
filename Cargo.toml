@@ -45,6 +45,16 @@ name              = "tls_conformance"
 path              = "tests/tls_conformance.rs"
 required-features = ["client", "server"]
 
+# The end-to-end example drives `RegistryClient` against a wiremock mock
+# registry, so it needs the `client` feature. Declared here (rather than
+# left to auto-discovery) so `--no-default-features` builds skip it
+# instead of failing to compile. `producer`, `consumer`, and
+# `supersession` use only the always-on core and need no gate.
+[[example]]
+name              = "end_to_end"
+path              = "examples/end_to_end.rs"
+required-features = ["client"]
+
 # CLI subprocess tests need the `cli` feature so the `acdp` binary is
 # actually built.
 [[test]]
