@@ -15,6 +15,18 @@ retrieve and verify them locally, discover them by keyword, and follow signed
 > Spec: [agentcontextdistributionprotocol/spec](https://github.com/agentcontextdistributionprotocol)
 > (RFC-ACDP-0001/0002/0003/0007).
 
+## Documentation
+
+Guides that complement the [rustdoc](https://docs.rs/acdp) live in [`docs/`](./docs/):
+
+- [Getting Started](./docs/getting-started.md) — install, features, first publish/verify.
+- [Architecture](./docs/architecture.md) — the hash/sign/state layering and module map.
+- [Producing contexts](./docs/producing.md) · [Consuming & verifying](./docs/consuming.md) · [Errors & retries](./docs/errors.md)
+- [Security model](./docs/security.md) — the SSRF/HTTPS/size defenses applied by default.
+- [Implementing a registry](./docs/registry.md) · [CLI reference](./docs/cli.md) · [Language bindings](./docs/bindings.md) · [Conformance & testing](./docs/conformance.md)
+
+These docs are additive to the [specification](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol) and cite the relevant RFC sections rather than restating them.
+
 ## Install
 
 ```bash
@@ -80,8 +92,10 @@ RFC-ACDP-0008):
   the algorithm declared by the resolved DID verification method.
 - **Ed25519 mandatory** (RFC-ACDP-0001 §5.10).
 
-DNS-rebinding pin (§7.6) is documented in
-`plans/defered/README.md` as a follow-up.
+DNS-rebinding protection (§7.6) is **active**: `SafeDnsResolver` is wired into
+every HTTP client's `dns_resolver` hook, so resolved IPs are filtered through
+the `SsrfPolicy` at DNS time, before any TCP connect. See
+[`docs/security.md`](./docs/security.md).
 
 ## Quick start
 
