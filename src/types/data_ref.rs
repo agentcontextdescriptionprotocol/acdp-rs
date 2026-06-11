@@ -346,3 +346,200 @@ pub enum EmbeddedEncoding {
     /// Binary data encoded as standard base64, stored as a JSON string.
     Base64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── is_dotted_namespace_scheme ─────────────────────────────────────────
+
+    #[test]
+    fn dotted_namespace_scheme_accepts_valid() {
+        for s in [
+            "kafka.offset",
+            "ipfs.cid",
+            "db.row",
+            "a.b",
+            "a1.b2.c3",
+            "with-hyphen.part-two",
+        ] {
+            assert!(is_dotted_namespace_scheme(s), "should accept {s:?}");
+        }
+    }
+
+    #[test]
+    fn dotted_namespace_scheme_rejects_invalid() {
+        for s in [
+            "",              // empty
+            "nodot",         // missing separator
+            "Kafka.offset",  // uppercase first char
+            "kafka.Offset",  // uppercase in second segment
+            "kafka..offset", // empty middle segment
+            ".leading",      // empty leading segment
+            "trailing.",     // empty trailing segment
+            "1kafka.offset", // segment must start with a letter
+            "kafka.1offset", // second segment must start with a letter
+            "kafka.off_set", // underscore not permitted
+        ] {
+            assert!(!is_dotted_namespace_scheme(s), "should reject {s:?}");
+        }
+    }
+
+    // ── try_structured / structured ────────────────────────────────────────
+
+    #[test]
+    fn try_structured_ok_inserts_scheme_and_extra() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("offset".into(), json!(42));
+        let dr = DataRef::try_structured(DataRefType::RawData, "kafka.offset", extra).unwrap();
+        match dr.location {
+            Some(Location::Structured(map)) => {
+                assert_eq!(map["scheme"], json!("kafka.offset"));
+                assert_eq!(map["offset"], json!(42));
+            }
+            other => panic!("expected structured location, got {other:?}"),
+        }
+        assert!(dr.embedded.is_none(), "structured locator has no embedded");
+    }
+
+    #[test]
+    fn try_structured_rejects_bad_scheme() {
+        let err = DataRef::try_structured(DataRefType::RawData, "nodot", serde_json::Map::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::AcdpError::SchemaViolation(_)),
+            "bad scheme must be SchemaViolation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn structured_inserts_scheme_for_valid_input() {
+        // Valid scheme: avoids the debug_assert! in `structured`.
+        let dr = DataRef::structured(DataRefType::RawData, "ipfs.cid", serde_json::Map::new());
+        match dr.location {
+            Some(Location::Structured(map)) => assert_eq!(map["scheme"], json!("ipfs.cid")),
+            other => panic!("expected structured location, got {other:?}"),
+        }
+    }
+
+    // ── URI constructors ───────────────────────────────────────────────────
+
+    #[test]
+    fn uri_constructor_sets_location_without_hash() {
+        let dr = DataRef::uri(DataRefType::PrimaryResult, "https://x.example/d");
+        assert_eq!(dr.ref_type, DataRefType::PrimaryResult);
+        assert!(matches!(dr.location, Some(Location::Uri(ref u)) if u == "https://x.example/d"));
+        assert!(dr.content_hash.is_none());
+        assert!(dr.embedded.is_none());
+    }
+
+    #[test]
+    fn uri_verified_carries_content_hash() {
+        let hash = ContentHash(
+            "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5".into(),
+        );
+        let dr = DataRef::uri_verified(DataRefType::RawData, "https://x/d", hash.clone());
+        assert_eq!(dr.content_hash, Some(hash));
+        assert!(matches!(dr.location, Some(Location::Uri(_))));
+    }
+
+    #[test]
+    fn type_bound_uri_shortcuts_pick_the_right_type() {
+        assert_eq!(
+            DataRef::primary_result_uri("u").ref_type,
+            DataRefType::PrimaryResult
+        );
+        assert_eq!(DataRef::raw_data_uri("u").ref_type, DataRefType::RawData);
+        assert_eq!(
+            DataRef::supporting_info_uri("u").ref_type,
+            DataRefType::SupportingInfo
+        );
+        assert_eq!(
+            DataRef::derived_data_uri("u").ref_type,
+            DataRefType::DerivedData
+        );
+    }
+
+    // ── Embedded constructors ──────────────────────────────────────────────
+
+    #[test]
+    fn embedded_json_sets_json_encoding_and_format() {
+        let dr = DataRef::embedded_json(DataRefType::PrimaryResult, json!({"k": 1}));
+        let e = dr.embedded.expect("embedded set");
+        assert_eq!(e.encoding, EmbeddedEncoding::Json);
+        assert_eq!(e.content, json!({"k": 1}));
+        assert_eq!(dr.format.as_deref(), Some("application/json"));
+        assert!(dr.location.is_none(), "embedded ref has no location");
+    }
+
+    #[test]
+    fn embedded_utf8_stores_text_as_json_string() {
+        let dr = DataRef::embedded_utf8(DataRefType::SupportingInfo, "hello");
+        let e = dr.embedded.expect("embedded set");
+        assert_eq!(e.encoding, EmbeddedEncoding::Utf8);
+        assert_eq!(e.content, json!("hello"));
+    }
+
+    #[test]
+    fn embedded_base64_stores_payload_as_json_string() {
+        let dr = DataRef::embedded_base64(DataRefType::DerivedData, "aGVsbG8=");
+        let e = dr.embedded.expect("embedded set");
+        assert_eq!(e.encoding, EmbeddedEncoding::Base64);
+        assert_eq!(e.content, json!("aGVsbG8="));
+    }
+
+    #[test]
+    fn type_bound_json_shortcuts_pick_the_right_type() {
+        assert_eq!(
+            DataRef::primary_result_json(json!(1)).ref_type,
+            DataRefType::PrimaryResult
+        );
+        assert_eq!(
+            DataRef::derived_data_json(json!(1)).ref_type,
+            DataRefType::DerivedData
+        );
+    }
+
+    // ── Wire shape ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn data_ref_type_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(DataRefType::PrimaryResult).unwrap(),
+            json!("primary_result")
+        );
+        assert_eq!(
+            serde_json::to_value(DataRefType::RawData).unwrap(),
+            json!("raw_data")
+        );
+        assert_eq!(
+            serde_json::to_value(DataRefType::SupportingInfo).unwrap(),
+            json!("supporting_info")
+        );
+        assert_eq!(
+            serde_json::to_value(DataRefType::DerivedData).unwrap(),
+            json!("derived_data")
+        );
+    }
+
+    #[test]
+    fn embedded_content_rejects_unknown_field() {
+        // EmbeddedContent is `deny_unknown_fields`.
+        let raw = json!({"encoding": "utf8", "content": "x", "surprise": 1});
+        let parsed: Result<EmbeddedContent, _> = serde_json::from_value(raw);
+        assert!(parsed.is_err(), "unknown field must be rejected");
+    }
+
+    #[test]
+    fn constructed_uri_ref_round_trips_through_json() {
+        let dr = DataRef::uri(DataRefType::PrimaryResult, "https://x/d");
+        let v = serde_json::to_value(&dr).unwrap();
+        // `type` rename and omitted-None fields.
+        assert_eq!(v["type"], json!("primary_result"));
+        assert_eq!(v["location"], json!("https://x/d"));
+        assert!(v.as_object().unwrap().get("embedded").is_none());
+        let back: DataRef = serde_json::from_value(v).unwrap();
+        assert_eq!(back.ref_type, DataRefType::PrimaryResult);
+    }
+}

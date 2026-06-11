@@ -322,6 +322,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ed25519_from_slice_rejects_wrong_length() {
+        let err = SigningKey::from_slice(&[0u8; 31]).unwrap_err();
+        assert!(
+            matches!(err, AcdpError::InvalidSignature(ref m) if m.contains("32 bytes")),
+            "got {err:?}"
+        );
+        // Exactly 32 bytes is accepted.
+        assert!(SigningKey::from_slice(&[0u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn p256_from_slice_rejects_wrong_length() {
+        let err = P256SigningKey::from_slice(&[1u8; 33]).unwrap_err();
+        assert!(
+            matches!(err, AcdpError::SchemaViolation(ref m) if m.contains("32 bytes")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn p256_from_bytes_rejects_invalid_scalar() {
+        // An all-zero scalar is not a valid P-256 private key.
+        let err = P256SigningKey::from_bytes(&[0u8; 32]).unwrap_err();
+        assert!(
+            matches!(err, AcdpError::SchemaViolation(ref m) if m.contains("p256 key parse")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn ed25519_generate_produces_distinct_keys() {
         // Two fresh OsRng draws MUST produce different public keys.
         let a = SigningKey::generate();
