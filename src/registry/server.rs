@@ -325,6 +325,20 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         req: &PublishRequest,
         idempotency_key: Option<&str>,
     ) -> Result<PublishResponse, AcdpError> {
+        self.publish_verified_did_key_in_tenant(req, idempotency_key, None)
+    }
+
+    /// Like [`Self::publish_verified_did_key`] but binds the publish to a
+    /// tenant so a multi-tenant store persists `tenant_id` atomically with
+    /// the context row — the same contract as
+    /// [`Self::publish_verified_in_tenant`]. `tenant = None` is identical
+    /// to [`Self::publish_verified_did_key`].
+    pub fn publish_verified_did_key_in_tenant(
+        &self,
+        req: &PublishRequest,
+        idempotency_key: Option<&str>,
+        tenant: Option<&str>,
+    ) -> Result<PublishResponse, AcdpError> {
         self.rate_limiter.check_publish(&req.agent_id)?;
 
         let raw_bytes = serde_json::to_vec(req)?.len();
@@ -345,7 +359,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             None
         };
 
-        self.commit_via_store(req, idempotency_key, None, fingerprint)
+        self.commit_via_store(req, idempotency_key, tenant, fingerprint)
     }
 
     /// **NOT RFC-conformant.** Skips DID resolution and signature
