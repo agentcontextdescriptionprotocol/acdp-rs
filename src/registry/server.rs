@@ -450,16 +450,24 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
                 tenant,
                 receipt_minter: minter.as_deref(),
             })?;
-        let response = match outcome {
-            crate::registry::store::PublishCommitOutcome::Inserted(r)
-            | crate::registry::store::PublishCommitOutcome::IdempotentReplay(r) => r,
+        let (response, replayed) = match outcome {
+            crate::registry::store::PublishCommitOutcome::Inserted(r) => (r, false),
+            crate::registry::store::PublishCommitOutcome::IdempotentReplay(r) => (r, true),
         };
         // RFC-ACDP-0010 §7 belt-and-braces: a receipts-advertising
         // registry has no degraded mode. A store implementation that
         // ignores `receipt_minter` (e.g. compiled against the older
         // trait shape) must fail loudly here, not silently persist a
         // receipt-less context.
-        if minted_expected && response.registry_receipt.is_none() {
+        //
+        // Scoped to NEWLY INSERTED contexts only: an idempotent replay
+        // returns the ORIGINAL publish response verbatim, and that
+        // original may legitimately predate receipts (a record minted
+        // before the registry enabled its signer, still inside the
+        // idempotency TTL). Failing such a replay would turn a correct
+        // producer retry into a 500 across the upgrade boundary — §7
+        // attests what was persisted at publish time, not re-mint time.
+        if minted_expected && !replayed && response.registry_receipt.is_none() {
             return Err(AcdpError::RegistryInternal(
                 "receipt signer is configured but the store returned no receipt — \
                  the RegistryStore implementation must invoke PublishCommit::receipt_minter \
@@ -1573,6 +1581,83 @@ mod tests {
             .publish_verified_did_key(&tampered, None)
             .unwrap_err();
         assert!(matches!(err, AcdpError::HashMismatch { .. }), "got {err:?}");
+    }
+
+    /// Upgrade boundary: a registry that enables receipts must still
+    /// honor idempotent replays of records minted BEFORE the signer
+    /// existed. The §7 no-degraded-mode check applies to newly inserted
+    /// contexts only — a replayed pre-receipts response (no
+    /// `registry_receipt`) is returned verbatim, not failed as a 500.
+    #[test]
+    fn receiptless_idempotent_replay_survives_enabling_receipts() {
+        let mut c = caps();
+        c.acdp_version = "0.2.0".into();
+        c.supported_did_methods.push("did:key".into());
+        c.supports_idempotency_key = true;
+        c.limits.idempotency_key_ttl_seconds = Some(86_400);
+        let server = RegistryServer::new(InMemoryStore::new(), c, "registry.example.com")
+            .with_receipt_signer(
+                crate::types::receipt::ReceiptSigner::new(
+                    SigningKey::from_bytes(&[0x11u8; 32]),
+                    "did:web:registry.example.com",
+                    "did:web:registry.example.com#receipt-key-1",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Simulate a record persisted before receipts were enabled: the
+        // stored response carries no `registry_receipt`.
+        let req = did_key_request();
+        let pre_receipts_response = crate::types::publish::PublishResponse {
+            ctx_id: CtxId(format!(
+                "acdp://registry.example.com/{}",
+                uuid::Uuid::new_v4()
+            )),
+            lineage_id: crate::crypto::derive_lineage_id(&CtxId(
+                "acdp://registry.example.com/v1".into(),
+            )),
+            version: 1,
+            created_at: crate::time::trunc_ms(chrono::Utc::now()),
+            status: Status::Active,
+            registry_receipt: None,
+        };
+        server
+            .store()
+            .idempotency_record(
+                &req.agent_id,
+                "pre-receipts-key",
+                &req.content_hash,
+                &pre_receipts_response,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+            .unwrap();
+
+        // Same agent + key + content_hash → the replay must return the
+        // original receipt-less response, not RegistryInternal.
+        let resp = server
+            .publish_verified_did_key(&req, Some("pre-receipts-key"))
+            .expect("replay of a pre-receipts record must succeed");
+        assert_eq!(resp.ctx_id, pre_receipts_response.ctx_id);
+        assert!(
+            resp.registry_receipt.is_none(),
+            "replay returns the original response verbatim"
+        );
+
+        // A FRESH publish on the same server still enforces minting.
+        let p2 = Producer::new_did_key(SigningKey::from_bytes(&[8u8; 32]));
+        let fresh = p2
+            .publish_request()
+            .title("fresh after enabling receipts")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let fresh_resp = server.publish_verified_did_key(&fresh, None).unwrap();
+        assert!(
+            fresh_resp.registry_receipt.is_some(),
+            "new inserts on a receipts registry must mint"
+        );
     }
 
     /// `publish_verified_did_key` refuses did:web producers — they need
