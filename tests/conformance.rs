@@ -576,12 +576,24 @@ fn did_web_enforcement_fixtures() {
     use acdp::producer::Producer;
     use acdp::types::{AgentDid, ContextType};
 
-    // pub-008: did:key agent_id rejected
+    // pub-008 (updated for ACDP 0.2): a *well-formed* did:key agent_id
+    // is accepted at schema level — did:key is a resolvable method as of
+    // 0.2 (registry acceptance is gated separately via
+    // `supported_did_methods`). An unresolvable method is still rejected,
+    // as is a did:key key_id whose fragment is not the key itself.
     let key = SigningKey::from_bytes(&[0u8; 32]);
+    let p = Producer::new_did_key(key);
+    p.publish_request()
+        .title("t")
+        .context_type(ContextType::DataSnapshot)
+        .build()
+        .expect("pub-008 (0.2): well-formed did:key agent_id MUST be accepted");
+
+    // Unresolvable method (no resolver exists) → rejected.
     let p = Producer::new(
-        key,
-        AgentDid::new("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSshBHqcWv6Vt8mfWAFs"),
-        "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSshBHqcWv6Vt8mfWAFs#key-1",
+        SigningKey::from_bytes(&[0u8; 32]),
+        AgentDid::new("did:example:12345"),
+        "did:example:12345#key-1",
     );
     let err = p
         .publish_request()
@@ -591,7 +603,25 @@ fn did_web_enforcement_fixtures() {
         .unwrap_err();
     assert!(
         matches!(err, acdp::AcdpError::SchemaViolation(_)),
-        "pub-008: did:key agent_id MUST be rejected"
+        "pub-008: unresolvable agent_id method MUST be rejected"
+    );
+
+    // did:key key_id with a non-key fragment is structurally invalid:
+    // the did:key document's only verification method is the key itself.
+    let p = Producer::new(
+        SigningKey::from_bytes(&[0u8; 32]),
+        AgentDid::new("did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp"),
+        "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp#key-1",
+    );
+    let err = p
+        .publish_request()
+        .title("t")
+        .context_type(ContextType::DataSnapshot)
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(err, acdp::AcdpError::SchemaViolation(_)),
+        "pub-009 (0.2): did:key key_id fragment MUST equal the key itself"
     );
 
     // pub-010: did:key contributor accepted
@@ -1947,5 +1977,358 @@ mod registry_behavior {
                 "ret-002: current MUST carry status=expired so the consumer knows it lapsed"
             );
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ACDP 0.2.0 Trust & Hardening fixtures (RFC-ACDP-0010 + RFC-ACDP-0001
+// §5.4/§5.11.1/§6 amendments). Arithmetic fixtures are executed
+// end-to-end; behavioral fixtures are bound to the library calls that
+// implement them (full client/server behavior lives in
+// `tests/receipts.rs`).
+// ═══════════════════════════════════════════════════════════════════════
+
+/// sig-003 — did:key golden vector: identity derivation, canonical
+/// form, content hash, and signature, end-to-end through the builder.
+#[test]
+fn sig_003_did_key_golden_fixture() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/sig-003-did-key-golden.json");
+    if !path.exists() {
+        return;
+    }
+    let v = read_json(&path);
+    let seed: [u8; 32] = hex::decode(v["test_keypair"]["private_seed_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let vector = &v["vectors"][0];
+    let expected = &vector["expected"];
+
+    // Identity derivation.
+    let p = acdp::producer::Producer::new_did_key(acdp::crypto::SigningKey::from_bytes(&seed));
+
+    // Canonical form + hash over the fixture's ProducerContent.
+    let pc = &vector["producer_content"];
+    let (canonical, hash) = acdp::crypto::canonical_preimage(pc).unwrap();
+    assert_eq!(
+        std::str::from_utf8(&canonical).unwrap(),
+        expected["canonical_form"].as_str().unwrap(),
+        "sig-003: canonical form mismatch"
+    );
+    assert_eq!(hash.as_str(), expected["content_hash"].as_str().unwrap());
+
+    // Builder round trip reproduces the wire request.
+    let req = p
+        .publish_request()
+        .acdp_version(pc["acdp_version"].as_str().unwrap())
+        .title(pc["title"].as_str().unwrap())
+        .context_type(acdp::types::ContextType::DataSnapshot)
+        .visibility(acdp::types::Visibility::Public)
+        .build()
+        .unwrap();
+    assert_eq!(
+        req.agent_id.as_str(),
+        v["test_keypair"]["did_key"].as_str().unwrap()
+    );
+    assert_eq!(
+        req.content_hash.as_str(),
+        expected["content_hash"].as_str().unwrap()
+    );
+    assert_eq!(
+        req.signature.value,
+        expected["signature_value_base64"].as_str().unwrap()
+    );
+    acdp::crypto::verify_publish_request_signature_offline(&req).unwrap();
+}
+
+/// fp-001 — key-fingerprint encoding vectors, one per algorithm
+/// (RFC-ACDP-0010 §6).
+#[test]
+fn fp_001_fingerprint_vectors_fixture() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/fp-001-key-fingerprint-vectors.json");
+    if !path.exists() {
+        return;
+    }
+    let v = read_json(&path);
+    for vector in v["vectors"].as_array().unwrap() {
+        let key_bytes = hex::decode(vector["input"]["public_key_hex"].as_str().unwrap()).unwrap();
+        let expected = vector["expected"]["key_fingerprint"].as_str().unwrap();
+        let got = match vector["algorithm"].as_str().unwrap() {
+            "ed25519" => {
+                let arr: [u8; 32] = key_bytes.as_slice().try_into().unwrap();
+                acdp::crypto::fingerprint_ed25519(&arr)
+            }
+            "ecdsa-p256" => acdp::crypto::fingerprint_p256_sec1(&key_bytes).unwrap(),
+            other => panic!("unknown fp-001 algorithm {other}"),
+        };
+        assert_eq!(got, expected, "fp-001 '{}'", vector["name"]);
+    }
+}
+
+/// rcpt-001 — receipt golden vector: canonical preimage, receipt hash,
+/// signature, both via raw-JSON verification and a deterministic
+/// re-mint (RFC-ACDP-0010 §5).
+#[test]
+fn rcpt_001_receipt_golden_fixture() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/rcpt-001-receipt-golden.json");
+    if !path.exists() {
+        return;
+    }
+    let v = read_json(&path);
+    let vector = &v["vectors"][0];
+    let expected = &vector["expected"];
+    let wire = &expected["registry_receipt"];
+
+    // Raw-JSON preimage + hash.
+    let unsigned = &vector["receipt_unsigned"];
+    let hash = acdp::types::receipt::RegistryReceipt::preimage_hash_of_value(unsigned).unwrap();
+    assert_eq!(hash.as_str(), expected["receipt_hash"].as_str().unwrap());
+
+    // Wire receipt verifies against the registry test public key.
+    let pub_bytes: [u8; 32] = hex::decode(
+        v["registry_test_keypair"]["public_key_hex"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    let receipt = acdp::types::receipt::RegistryReceipt::from_value(wire).unwrap();
+    let raw_hash = acdp::types::receipt::RegistryReceipt::preimage_hash_of_value(wire).unwrap();
+    receipt
+        .verify_signature_against_hash(&raw_hash, Some(&pub_bytes), None)
+        .unwrap();
+
+    // Deterministic re-mint reproduces the signature byte-for-byte.
+    let seed: [u8; 32] = hex::decode(
+        v["registry_test_keypair"]["private_seed_hex"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    let signer = acdp::types::receipt::ReceiptSigner::new(
+        acdp::crypto::SigningKey::from_bytes(&seed),
+        unsigned["registry_did"].as_str().unwrap(),
+        v["registry_test_keypair"]["key_id"].as_str().unwrap(),
+    )
+    .unwrap();
+    let minted = signer
+        .mint(
+            &acdp::types::CtxId(unsigned["ctx_id"].as_str().unwrap().into()),
+            &acdp::types::LineageId(unsigned["lineage_id"].as_str().unwrap().into()),
+            unsigned["origin_registry"].as_str().unwrap(),
+            chrono::DateTime::parse_from_rfc3339(unsigned["created_at"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            &acdp::types::ContentHash(unsigned["content_hash"].as_str().unwrap().into()),
+            unsigned["key_fingerprint"].as_str().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        minted.signature.value,
+        expected["signature_value_base64"].as_str().unwrap(),
+        "rcpt-001: deterministic Ed25519 re-mint must reproduce the fixture signature"
+    );
+
+    // Producer-key fingerprint (verification step 5).
+    let prod_pub: [u8; 32] = hex::decode(v["producer_key"]["public_key_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        acdp::crypto::fingerprint_ed25519(&prod_pub),
+        unsigned["key_fingerprint"].as_str().unwrap()
+    );
+}
+
+/// can-012 — the hash-divergence corpus: every vector's canonical form
+/// and hash must reproduce exactly (omitted vs explicit acdp_version,
+/// sub-ms timestamps, empty-vs-absent-vs-null metadata).
+#[test]
+fn can_012_divergence_corpus_fixture() {
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/can-012-divergence-corpus.json");
+    if !path.exists() {
+        return;
+    }
+    let v = read_json(&path);
+    for vector in v["vectors"].as_array().unwrap() {
+        let pc = &vector["input"];
+        let (canonical, hash) = acdp::crypto::canonical_preimage(pc).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&canonical).unwrap(),
+            vector["expected"]["canonical_form"].as_str().unwrap(),
+            "can-012 '{}': canonical form",
+            vector["name"]
+        );
+        assert_eq!(
+            hash.as_str(),
+            vector["expected"]["content_hash_field_value"]
+                .as_str()
+                .unwrap(),
+            "can-012 '{}': hash",
+            vector["name"]
+        );
+    }
+}
+
+/// dk-001/002/004 — pure did:key resolution rejections; dk-003 — the
+/// capabilities gate (RFC-ACDP-0001 §5.4/§5.11.1).
+#[test]
+fn dk_fixtures_did_key_rejections() {
+    let Some(root) = spec_root() else { return };
+    let dir = root.join("schemas/conformance");
+
+    // dk-001: unsupported multicodec (secp256k1).
+    let p = dir.join("dk-001-wrong-multicodec-prefix.json");
+    if p.exists() {
+        let v = read_json(&p);
+        let did = v["input"]["agent_id"].as_str().unwrap();
+        let err = acdp::did::resolve_did_key(did).unwrap_err();
+        assert!(
+            matches!(err, acdp::AcdpError::KeyResolution(_)),
+            "dk-001: got {err:?}"
+        );
+    }
+
+    // dk-002: malformed multibase payloads.
+    let p = dir.join("dk-002-malformed-multibase.json");
+    if p.exists() {
+        let v = read_json(&p);
+        for case in v["input"]["cases"].as_array().unwrap() {
+            let did = case["agent_id"].as_str().unwrap();
+            assert!(
+                acdp::did::resolve_did_key(did).is_err(),
+                "dk-002 case '{}' must fail",
+                case["case"]
+            );
+        }
+    }
+
+    // dk-004: fragment ≠ method-specific identifier.
+    let p = dir.join("dk-004-fragment-mismatch.json");
+    if p.exists() {
+        let v = read_json(&p);
+        let key_id = v["input"]["signature_key_id"].as_str().unwrap();
+        let err = acdp::did::resolve_did_key_url(key_id).unwrap_err();
+        assert!(
+            matches!(err, acdp::AcdpError::KeyResolution(_)),
+            "dk-004: got {err:?}"
+        );
+    }
+
+    // dk-003: registry without "did:key" in supported_did_methods
+    // rejects a flawless did:key request with key_resolution_failed.
+    // The capability gate lives in the server-feature PublishValidator.
+    #[cfg(feature = "server")]
+    {
+        let p = dir.join("dk-003-did-key-not-advertised.json");
+        if p.exists() {
+            use acdp::types::capabilities::{CapabilitiesDocument, Limits};
+            let caps = CapabilitiesDocument {
+                acdp_version: "0.2.0".into(),
+                registry_did: "did:web:registry.example.com".into(),
+                supported_signature_algorithms: vec!["ed25519".into()],
+                supported_did_methods: vec!["did:web".into()],
+                profiles: vec!["acdp-registry-core".into()],
+                limits: Limits {
+                    max_payload_bytes: 1_048_576,
+                    max_embedded_bytes: 65_536,
+                    idempotency_key_ttl_seconds: None,
+                },
+                read_authentication_methods: vec![],
+                anonymous_public_reads: true,
+                supports_idempotency_key: false,
+                extensions: Default::default(),
+            };
+            let producer = acdp::producer::Producer::new_did_key(
+                acdp::crypto::SigningKey::from_bytes(&[0x42u8; 32]),
+            );
+            let req = producer
+                .publish_request()
+                .acdp_version("0.2.0")
+                .title("Golden test vector — did:key first version")
+                .context_type(acdp::types::ContextType::DataSnapshot)
+                .visibility(acdp::types::Visibility::Public)
+                .build()
+                .unwrap();
+            let validator = acdp::registry::PublishValidator::new(&caps);
+            let raw = serde_json::to_vec(&req).unwrap().len();
+            let err = validator.validate_post_schema(&req, raw).unwrap_err();
+            assert!(
+                matches!(err, acdp::AcdpError::KeyResolution(_)),
+                "dk-003: capability gate must emit key_resolution_failed, got {err:?}"
+            );
+        }
+    }
+}
+
+/// rcpt-002/003/004 — receipt verification rejections, data-driven
+/// from the fixtures (full client behavior in `tests/receipts.rs`).
+#[test]
+fn rcpt_negative_fixtures() {
+    let Some(root) = spec_root() else { return };
+    let dir = root.join("schemas/conformance");
+
+    // rcpt-002: tampered created_at → preimage hash diverges →
+    // signature no longer verifies.
+    let p = dir.join("rcpt-002-tampered-created-at.json");
+    if p.exists() {
+        let v = read_json(&p);
+        let wire = &v["input"]["registry_receipt"];
+        let tampered_hash =
+            acdp::types::receipt::RegistryReceipt::preimage_hash_of_value(wire).unwrap();
+        assert_eq!(
+            tampered_hash.as_str(),
+            v["expected"]["tampered_preimage_hash"].as_str().unwrap()
+        );
+        // The signature (made over the ORIGINAL hash) must fail against
+        // the tampered preimage.
+        let pub_hex = "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737";
+        let pub_bytes: [u8; 32] = hex::decode(pub_hex).unwrap().try_into().unwrap();
+        let receipt = acdp::types::receipt::RegistryReceipt::from_value(wire).unwrap();
+        let err = receipt
+            .verify_signature_against_hash(&tampered_hash, Some(&pub_bytes), None)
+            .unwrap_err();
+        assert!(matches!(err, acdp::AcdpError::InvalidReceipt(_)));
+    }
+
+    // rcpt-003: fingerprint mismatch fails the §8 step 5 cross-check.
+    let p = dir.join("rcpt-003-key-fingerprint-mismatch.json");
+    if p.exists() {
+        let v = read_json(&p);
+        let correct = v["input"]["resolved_producer_key"]["correct_fingerprint"]
+            .as_str()
+            .unwrap();
+        let pub_bytes: [u8; 32] = hex::decode(
+            v["input"]["resolved_producer_key"]["public_key_hex"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert_eq!(acdp::crypto::fingerprint_ed25519(&pub_bytes), correct);
+    }
+
+    // rcpt-004: registry_did ≠ serving authority — the cross-check the
+    // client runs against the fetched-from authority.
+    let p = dir.join("rcpt-004-registry-did-mismatch.json");
+    if p.exists() {
+        let v = read_json(&p);
+        let serving = v["input"]["serving_authority"].as_str().unwrap();
+        let claimed = v["input"]["receipt_excerpt"]["registry_did"]
+            .as_str()
+            .unwrap();
+        assert_ne!(
+            acdp::did::authority_to_did_web(serving),
+            claimed,
+            "rcpt-004 premise: the claimed registry_did must not match the serving authority"
+        );
     }
 }

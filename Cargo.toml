@@ -62,6 +62,14 @@ name              = "cli"
 path              = "tests/cli.rs"
 required-features = ["cli"]
 
+# Receipt end-to-end tests (RFC-ACDP-0010) drive the in-process TLS
+# registry harness: `client` for the resolver/RegistryClient, `server`
+# for RegistryServer + InMemoryStore.
+[[test]]
+name              = "receipts"
+path              = "tests/receipts.rs"
+required-features = ["client", "server"]
+
 [dependencies]
 # Serialisation
 serde      = { version = "1", features = ["derive"] }

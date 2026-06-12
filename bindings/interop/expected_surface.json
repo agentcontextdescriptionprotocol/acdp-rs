@@ -6,7 +6,9 @@
       "build_publish_request",
       "build_supersede_request",
       "from_seed",
+      "from_seed_did_key",
       "generate",
+      "generate_did_key",
       "key_id",
       "public_key_b64",
       "seed_bytes",
@@ -18,7 +20,9 @@
       "build_supersede_request",
       "did_verification_method",
       "from_seed",
+      "from_seed_did_key",
       "generate",
+      "generate_did_key",
       "key_id",
       "public_key_jwk",
       "public_key_sec1_b64",
@@ -26,7 +30,13 @@
       "sign_challenge"
     ],
     "AcdpVerifier": [
+      "canonical_preimage",
+      "explain_hash_mismatch",
+      "fingerprint_ed25519_b64",
+      "verify_body_offline",
       "verify_content_hash",
+      "verify_publish_request_offline",
+      "verify_receipt",
       "verify_signature",
       "verify_signature_p256"
     ],

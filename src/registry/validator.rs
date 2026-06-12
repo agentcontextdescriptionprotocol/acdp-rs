@@ -163,6 +163,27 @@ impl<'a> PublishValidator<'a> {
             )));
         }
 
+        // Step 5.5: DID-method gate — the producer's method must be one
+        // this registry advertises in `supported_did_methods` (ACDP 0.2:
+        // did:key acceptance is a per-registry capabilities decision;
+        // did:web is mandatory for every registry). Maps to
+        // `key_resolution_failed` (permanent): the registry has no
+        // resolver for the method, and no retry will grow one.
+        let agent_method = req
+            .agent_id
+            .as_str()
+            .splitn(3, ':')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(":");
+        if !self.caps.supports_did_method(&agent_method) {
+            return Err(AcdpError::KeyResolution(format!(
+                "agent_id method '{agent_method}' is not in this registry's \
+                 supported_did_methods {:?}",
+                self.caps.supported_did_methods
+            )));
+        }
+
         // Step 6: key-id binding — DID portion must equal agent_id
         let key_id = &req.signature.key_id;
         let did_part = key_id.split_once('#').map(|(d, _)| d).ok_or_else(|| {

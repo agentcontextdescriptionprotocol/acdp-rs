@@ -5,6 +5,85 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — ACDP 0.2 Trust & Hardening
+
+Implements the four workstreams of
+`plans/acdp-0.2-trust-hardening-2026-06-12.md`, verified against the
+spec's published 0.2.0 Draft (RFC-ACDP-0010 + the RFC-ACDP-0001
+amendments) and its conformance pack: `sig-003`, `fp-001`, `rcpt-001`
+(arithmetic golden vectors, reproduced byte-for-byte), `can-012`
+(divergence corpus), `dk-001..004`, and `rcpt-002..004` are all
+executed by `tests/conformance.rs`; `rot-001` and `fed-009` behaviors
+are covered by `tests/receipts.rs`. `ACDP_VERSION` is now `0.2.0` and
+the builder default emits it explicitly (RFC-ACDP-0001 §6: the
+omission default is closed for 0.2.0 builders). The receipt object is
+a CLOSED schema per RFC-ACDP-0010 §4; receipt verification hashes the
+raw wire JSON (never a re-serialized struct) and binds `lineage_id` /
+`origin_registry` / `created_at` to the accompanying body per §8
+step 3. `acdp-registry-receipts` requires capabilities
+`acdp_version >= 0.2.0`, and `publish_unverified_for_tests` is
+unavailable on receipts-advertising registries (§7: no degraded
+mode).
+
+### Added — did:key (WS-C)
+- `did::key`: pure offline `did:key` resolution (Ed25519 + P-256
+  compressed, multicodec-checked), encoding helpers, and the
+  `did:key:z<mb>#z<mb>` key-URL convention. No network, no SSRF
+  surface; verification outlives the producer's infrastructure.
+- `Producer::new_did_key` / `Producer::new_did_key_p256` — identity
+  derived from the key, no domain or DID hosting required.
+- `crypto::verify_body_offline` /
+  `verify_publish_request_signature_offline` /
+  `verify_did_key_envelope` — full did:key verification with
+  `--no-default-features`.
+- `RegistryServer::publish_verified_did_key` — RFC-conformant publish
+  without the `client` feature; gated on `supported_did_methods`
+  advertising `"did:key"` (rejected with `key_resolution_failed`
+  otherwise).
+
+### Added — registry receipts (WS-A, RFC-ACDP-0010 draft)
+- `types::receipt::{RegistryReceipt, ReceiptSigner}` — registry-signed
+  attestation binding `ctx_id` / `lineage_id` / `origin_registry` /
+  `created_at` / `key_fingerprint` to the producer `content_hash`.
+  Preimage construction is identical to the producer signature
+  (JCS minus `signature`, sign the ASCII `"sha256:<hex>"` string).
+- `crypto::fingerprint` — pinned `key_fingerprint` encoding (SHA-256
+  over raw Ed25519 / SEC1-compressed P-256 public key bytes).
+- `RegistryServer::with_receipt_signer` — mints receipts atomically
+  with persistence (via the new `PublishCommit::receipt_minter` hook),
+  returns them in `PublishResponse::registry_receipt`, and advertises
+  the `acdp-registry-receipts` profile.
+- Client verification: `client::verify_receipt_value`, the
+  `ReceiptPolicy` (`Ignore` / `VerifyIfPresent` default / `Require`)
+  policy axis, and `VerifiedContext::{verified_receipt, key_status}`.
+- New wire error code `invalid_receipt` (`AcdpError::InvalidReceipt`,
+  permanent).
+
+### Added — historical key validity (WS-B)
+- `HistoricalKeyPolicy::AcceptWithReceipt` (default): a producer key
+  rotated out of `assertionMethod` but retained in
+  `verificationMethod` verifies as
+  `KeyAuthorization::HistoricallyAuthorized` **only** when a verified
+  receipt attests its fingerprint; fails closed otherwise.
+
+### Changed — sharp edges (WS-D)
+- **BREAKING (hash-visible):** `RequestBuilder` now emits
+  `acdp_version` explicitly by default. The omitted and explicit forms
+  are distinct JCS preimages; requests built with default settings
+  hash differently than under 0.1.x. Use
+  `RequestBuilder::omit_acdp_version()` to reproduce omitted-form
+  hashes (e.g. the `sig-001` golden vector).
+- **BREAKING (API):** `VerificationPolicy::verify_registry_receipt`
+  (bool) replaced by the `receipts: ReceiptPolicy` /
+  `historical_keys: HistoricalKeyPolicy` fields;
+  `PublishCommit` gains `receipt_minter`; `PublishResponse` gains
+  `registry_receipt`.
+- `crypto::{canonical_preimage, explain_hash_mismatch}` — divergence
+  diagnostics that name the known cross-implementation hash pitfalls
+  (acdp_version toggle, null-vs-absent, sub-ms timestamps).
+- Lineage anchoring and idempotency atomicity contracts documented on
+  `RegistryStore` (the `InMemoryStore` already implements both).
+
 ## [0.1.0] - 2026-05-19
 
 First public release. Full conformance with the **ACDP v0.1.0 Final**

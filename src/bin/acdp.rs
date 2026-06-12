@@ -171,6 +171,7 @@ fn classify(e: &AcdpError) -> &'static str {
         AcdpError::KeyResolution(_) => "key_resolution_failed",
         AcdpError::KeyResolutionUnreachable(_) => "key_resolution_unreachable",
         AcdpError::CrossRegistryResolutionFailed(_) => "cross_registry_resolution_failed",
+        AcdpError::InvalidReceipt(_) => "invalid_receipt",
         AcdpError::PayloadTooLarge(_) => "payload_too_large",
         AcdpError::EmbeddedTooLarge(_) => "embedded_too_large",
         AcdpError::UnsupportedAlgorithm(_) => "unsupported_algorithm",

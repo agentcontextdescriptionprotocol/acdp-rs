@@ -49,6 +49,11 @@ pub struct RegistryServer<S: RegistryStore, L: RateLimiter = NoopRateLimiter> {
     caps: CapabilitiesDocument,
     authority: String,
     rate_limiter: L,
+    /// Receipt minting identity (ACDP 0.2, RFC-ACDP-0010). `None` =
+    /// 0.1.0-mode registry (no receipts). Set via
+    /// [`Self::with_receipt_signer`], which also advertises the
+    /// `acdp-registry-receipts` profile.
+    receipt_signer: Option<crate::types::receipt::ReceiptSigner>,
 }
 
 impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
@@ -62,6 +67,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             caps,
             authority: authority.into(),
             rate_limiter: NoopRateLimiter,
+            receipt_signer: None,
         }
     }
 
@@ -109,6 +115,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             caps,
             authority,
             rate_limiter: NoopRateLimiter,
+            receipt_signer: None,
         })
     }
 
@@ -141,6 +148,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             caps,
             authority,
             rate_limiter: NoopRateLimiter,
+            receipt_signer: None,
         })
     }
 }
@@ -153,7 +161,71 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             caps: self.caps,
             authority: self.authority,
             rate_limiter: limiter,
+            receipt_signer: self.receipt_signer,
         }
+    }
+
+    /// Configure receipt minting (ACDP 0.2, RFC-ACDP-0010). Every
+    /// subsequent verified publish mints a registry-signed receipt
+    /// atomically with persistence, returns it in the publish response,
+    /// and serves it on retrieval.
+    ///
+    /// Also advertises the `acdp-registry-receipts` profile — a
+    /// registry without a signing key MUST NOT advertise it, so the
+    /// profile is bound to this call rather than to raw capabilities
+    /// input. Fails if the signer's `registry_did` does not match
+    /// `caps.registry_did` (a receipt minted under a foreign DID would
+    /// fail every consumer's serving-authority cross-check).
+    ///
+    /// Note: [`Self::publish_unverified_for_tests`] never mints — the
+    /// producer key is not resolved on that path, so a fingerprint
+    /// attestation would be false.
+    pub fn with_receipt_signer(
+        mut self,
+        signer: crate::types::receipt::ReceiptSigner,
+    ) -> Result<Self, AcdpError> {
+        if signer.registry_did() != self.caps.registry_did {
+            return Err(AcdpError::SchemaViolation(format!(
+                "receipt signer registry_did '{}' ≠ capabilities.registry_did '{}'",
+                signer.registry_did(),
+                self.caps.registry_did
+            )));
+        }
+        // RFC-ACDP-0010 §11: registries advertising the receipts
+        // profile MUST advertise acdp_version >= 0.2.0. The version
+        // string must be exactly the `^\d+\.\d+\.\d+$` form the
+        // capabilities schema mandates — malformed input is an error,
+        // never coerced.
+        let parts: Vec<u64> = self
+            .caps
+            .acdp_version
+            .split('.')
+            .map(|p| p.parse::<u64>())
+            .collect::<Result<_, _>>()
+            .map_err(|_| {
+                AcdpError::SchemaViolation(format!(
+                    "capabilities.acdp_version '{}' is not a plain MAJOR.MINOR.PATCH version",
+                    self.caps.acdp_version
+                ))
+            })?;
+        let [major, minor, patch] = parts.as_slice() else {
+            return Err(AcdpError::SchemaViolation(format!(
+                "capabilities.acdp_version '{}' is not a plain MAJOR.MINOR.PATCH version",
+                self.caps.acdp_version
+            )));
+        };
+        if (*major, *minor, *patch) < (0, 2, 0) {
+            return Err(AcdpError::SchemaViolation(format!(
+                "acdp-registry-receipts requires capabilities.acdp_version >= 0.2.0, got '{}'",
+                self.caps.acdp_version
+            )));
+        }
+        let profile = crate::profile::Profile::RegistryReceipts.as_str();
+        if !self.caps.profiles.iter().any(|p| p == profile) {
+            self.caps.profiles.push(profile.to_string());
+        }
+        self.receipt_signer = Some(signer);
+        Ok(self)
     }
 
     /// Borrow the underlying store. Useful for tests that want to
@@ -216,6 +288,15 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // Steps 7–8: DID resolution + signature verification.
         crate::crypto::verify::verify_publish_request_signature(req, resolver).await?;
 
+        // RFC-ACDP-0010: fingerprint the key that was just resolved and
+        // verified, for the receipt's `key_fingerprint` binding. Only
+        // resolved when a receipt will actually be minted.
+        let fingerprint = if self.receipt_signer.is_some() {
+            Some(producer_key_fingerprint(req, resolver).await?)
+        } else {
+            None
+        };
+
         // FEAT-01: hand the rest of the pipeline to the store as a
         // single atomic commit. Idempotency lookup, predecessor
         // verification, body insertion, predecessor supersession
@@ -223,7 +304,62 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // critical section. Two concurrent publishes against the same
         // `supersedes` (or the same `Idempotency-Key`) can no longer
         // both succeed.
-        self.commit_via_store(req, idempotency_key, tenant)
+        self.commit_via_store(req, idempotency_key, tenant, fingerprint)
+    }
+
+    /// **RFC-conformant publish for `did:key` producers — no resolver.**
+    ///
+    /// Runs the same RFC-ACDP-0003 §2.1 pipeline as
+    /// [`Self::publish_verified`], but performs steps 7–8 via the pure
+    /// did:key verifier
+    /// ([`crate::crypto::verify::verify_publish_request_signature_offline`]),
+    /// so it is available without the `client` feature. Rejects
+    /// `did:web` (and any other method) producers with
+    /// `key_resolution_failed` — those need the resolver-backed
+    /// [`Self::publish_verified`].
+    ///
+    /// The capabilities gate still applies: the request is refused
+    /// unless `supported_did_methods` includes `"did:key"`.
+    pub fn publish_verified_did_key(
+        &self,
+        req: &PublishRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<PublishResponse, AcdpError> {
+        self.publish_verified_did_key_in_tenant(req, idempotency_key, None)
+    }
+
+    /// Like [`Self::publish_verified_did_key`] but binds the publish to a
+    /// tenant so a multi-tenant store persists `tenant_id` atomically with
+    /// the context row — the same contract as
+    /// [`Self::publish_verified_in_tenant`]. `tenant = None` is identical
+    /// to [`Self::publish_verified_did_key`].
+    pub fn publish_verified_did_key_in_tenant(
+        &self,
+        req: &PublishRequest,
+        idempotency_key: Option<&str>,
+        tenant: Option<&str>,
+    ) -> Result<PublishResponse, AcdpError> {
+        self.rate_limiter.check_publish(&req.agent_id)?;
+
+        let raw_bytes = serde_json::to_vec(req)?.len();
+        let validator = PublishValidator::for_authority(&self.caps, &self.authority);
+        let _validated = validator.validate_post_schema(req, raw_bytes)?;
+
+        // Steps 7–8, pure: did:key resolution + signature verification.
+        crate::crypto::verify::verify_publish_request_signature_offline(req)?;
+
+        // did:key fingerprints are derivable from the DID itself — no
+        // resolver needed for the receipt binding.
+        let fingerprint = if self.receipt_signer.is_some() {
+            let material = crate::did::key::resolve_did_key(req.agent_id.as_str())?;
+            Some(crate::crypto::fingerprint::fingerprint_did_key_material(
+                &material,
+            )?)
+        } else {
+            None
+        };
+
+        self.commit_via_store(req, idempotency_key, tenant, fingerprint)
     }
 
     /// **NOT RFC-conformant.** Skips DID resolution and signature
@@ -242,10 +378,23 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // when the test path is used.
         self.rate_limiter.check_publish(&req.agent_id)?;
 
+        // RFC-ACDP-0010 §7: a receipts-advertising registry has no
+        // degraded mode — every persisted context must carry a receipt,
+        // and minting here would attest a `key_fingerprint` that was
+        // never resolved. Refuse outright rather than persist a
+        // receipt-less context.
+        if self.receipt_signer.is_some() {
+            return Err(AcdpError::SchemaViolation(
+                "publish_unverified_for_tests is unavailable on a receipts-advertising \
+                 registry (RFC-ACDP-0010 §7: no degraded mode); use publish_verified or \
+                 publish_verified_did_key"
+                    .into(),
+            ));
+        }
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
         let _validated = validator.validate_post_schema(req, raw_bytes)?;
-        self.commit_via_store(req, None, None)
+        self.commit_via_store(req, None, None, None)
     }
 
     /// Drive `RegistryStore::commit_publish` from a validated request.
@@ -257,6 +406,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         req: &PublishRequest,
         idempotency_key: Option<&str>,
         tenant: Option<&str>,
+        producer_key_fingerprint: Option<String>,
     ) -> Result<PublishResponse, AcdpError> {
         let idempotency = if self.caps.supports_idempotency_key {
             idempotency_key.map(|key| crate::registry::store::PendingIdempotencyCommit {
@@ -271,6 +421,26 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         } else {
             None
         };
+        // RFC-ACDP-0010 minting hook — runs inside the store's critical
+        // section so the receipt persists atomically with the context.
+        #[allow(clippy::type_complexity)]
+        let minter: Option<
+            Box<dyn Fn(&Body) -> Result<serde_json::Value, AcdpError> + Send + Sync>,
+        > = match (&self.receipt_signer, producer_key_fingerprint) {
+            (Some(signer), Some(fp)) => Some(Box::new(move |body: &Body| {
+                let receipt = signer.mint(
+                    &body.ctx_id,
+                    &body.lineage_id,
+                    &body.origin_registry,
+                    body.created_at,
+                    &body.content_hash,
+                    &fp,
+                )?;
+                serde_json::to_value(receipt).map_err(AcdpError::from)
+            })),
+            _ => None,
+        };
+        let minted_expected = minter.is_some();
         let outcome = self
             .store
             .commit_publish(crate::registry::store::PublishCommit {
@@ -278,11 +448,34 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
                 authority: &self.authority,
                 idempotency,
                 tenant,
+                receipt_minter: minter.as_deref(),
             })?;
-        Ok(match outcome {
-            crate::registry::store::PublishCommitOutcome::Inserted(r)
-            | crate::registry::store::PublishCommitOutcome::IdempotentReplay(r) => r,
-        })
+        let (response, replayed) = match outcome {
+            crate::registry::store::PublishCommitOutcome::Inserted(r) => (r, false),
+            crate::registry::store::PublishCommitOutcome::IdempotentReplay(r) => (r, true),
+        };
+        // RFC-ACDP-0010 §7 belt-and-braces: a receipts-advertising
+        // registry has no degraded mode. A store implementation that
+        // ignores `receipt_minter` (e.g. compiled against the older
+        // trait shape) must fail loudly here, not silently persist a
+        // receipt-less context.
+        //
+        // Scoped to NEWLY INSERTED contexts only: an idempotent replay
+        // returns the ORIGINAL publish response verbatim, and that
+        // original may legitimately predate receipts (a record minted
+        // before the registry enabled its signer, still inside the
+        // idempotency TTL). Failing such a replay would turn a correct
+        // producer retry into a 500 across the upgrade boundary — §7
+        // attests what was persisted at publish time, not re-mint time.
+        if minted_expected && !replayed && response.registry_receipt.is_none() {
+            return Err(AcdpError::RegistryInternal(
+                "receipt signer is configured but the store returned no receipt — \
+                 the RegistryStore implementation must invoke PublishCommit::receipt_minter \
+                 inside its commit (RFC-ACDP-0010 §7: no degraded mode)"
+                    .into(),
+            ));
+        }
+        Ok(response)
     }
 
     /// `GET /contexts/{ctx_id}`.
@@ -421,6 +614,28 @@ pub(crate) fn can_retrieve(
             }
         },
     }
+}
+
+/// Resolve and fingerprint the producer key named by
+/// `signature.key_id` — the binding recorded in a receipt's
+/// `key_fingerprint` (RFC-ACDP-0010). Delegates to the same
+/// [`crate::crypto::fingerprint::fingerprint_for_key_id`] the consumer
+/// cross-check uses, so mint-time and verify-time fingerprints cannot
+/// drift. Callers MUST invoke this only after
+/// `verify_publish_request_signature` succeeded, so the fingerprinted
+/// key is the one that actually verified (the resolver's cache makes
+/// the second resolution cheap).
+#[cfg(feature = "client")]
+async fn producer_key_fingerprint(
+    req: &PublishRequest,
+    resolver: &crate::did::WebResolver,
+) -> Result<String, AcdpError> {
+    crate::crypto::fingerprint::fingerprint_for_key_id(
+        &req.signature.key_id,
+        &req.signature.algorithm,
+        resolver,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1110,8 +1325,15 @@ mod tests {
             .build()
             .unwrap();
         // Mutate post-build — validation already ran and accepted did:web.
-        // Re-sign isn't necessary: the verifier rejects before signature check.
-        req.signature.key_id = "did:key:z6Mki#key-1".into();
+        // Re-sign isn't necessary: the verifier rejects before signature
+        // check. Use a *well-formed* did:key URL (a malformed one is
+        // caught earlier by schema validation as of ACDP 0.2): the
+        // key_id DID portion no longer matches the did:web agent_id, so
+        // the binding check refuses it.
+        let did_key = crate::did::key::did_key_from_ed25519(
+            &SigningKey::from_bytes(&[9u8; 32]).verifying_key_bytes(),
+        );
+        req.signature.key_id = crate::did::key::did_key_url(&did_key).unwrap();
         let resolver = crate::did::WebResolver::new();
         let err = server
             .publish_verified(&req, None, &resolver)
@@ -1233,6 +1455,7 @@ mod tests {
         let store = InMemoryStore::new();
         let agent = AgentDid::new("did:web:agents.example.com:test");
         let resp = PublishResponse {
+            registry_receipt: None,
             ctx_id: crate::types::CtxId("acdp://r/12345678-1234-4321-8123-000000000099".into()),
             lineage_id: crate::types::LineageId(
                 "lin:sha256:9999999999999999999999999999999999999999999999999999999999999999"
@@ -1309,6 +1532,151 @@ mod tests {
             resp.created_at.timestamp_subsec_nanos() % 1_000_000,
             0,
             "created_at must be millisecond-truncated per RFC-ACDP-0001 §5.3"
+        );
+    }
+
+    // ── did:key publish (ACDP 0.2) ───────────────────────────────────────
+
+    fn did_key_request() -> crate::types::publish::PublishRequest {
+        let p = Producer::new_did_key(SigningKey::from_bytes(&[7u8; 32]));
+        p.publish_request()
+            .title("did:key publish")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap()
+    }
+
+    /// A registry that does NOT advertise `did:key` in
+    /// `supported_did_methods` refuses a did:key publish with
+    /// `key_resolution_failed` (permanent) — the anchor-plan decision.
+    #[test]
+    fn did_key_publish_rejected_when_not_advertised() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let err = server
+            .publish_verified_did_key(&did_key_request(), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, AcdpError::KeyResolution(ref m) if m.contains("supported_did_methods")),
+            "got {err:?}"
+        );
+    }
+
+    /// With `did:key` advertised, the offline pipeline runs end-to-end:
+    /// schema → hash → pure key resolution → signature → persistence.
+    /// No resolver, no network — works in a `server`-only build.
+    #[test]
+    fn did_key_publish_verified_end_to_end() {
+        let mut c = caps();
+        c.supported_did_methods.push("did:key".into());
+        let server = RegistryServer::new(InMemoryStore::new(), c, "registry.example.com");
+        let req = did_key_request();
+        let resp = server.publish_verified_did_key(&req, None).unwrap();
+        assert_eq!(resp.ctx_id.authority(), "registry.example.com");
+
+        // Tampered title → hash mismatch caught before signature.
+        let mut tampered = did_key_request();
+        tampered.title = "tampered".into();
+        let err = server
+            .publish_verified_did_key(&tampered, None)
+            .unwrap_err();
+        assert!(matches!(err, AcdpError::HashMismatch { .. }), "got {err:?}");
+    }
+
+    /// Upgrade boundary: a registry that enables receipts must still
+    /// honor idempotent replays of records minted BEFORE the signer
+    /// existed. The §7 no-degraded-mode check applies to newly inserted
+    /// contexts only — a replayed pre-receipts response (no
+    /// `registry_receipt`) is returned verbatim, not failed as a 500.
+    #[test]
+    fn receiptless_idempotent_replay_survives_enabling_receipts() {
+        let mut c = caps();
+        c.acdp_version = "0.2.0".into();
+        c.supported_did_methods.push("did:key".into());
+        c.supports_idempotency_key = true;
+        c.limits.idempotency_key_ttl_seconds = Some(86_400);
+        let server = RegistryServer::new(InMemoryStore::new(), c, "registry.example.com")
+            .with_receipt_signer(
+                crate::types::receipt::ReceiptSigner::new(
+                    SigningKey::from_bytes(&[0x11u8; 32]),
+                    "did:web:registry.example.com",
+                    "did:web:registry.example.com#receipt-key-1",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Simulate a record persisted before receipts were enabled: the
+        // stored response carries no `registry_receipt`.
+        let req = did_key_request();
+        let pre_receipts_response = crate::types::publish::PublishResponse {
+            ctx_id: CtxId(format!(
+                "acdp://registry.example.com/{}",
+                uuid::Uuid::new_v4()
+            )),
+            lineage_id: crate::crypto::derive_lineage_id(&CtxId(
+                "acdp://registry.example.com/v1".into(),
+            )),
+            version: 1,
+            created_at: crate::time::trunc_ms(chrono::Utc::now()),
+            status: Status::Active,
+            registry_receipt: None,
+        };
+        server
+            .store()
+            .idempotency_record(
+                &req.agent_id,
+                "pre-receipts-key",
+                &req.content_hash,
+                &pre_receipts_response,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+            .unwrap();
+
+        // Same agent + key + content_hash → the replay must return the
+        // original receipt-less response, not RegistryInternal.
+        let resp = server
+            .publish_verified_did_key(&req, Some("pre-receipts-key"))
+            .expect("replay of a pre-receipts record must succeed");
+        assert_eq!(resp.ctx_id, pre_receipts_response.ctx_id);
+        assert!(
+            resp.registry_receipt.is_none(),
+            "replay returns the original response verbatim"
+        );
+
+        // A FRESH publish on the same server still enforces minting.
+        let p2 = Producer::new_did_key(SigningKey::from_bytes(&[8u8; 32]));
+        let fresh = p2
+            .publish_request()
+            .title("fresh after enabling receipts")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let fresh_resp = server.publish_verified_did_key(&fresh, None).unwrap();
+        assert!(
+            fresh_resp.registry_receipt.is_some(),
+            "new inserts on a receipts registry must mint"
+        );
+    }
+
+    /// `publish_verified_did_key` refuses did:web producers — they need
+    /// the resolver-backed `publish_verified`.
+    #[test]
+    fn did_key_publish_path_refuses_did_web() {
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let p = producer();
+        let req = p
+            .publish_request()
+            .title("did:web on the offline path")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+        let err = server.publish_verified_did_key(&req, None).unwrap_err();
+        assert!(
+            matches!(err, AcdpError::KeyResolution(_)),
+            "did:web on the offline path must be refused, got {err:?}"
         );
     }
 }

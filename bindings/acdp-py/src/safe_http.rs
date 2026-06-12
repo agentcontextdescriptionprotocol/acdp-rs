@@ -103,6 +103,8 @@ impl PyAcdpSsrfPolicy {
     /// Returns `None` on success. Raises `SsrfRejected` (with `.reason ==
     /// "cross_authority"`) when the authority differs.
     fn check_redirect_authority(&self, from_url: &str, to_url: &str) -> PyResult<()> {
-        self.inner.classify_redirect(from_url, to_url).map_err(ssrf_err)
+        self.inner
+            .classify_redirect(from_url, to_url)
+            .map_err(ssrf_err)
     }
 }

@@ -80,6 +80,25 @@ export interface PublishOpts {
    * only — rejected on first-version publishes.
    */
   expectedLineageId?: string
+  /**
+   * Explicit `acdp_version` string for the emitted request.
+   *
+   * **SDK default (since 0.2): `acdp_version` is emitted explicitly,
+   * set to the library's current ACDP protocol version
+   * (`acdp::ACDP_VERSION` — `"0.2.0"` as of this release).** Per
+   * RFC-ACDP-0001 §6 consumers treat an absent field as `"0.1.0"`,
+   * but the omitted and explicit forms are *different JCS preimages*
+   * and therefore hash differently — pick one form per lineage and
+   * never switch mid-lineage.
+   */
+  acdpVersion?: string
+  /**
+   * When `true`, omit `acdp_version` entirely (the 0.1.x SDK default
+   * form). Use this only to reproduce hashes signed under the
+   * omitted form (e.g. the sig-001 golden vector); takes precedence
+   * over `acdpVersion`.
+   */
+  omitAcdpVersion?: boolean
 }
 /**
  * Options for `buildSupersedeRequest`. Any field omitted is carried
@@ -103,6 +122,18 @@ export interface SupersedeOpts {
   dataPeriod?: string
   /** Self-verifying `lin:sha256:<hex>` lineage id (v2+). */
   expectedLineageId?: string
+  /**
+   * Explicit `acdp_version` string. **By default (since 0.2) the
+   * library's current ACDP protocol version (`acdp::ACDP_VERSION` —
+   * `"0.2.0"` as of this release) is emitted explicitly** — see
+   * `PublishOpts.acdpVersion`. Do not switch the form mid-lineage.
+   */
+  acdpVersion?: string
+  /**
+   * When `true`, omit `acdp_version` entirely (the 0.1.x form);
+   * takes precedence over `acdpVersion`.
+   */
+  omitAcdpVersion?: boolean
 }
 /** Stateless did:web string helpers. All methods are static. */
 export declare class AcdpDid {
@@ -189,7 +220,8 @@ export declare class AcdpCanonicalizer {
   static contentHash(jsonStr: string): string
 }
 /**
- * An ACDP producer: an Ed25519 signing key and its did:web identity.
+ * An ACDP producer: an Ed25519 signing key and its DID identity
+ * (`did:web`, or `did:key` via the `*DidKey` factories — ACDP 0.2).
  *
  * All methods return wire-ready JSON strings the caller sends via its
  * own HTTP client. No HTTP calls are made inside this class.
@@ -197,11 +229,38 @@ export declare class AcdpCanonicalizer {
 export declare class AcdpProducer {
   /** Generate a producer with a fresh random Ed25519 key (OsRng). */
   static generate(agentDid: string, keyId: string): AcdpProducer
+  /**
+   * Generate a producer whose identity **is** its fresh Ed25519 key
+   * (`did:key`, ACDP 0.2). The `agentDid` and `keyId` are derived
+   * from the public key — no domain, no DID-document hosting.
+   * Consumers verify did:key contexts offline
+   * (`AcdpVerifier.verifyBodyOffline`), with no dependency on the
+   * producer's infrastructure remaining online.
+   *
+   * Tradeoff: did:key cannot rotate — a new key is a new identity,
+   * and `supersedes` requires the same `agent_id`, so lineage
+   * continuity ends with the key. Use `did:web` for long-lived
+   * organizational anchors; use did:key for ephemeral or
+   * archival-critical producers.
+   */
+  static generateDidKey(): AcdpProducer
+  /**
+   * Construct a `did:key` producer from a 32-byte Ed25519 seed.
+   *
+   * Deterministic — the same seed always derives the same
+   * `agentDid` / `keyId`. The seed is the private key — protect it
+   * as such. See [`AcdpProducer::generate_did_key`] for the did:key
+   * rotation tradeoff.
+   */
+  static fromSeedDidKey(seed: Buffer): AcdpProducer
   /** Construct from a 32-byte Ed25519 seed (deterministic). */
   static fromSeed(seed: Buffer, agentDid: string, keyId: string): AcdpProducer
-  /** The producer's DID (`did:web:…`). */
+  /** The producer's DID (`did:web:…` or `did:key:…`). */
   get agentDid(): string
-  /** The producer's signing-key DID URL (`did:web:…#key-1`). */
+  /**
+   * The producer's signing-key DID URL (`did:web:…#key-1`, or the
+   * `did:key:z…#z…` self-fragment form).
+   */
   get keyId(): string
   /**
    * Raw Ed25519 public key as standard base64 (44 chars with padding).
@@ -216,12 +275,25 @@ export declare class AcdpProducer {
   /**
    * Build and sign a first-version PublishRequest. Returns the
    * wire JSON string.
+   *
+   * **By default (since 0.2) `acdp_version` is emitted explicitly,
+   * set to the library's current ACDP protocol version
+   * (`acdp::ACDP_VERSION` — `"0.2.0"` as of this release).** Pass
+   * `omitAcdpVersion: true` to reproduce the 0.1.x omitted form (a
+   * distinct JCS preimage, so a distinct `content_hash`), or
+   * `acdpVersion` to pin another string.
    */
   buildPublishRequest(opts: PublishOpts): string
   /**
    * Build and sign a supersession PublishRequest from a previous
    * version's `Body` JSON. Version is propagated automatically
    * (`previous.version + 1`) and `lineage_id` is carried forward.
+   *
+   * **By default (since 0.2) `acdp_version` is emitted explicitly,
+   * set to the library's current ACDP protocol version
+   * (`acdp::ACDP_VERSION` — `"0.2.0"` as of this release)** — see
+   * `buildPublishRequest`. Do not switch between the omitted and
+   * explicit forms mid-lineage.
    */
   buildSupersedeRequest(previousBodyJson: string, opts: SupersedeOpts): string
   /**
@@ -248,13 +320,29 @@ export declare class AcdpP256Producer {
   /** Generate a producer with a fresh random P-256 key (OsRng). */
   static generate(agentDid: string, keyId: string): AcdpP256Producer
   /**
+   * Generate a producer whose identity **is** its fresh P-256 key
+   * (`did:key`, ACDP 0.2). See [`AcdpProducer::generate_did_key`]
+   * for the did:key rotation tradeoff.
+   */
+  static generateDidKey(): AcdpP256Producer
+  /**
+   * Construct a `did:key` producer from a 32-byte P-256 private
+   * scalar (big-endian). Deterministic — the same seed always
+   * derives the same `agentDid` / `keyId`. Throws if the bytes are
+   * not exactly 32 or are not a valid scalar.
+   */
+  static fromSeedDidKey(seed: Buffer): AcdpP256Producer
+  /**
    * Construct from a 32-byte P-256 private scalar (deterministic).
    * Throws if the bytes are not exactly 32 or are not a valid scalar.
    */
   static fromSeed(seed: Buffer, agentDid: string, keyId: string): AcdpP256Producer
-  /** The producer's DID (`did:web:…`). */
+  /** The producer's DID (`did:web:…` or `did:key:…`). */
   get agentDid(): string
-  /** The producer's signing-key DID URL (`did:web:…#key-1`). */
+  /**
+   * The producer's signing-key DID URL (`did:web:…#key-1`, or the
+   * `did:key:z…#z…` self-fragment form).
+   */
   get keyId(): string
   /**
    * SEC1-uncompressed public key (`0x04 || x || y`, 65 bytes) as
@@ -289,14 +377,19 @@ export declare class AcdpP256Producer {
   seedBytes(): Buffer
   /**
    * Build and sign a first-version PublishRequest. Returns the wire
-   * JSON string. Same surface as [`AcdpProducer::build_publish_request`];
-   * only the signature algorithm differs.
+   * JSON string. Same surface as [`AcdpProducer::build_publish_request`]
+   * — including the explicit `acdp_version` default (the library's
+   * current ACDP protocol version, `"0.2.0"` as of this release) and
+   * the `acdpVersion` / `omitAcdpVersion` controls; only the
+   * signature algorithm differs.
    */
   buildPublishRequest(opts: PublishOpts): string
   /**
    * Build and sign a supersession PublishRequest from a previous
    * version's `Body` JSON. Same semantics as
-   * [`AcdpProducer::build_supersede_request`].
+   * [`AcdpProducer::build_supersede_request`], including the
+   * explicit `acdp_version` default (the library's current ACDP
+   * protocol version, `"0.2.0"` as of this release).
    */
   buildSupersedeRequest(previousBodyJson: string, opts: SupersedeOpts): string
   /**
@@ -399,4 +492,107 @@ export declare class AcdpVerifier {
    * Returns `true` on success; throws on failure.
    */
   static verifySignatureP256(pubKeySec1B64: string, sigB64: string, contentHash: string): boolean
+  /**
+   * Full offline verification of a retrieved `Body` from a `did:key`
+   * producer (ACDP 0.2) — structural validation, `content_hash`
+   * recomputation, key_id/agent_id binding, and signature check, all
+   * with no network.
+   *
+   * * `bodyJson` — the `body` object from a `FullContext` retrieval
+   *   (the registry-assigned fields must be present).
+   *
+   * Throws for `did:web` bodies — those need DID-document
+   * resolution, which stays in JS land (resolve via `AcdpDid.webToUrl`
+   * + `fetch`, then use `verifySignature`).
+   *
+   * Returns `true` on success; throws on any failure.
+   */
+  static verifyBodyOffline(bodyJson: string): boolean
+  /**
+   * Offline verification of a `PublishRequest` from a `did:key`
+   * producer (ACDP 0.2): recomputes the `content_hash` over the
+   * request's producer-controlled fields, then verifies the
+   * signature against the key embedded in the `did:key` itself.
+   *
+   * * `requestJson` — the full PublishRequest wire JSON (e.g. the
+   *   string `buildPublishRequest` returned).
+   *
+   * Throws for non-`did:key` requests — `did:web` verification needs
+   * DID resolution, which stays in JS land by design.
+   *
+   * Returns `true` on success; throws on any failure.
+   */
+  static verifyPublishRequestOffline(requestJson: string): boolean
+  /**
+   * Diagnose a `content_hash` mismatch (ACDP 0.2 divergence
+   * tooling). Probes the known cross-implementation divergence
+   * patterns — `acdp_version` omitted vs explicit, null-vs-absent
+   * optionals, sub-millisecond timestamps — and returns a
+   * human-readable report naming the matching pattern (or the
+   * recomputed hash and preimage when none matches).
+   *
+   * Never use this to *accept* a body; it is producer/SDK-author
+   * tooling for chasing "the hash that won't reproduce".
+   */
+  static explainHashMismatch(bodyJson: string, expectedHash: string): string
+  /**
+   * The exact JCS canonical preimage hashed for `content_hash`,
+   * returned as a UTF-8 string. When two SDKs disagree on a hash,
+   * diffing their canonical preimages localizes the divergence in a
+   * way two opaque digests never can.
+   */
+  static canonicalPreimage(bodyJson: string): string
+  /**
+   * SHA-256 fingerprint (`"sha256:<64-hex>"`) of a raw Ed25519
+   * public key, as carried in a registry receipt's
+   * `key_fingerprint` (ACDP 0.2).
+   *
+   * * `publicKeyB64` — standard base64 of the 32-byte raw key (the
+   *   same shape as `AcdpProducer.publicKeyB64` /
+   *   `ResolvedDidKey.publicKeyB64`).
+   */
+  static fingerprintEd25519B64(publicKeyB64: string): string
+  /**
+   * Verify a registry receipt (ACDP 0.2, RFC-ACDP-0010): the
+   * canonical `created_at` byte-form check, the offline cross-checks
+   * (`ctx_id`, recomputed body hash, producer key fingerprint,
+   * ms-truncated `created_at`, `registry_did`/`origin_registry`
+   * consistency), then the Ed25519 signature check against the
+   * registry's receipt key — with the signature preimage hashed over
+   * the **raw wire JSON** of the receipt as received (minus
+   * `signature`), never a re-serialization of the parsed struct.
+   *
+   * Resolving `registry_did` to that key is the caller's job — DID
+   * resolution stays in JS land by design (resolve the registry's
+   * DID document via `AcdpDid.webToUrl` + `fetch`, extract the key
+   * with `AcdpDidDocument.keyForAlgorithm`).
+   *
+   * **Two checks remain the HOST's obligation** — this binding makes
+   * no HTTP calls and never sees the accompanying body:
+   *
+   * 1. **Serving-authority binding** — `receipt.registry_did` MUST
+   *    equal `"did:web:" + <authority>` where `<authority>` is the
+   *    authority the response was *actually fetched from*, not
+   *    whatever the receipt claims.
+   * 2. **Body bindings** — the receipt's `lineage_id`,
+   *    `origin_registry`, and `created_at` MUST equal the
+   *    accompanying body's fields, and the `recomputedBodyHash`
+   *    argument MUST be independently recomputed from that body
+   *    (run `AcdpVerifier.verifyContentHash` first) — never the
+   *    body's echoed `content_hash` field.
+   *
+   * * `receiptJson` — the `registry_receipt` object from a
+   *   `FullContext` retrieval.
+   * * `registryPublicKeyB64` — standard base64 of the registry's
+   *   32-byte raw Ed25519 receipt key.
+   * * `expectedCtxId` — the ctx_id the caller actually requested.
+   * * `recomputedBodyHash` — the *independently recomputed* body
+   *   hash, never the body's echoed `content_hash` field.
+   * * `producerKeyFingerprint` — fingerprint of the resolved
+   *   producer key (see `fingerprintEd25519B64`).
+   *
+   * Returns `true` on success; throws with the failing check's
+   * message otherwise.
+   */
+  static verifyReceipt(receiptJson: string, registryPublicKeyB64: string, expectedCtxId: string, recomputedBodyHash: string, producerKeyFingerprint: string): boolean
 }

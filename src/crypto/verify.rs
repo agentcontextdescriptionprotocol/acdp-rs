@@ -1,18 +1,17 @@
 //! End-to-end body verification — RFC-ACDP-0001 §5.11 (7-step algorithm).
 
 use crate::error::AcdpError;
+use crate::types::{
+    body::{Body, Signature},
+    primitives::ContentHash,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{Verifier as _, VerifyingKey};
 
 #[cfg(feature = "client")]
 use {
-    super::hash::verify_content_hash,
-    crate::did::web::WebResolver,
-    crate::types::{
-        body::{Body, Signature},
-        primitives::{AgentDid, ContentHash},
-        publish::PublishRequest,
-    },
+    super::hash::verify_content_hash, crate::did::web::WebResolver,
+    crate::types::primitives::AgentDid, crate::types::publish::PublishRequest,
 };
 
 /// Stateless verifier.  Requires a DID resolver to fetch producer keys.
@@ -129,19 +128,23 @@ async fn verify_signature_envelope(
         )));
     }
 
-    // Step 1.5: `key_id` DID portion MUST be did:web for v0.1.0
-    // (RFC-ACDP-0001 §5.4). A key_id pointing to e.g. did:key would mean
-    // the resolver path could not even find the key.
-    if !did_part.starts_with("did:web:") {
-        return Err(AcdpError::KeyNotAuthorized(format!(
-            "v0.1.0 signatures require did:web key_id; got '{did_part}'"
-        )));
-    }
-
     // Step 2: DID portion MUST equal agent_id
     if did_part != agent_id.as_str() {
         return Err(AcdpError::KeyNotAuthorized(format!(
             "key_id DID '{did_part}' ≠ agent_id '{agent_id}'"
+        )));
+    }
+
+    // Step 1.5: method dispatch. `did:key` resolves purely (the DID is
+    // the key — no document fetch, no assertionMethod check); `did:web`
+    // takes the HTTPS resolver path below. Any other method has no
+    // resolver in this version.
+    if did_part.starts_with("did:key:") {
+        return verify_did_key_envelope(signature, content_hash);
+    }
+    if !did_part.starts_with("did:web:") {
+        return Err(AcdpError::KeyNotAuthorized(format!(
+            "signatures require a did:web or did:key key_id; got '{did_part}'"
         )));
     }
 
@@ -188,6 +191,181 @@ async fn verify_signature_envelope(
             let pub_sec1 = method.ecdsa_p256_public_key_sec1()?;
             verify_ecdsa_p256(&pub_sec1, &signature.value, content_hash.as_str())
         }
+        other => Err(AcdpError::UnsupportedAlgorithm(format!(
+            "verifier does not support signature algorithm '{other}'"
+        ))),
+    }
+}
+
+/// Verify a signature envelope whose key is a `did:key` — a pure
+/// function available without the `client` feature (no resolver, no
+/// network, no async).
+///
+/// Performs:
+/// 1. `key_id` form check (`did:key:z<mb>#z<mb>`, fragment = key).
+/// 2. Pure key resolution from the DID itself.
+/// 3. Algorithm-downgrade rejection: `signature.algorithm` MUST equal
+///    the algorithm implied by the key's multicodec prefix
+///    (RFC-ACDP-0008 §3.9).
+/// 4. Signature verification over the ASCII bytes of `content_hash`.
+///
+/// The caller is responsible for the `key_id`-DID-equals-`agent_id`
+/// binding check and for `content_hash` recomputation (use
+/// [`verify_body_offline`] for the full pipeline).
+pub fn verify_did_key_envelope(
+    signature: &Signature,
+    content_hash: &ContentHash,
+) -> Result<(), AcdpError> {
+    let material = crate::did::key::resolve_did_key_url(&signature.key_id)?;
+
+    if material.algorithm() != signature.algorithm {
+        return Err(AcdpError::InvalidSignature(format!(
+            "signature.algorithm '{}' does not match the did:key multicodec \
+             (key implies '{}')",
+            signature.algorithm,
+            material.algorithm()
+        )));
+    }
+
+    match material {
+        crate::did::key::DidKeyMaterial::Ed25519(pub_bytes) => {
+            verify_ed25519(&pub_bytes, &signature.value, content_hash.as_str())
+        }
+        crate::did::key::DidKeyMaterial::EcdsaP256(sec1_compressed) => {
+            verify_ecdsa_p256(&sec1_compressed, &signature.value, content_hash.as_str())
+        }
+    }
+}
+
+/// Full offline body verification for `did:key` producers — works with
+/// `--no-default-features` (no HTTP stack, no resolver, no async).
+///
+/// Pipeline (mirrors [`Verifier::verify_body`] minus DID-document
+/// resolution, which did:key does not have):
+/// 1. Structural validation ([`crate::validation::validate_body`]).
+/// 2. `content_hash` recomputation over ProducerContent (§5.7).
+/// 3. `key_id` DID portion equals `agent_id`.
+/// 4. Pure did:key envelope verification (algorithm + signature).
+///
+/// Returns [`AcdpError::KeyResolution`] for a `did:web` (or other
+/// method) body — those require the resolver-backed
+/// [`Verifier::verify_body`] under the `client` feature.
+pub fn verify_body_offline(body: &Body) -> Result<(), AcdpError> {
+    crate::validation::validate_body(body)?;
+
+    if !body.agent_id.as_str().starts_with("did:key:") {
+        return Err(AcdpError::KeyResolution(format!(
+            "verify_body_offline supports did:key producers only; '{}' requires \
+             the resolver-backed Verifier (client feature)",
+            body.agent_id
+        )));
+    }
+
+    let body_val = serde_json::to_value(body)?;
+    super::hash::verify_content_hash(&body_val, &body.content_hash)?;
+
+    let did_part = body
+        .signature
+        .key_id
+        .split_once('#')
+        .map(|(d, _)| d)
+        .unwrap_or(body.signature.key_id.as_str());
+    if did_part != body.agent_id.as_str() {
+        return Err(AcdpError::KeyNotAuthorized(format!(
+            "key_id DID '{did_part}' ≠ agent_id '{}'",
+            body.agent_id
+        )));
+    }
+
+    verify_did_key_envelope(&body.signature, &body.content_hash)
+}
+
+/// Offline counterpart of [`verify_publish_request_signature`] for
+/// `did:key` producers — used by registries (and the bindings) to verify
+/// a publish request without the `client` feature. Assumes structural
+/// validation and `content_hash` recomputation have already run
+/// (e.g. via `PublishValidator::validate_post_schema`).
+pub fn verify_publish_request_signature_offline(
+    req: &crate::types::publish::PublishRequest,
+) -> Result<(), AcdpError> {
+    let key_id = req.signature.key_id.as_str();
+    let did_part = key_id.split_once('#').map(|(d, _)| d).unwrap_or(key_id);
+    if did_part != req.agent_id.as_str() {
+        return Err(AcdpError::KeyNotAuthorized(format!(
+            "key_id DID '{did_part}' ≠ agent_id '{}'",
+            req.agent_id
+        )));
+    }
+    if !did_part.starts_with("did:key:") {
+        return Err(AcdpError::KeyResolution(format!(
+            "offline verification supports did:key only; got '{did_part}'"
+        )));
+    }
+    verify_did_key_envelope(&req.signature, &req.content_hash)
+}
+
+/// Historical-key body-signature verification (ACDP 0.2, WS-B).
+///
+/// Identical to the standard envelope verification EXCEPT that the
+/// `assertionMethod` membership check is skipped: a rotated-out key
+/// that the producer retained in `verificationMethod` (per the
+/// RFC-ACDP-0010 key-retention rule) still verifies. Callers MUST
+/// gate this on a **verified registry receipt** whose
+/// `key_fingerprint` matches this key — without that attestation,
+/// accepting a non-assertion key is exactly the bypass the
+/// `assertionMethod` check exists to prevent. did:key bodies never
+/// take this path (the key cannot rotate).
+#[cfg(feature = "client")]
+pub async fn verify_body_signature_historical(
+    body: &Body,
+    resolver: &WebResolver,
+) -> Result<(), AcdpError> {
+    let key_id = &body.signature.key_id;
+    let (did_part, fragment) = key_id.split_once('#').ok_or_else(|| {
+        AcdpError::KeyResolution(format!("signature.key_id '{key_id}' has no '#fragment'"))
+    })?;
+    if did_part != body.agent_id.as_str() {
+        return Err(AcdpError::KeyNotAuthorized(format!(
+            "key_id DID '{did_part}' ≠ agent_id '{}'",
+            body.agent_id
+        )));
+    }
+    if !did_part.starts_with("did:web:") {
+        return Err(AcdpError::KeyResolution(format!(
+            "historical-key verification applies to did:web only; got '{did_part}'"
+        )));
+    }
+    let doc = resolver.resolve(did_part).await?;
+    // Key fully removed from the DID document → fail closed. The
+    // producer's obligation is to RETAIN rotated keys in
+    // verificationMethod (RFC-ACDP-0010); a deleted key is
+    // unverifiable by design.
+    let method = doc.find_by_fragment(fragment).ok_or_else(|| {
+        AcdpError::KeyResolution(format!(
+            "no verification method with fragment '#{fragment}' — the key was \
+             removed from the DID document, not just rotated out of assertionMethod"
+        ))
+    })?;
+    if let Some(declared) = method.declared_algorithm() {
+        if declared != body.signature.algorithm {
+            return Err(AcdpError::InvalidSignature(format!(
+                "signature.algorithm '{}' does not match verification method type \
+                 (resolved key declares '{declared}')",
+                body.signature.algorithm
+            )));
+        }
+    }
+    match body.signature.algorithm.as_str() {
+        "ed25519" => verify_ed25519(
+            &method.ed25519_public_key_bytes()?,
+            &body.signature.value,
+            body.content_hash.as_str(),
+        ),
+        "ecdsa-p256" => verify_ecdsa_p256(
+            &method.ecdsa_p256_public_key_sec1()?,
+            &body.signature.value,
+            body.content_hash.as_str(),
+        ),
         other => Err(AcdpError::UnsupportedAlgorithm(format!(
             "verifier does not support signature algorithm '{other}'"
         ))),

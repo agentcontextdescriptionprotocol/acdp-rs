@@ -37,6 +37,10 @@ test('golden content_hash + signature match sig-001', () => {
   // Pinned against `crypto::hash::tests::golden_content_hash` and
   // `crypto::sign::tests::sign_and_verify_ed25519_golden` in the Rust
   // suite. Drift on either side is a protocol break.
+  //
+  // sig-001 was signed under the 0.1.x form where `acdp_version` is
+  // OMITTED. Since 0.2 the SDK emits it explicitly by default, so the
+  // golden vector is reproduced via the opt-out.
   const p = AcdpProducer.fromSeed(
     Buffer.alloc(32, 0),
     'did:web:agents.example.com:test-producer',
@@ -46,8 +50,10 @@ test('golden content_hash + signature match sig-001', () => {
     p.buildPublishRequest({
       title: 'Golden test vector — minimal first version',
       contextType: 'data_snapshot',
+      omitAcdpVersion: true,
     }),
   );
+  assert.ok(!('acdp_version' in req));
   assert.equal(
     req.content_hash,
     'sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5',
@@ -56,6 +62,30 @@ test('golden content_hash + signature match sig-001', () => {
     req.signature.value,
     'ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ==',
   );
+});
+
+test('default publish emits acdp_version "0.2.0" explicitly (distinct preimage)', () => {
+  // ACDP 0.2 SDK default: `acdp_version: "0.2.0"` is emitted. Consumers
+  // treat the absent field as "0.1.0" (RFC-ACDP-0001 §6), but absent and
+  // explicit are different JCS preimages — so the same body hashes
+  // differently from the sig-001 omitted form.
+  const p = AcdpProducer.fromSeed(
+    Buffer.alloc(32, 0),
+    'did:web:agents.example.com:test-producer',
+    'did:web:agents.example.com:test-producer#key-1',
+  );
+  const raw = p.buildPublishRequest({
+    title: 'Golden test vector — minimal first version',
+    contextType: 'data_snapshot',
+  });
+  const req = JSON.parse(raw);
+  assert.equal(req.acdp_version, '0.2.0');
+  assert.notEqual(
+    req.content_hash,
+    'sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5',
+  );
+  // Still self-consistent: the hash covers what was actually emitted.
+  assert.equal(AcdpVerifier.verifyContentHash(raw, req.content_hash), true);
 });
 
 test('minimal publish request structure', () => {
@@ -249,6 +279,7 @@ test('p256 public key is SEC1 uncompressed (generator for scalar 1)', () => {
 });
 
 test('p256 golden content_hash + signature match sig-002', () => {
+  // Signed under the 0.1.x omitted-acdp_version form, like sig-001.
   const p = AcdpP256Producer.fromSeed(
     P256_GOLDEN_SEED,
     'did:web:agents.example.com:test-producer',
@@ -258,6 +289,7 @@ test('p256 golden content_hash + signature match sig-002', () => {
     p.buildPublishRequest({
       title: 'Golden test vector — minimal first version',
       contextType: 'data_snapshot',
+      omitAcdpVersion: true,
     }),
   );
   assert.equal(req.content_hash, P256_GOLDEN_HASH);
@@ -451,5 +483,348 @@ test('supersede rejects a malformed expectedLineageId', () => {
     p.buildSupersedeRequest(JSON.stringify(body), {
       expectedLineageId: 'not-a-lineage-id',
     }),
+  );
+});
+
+// ── did:key identities + offline verification (ACDP 0.2) ───────────────
+
+// sig-003 golden vector: did:key producer from the 0x42-filled Ed25519
+// seed, `acdp_version: "0.2.0"` emitted explicitly. Pinned against the
+// spec's did:key conformance fixture and the Python binding — drift on
+// any side is a protocol break.
+const DID_KEY_GOLDEN_SEED = Buffer.alloc(32, 0x42);
+const DID_KEY_GOLDEN_DID =
+  'did:key:z6MkghLt1e8m1fmANsdJJco3aCLV8Xnigr5UWwC3u5iZFPd3';
+const DID_KEY_GOLDEN_HASH =
+  'sha256:937448afc35bf79590bcf96f96da328d363d3ef6f2b87d274e2c1b242a09974f';
+const DID_KEY_GOLDEN_SIG =
+  '3uDdFeyoU0kI53g0tQ6CbIPDaBxMsnZoSD77bE/3Bb0Hv8G+6iARbnZv7pgayyY3mksLjjqPno/DIPlrgeVVCA==';
+
+test('did:key fromSeedDidKey derives agentDid + keyId from the key (sig-003)', () => {
+  const p = AcdpProducer.fromSeedDidKey(DID_KEY_GOLDEN_SEED);
+  assert.equal(p.agentDid, DID_KEY_GOLDEN_DID);
+  assert.equal(
+    p.keyId,
+    `${DID_KEY_GOLDEN_DID}#${DID_KEY_GOLDEN_DID.slice('did:key:'.length)}`,
+  );
+});
+
+test('did:key golden content_hash + signature match sig-003', () => {
+  const p = AcdpProducer.fromSeedDidKey(DID_KEY_GOLDEN_SEED);
+  const raw = p.buildPublishRequest({
+    title: 'Golden test vector — did:key first version',
+    contextType: 'data_snapshot',
+    visibility: 'public',
+    acdpVersion: '0.2.0',
+  });
+  const req = JSON.parse(raw);
+  assert.equal(req.agent_id, DID_KEY_GOLDEN_DID);
+  assert.equal(req.acdp_version, '0.2.0');
+  assert.equal(req.content_hash, DID_KEY_GOLDEN_HASH);
+  assert.equal(req.signature.value, DID_KEY_GOLDEN_SIG);
+  // The whole point of did:key: the request verifies fully offline.
+  assert.equal(AcdpVerifier.verifyPublishRequestOffline(raw), true);
+});
+
+test('verifyPublishRequestOffline rejects a tampered title', () => {
+  const p = AcdpProducer.fromSeedDidKey(Buffer.alloc(32));
+  const req = JSON.parse(
+    p.buildPublishRequest({
+      title: 'Golden test vector — minimal first version',
+      contextType: 'data_snapshot',
+    }),
+  );
+  req.title = 'Tampered';
+  assert.throws(() =>
+    AcdpVerifier.verifyPublishRequestOffline(JSON.stringify(req)),
+  );
+});
+
+test('verifyBodyOffline verifies a did:key FullContext body end-to-end', () => {
+  const p = AcdpProducer.fromSeedDidKey(Buffer.alloc(32));
+  const req = JSON.parse(
+    p.buildPublishRequest({
+      title: 'offline body',
+      contextType: 'data_snapshot',
+    }),
+  );
+  // Synthesize the registry-assigned fields (excluded from the §5.7
+  // hash preimage) to make a valid retrieval-shape Body.
+  const body = {
+    ...req,
+    ctx_id: 'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+    origin_registry: 'registry.example.com',
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+  assert.equal(AcdpVerifier.verifyBodyOffline(JSON.stringify(body)), true);
+  // Tampering with a producer-controlled field breaks it.
+  const tampered = { ...body, title: 'Tampered' };
+  assert.throws(() => AcdpVerifier.verifyBodyOffline(JSON.stringify(tampered)));
+});
+
+test('verifyBodyOffline rejects did:web bodies (resolution is host-side)', () => {
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const req = JSON.parse(
+    p.buildPublishRequest({ title: 'web', contextType: 'data_snapshot' }),
+  );
+  const body = {
+    ...req,
+    ctx_id: 'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+    origin_registry: 'registry.example.com',
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+  assert.throws(() => AcdpVerifier.verifyBodyOffline(JSON.stringify(body)));
+});
+
+test('verifyPublishRequestOffline rejects did:web requests (resolution is host-side)', () => {
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const raw = p.buildPublishRequest({
+    title: 'web identity',
+    contextType: 'data_snapshot',
+  });
+  assert.throws(() => AcdpVerifier.verifyPublishRequestOffline(raw));
+});
+
+test('did:key generateDidKey produces distinct self-derived identities', () => {
+  const a = AcdpProducer.generateDidKey();
+  const b = AcdpProducer.generateDidKey();
+  assert.ok(a.agentDid.startsWith('did:key:z6Mk'));
+  assert.notEqual(a.agentDid, b.agentDid);
+  assert.equal(a.keyId, `${a.agentDid}#${a.agentDid.slice('did:key:'.length)}`);
+});
+
+test('fromSeed with a mismatched did:key agent DID throws on build', () => {
+  // DID_KEY_GOLDEN_DID belongs to the 0x42 seed; pair it with the
+  // all-zero seed. A did:key identity IS its key, so the SDK must
+  // refuse to sign under a DID the seed does not derive — silently
+  // re-deriving would publish under a different identity than the
+  // caller stored.
+  const mispaired = AcdpProducer.fromSeed(
+    Buffer.alloc(32, 0),
+    DID_KEY_GOLDEN_DID,
+    `${DID_KEY_GOLDEN_DID}#${DID_KEY_GOLDEN_DID.slice('did:key:'.length)}`,
+  );
+  assert.throws(
+    () =>
+      mispaired.buildPublishRequest({
+        title: 'mispaired did:key',
+        contextType: 'data_snapshot',
+      }),
+    /does not correspond to the stored did:key/,
+  );
+  // The matching seed for the same DID still builds fine.
+  const matched = AcdpProducer.fromSeed(
+    DID_KEY_GOLDEN_SEED,
+    DID_KEY_GOLDEN_DID,
+    `${DID_KEY_GOLDEN_DID}#${DID_KEY_GOLDEN_DID.slice('did:key:'.length)}`,
+  );
+  const req = JSON.parse(
+    matched.buildPublishRequest({
+      title: 'matched did:key',
+      contextType: 'data_snapshot',
+    }),
+  );
+  assert.equal(req.agent_id, DID_KEY_GOLDEN_DID);
+});
+
+test('p256 fromSeed with a mismatched did:key agent DID throws on build', () => {
+  const a = AcdpP256Producer.generateDidKey();
+  const b = AcdpP256Producer.generateDidKey();
+  // b's seed paired with a's did:key identity.
+  const mispaired = AcdpP256Producer.fromSeed(
+    Buffer.from(b.seedBytes()),
+    a.agentDid,
+    a.keyId,
+  );
+  assert.throws(
+    () =>
+      mispaired.buildPublishRequest({
+        title: 'mispaired p256 did:key',
+        contextType: 'data_snapshot',
+      }),
+    /does not correspond to the stored did:key/,
+  );
+});
+
+test('p256 did:key factories derive a did:key:zDn… identity that round-trips', () => {
+  const a = AcdpP256Producer.generateDidKey();
+  assert.ok(a.agentDid.startsWith('did:key:zDn'));
+  assert.equal(a.keyId, `${a.agentDid}#${a.agentDid.slice('did:key:'.length)}`);
+  const b = AcdpP256Producer.fromSeedDidKey(Buffer.from(a.seedBytes()));
+  assert.equal(b.agentDid, a.agentDid);
+  const raw = b.buildPublishRequest({
+    title: 'p256 did:key',
+    contextType: 'data_snapshot',
+  });
+  const req = JSON.parse(raw);
+  assert.equal(req.agent_id, a.agentDid);
+  assert.equal(req.signature.algorithm, 'ecdsa-p256');
+  assert.equal(AcdpVerifier.verifyPublishRequestOffline(raw), true);
+});
+
+// ── Hash-divergence diagnostics (ACDP 0.2, WS-D2) ───────────────────────
+
+test('canonicalPreimage strips the §5.7 exclusion set', () => {
+  const p = AcdpProducer.fromSeedDidKey(Buffer.alloc(32));
+  const raw = p.buildPublishRequest({
+    title: 'preimage',
+    contextType: 'data_snapshot',
+  });
+  const preimage = JSON.parse(AcdpVerifier.canonicalPreimage(raw));
+  assert.equal(preimage.title, 'preimage');
+  assert.ok(!('content_hash' in preimage));
+  assert.ok(!('signature' in preimage));
+});
+
+test('explainHashMismatch names the acdp_version divergence', () => {
+  const p = AcdpProducer.fromSeedDidKey(Buffer.alloc(32));
+  // Hash signed under the OMITTED form…
+  const omitted = JSON.parse(
+    p.buildPublishRequest({
+      title: 'divergence',
+      contextType: 'data_snapshot',
+      omitAcdpVersion: true,
+    }),
+  );
+  // …checked against the same body emitted WITH the field.
+  const explicit = p.buildPublishRequest({
+    title: 'divergence',
+    contextType: 'data_snapshot',
+  });
+  const report = AcdpVerifier.explainHashMismatch(
+    explicit,
+    omitted.content_hash,
+  );
+  assert.match(report, /acdp_version/);
+  // And the no-divergence case says so.
+  const aligned = JSON.parse(explicit);
+  assert.match(
+    AcdpVerifier.explainHashMismatch(explicit, aligned.content_hash),
+    /no divergence/,
+  );
+});
+
+// ── Key fingerprints + registry receipts (ACDP 0.2, RFC-ACDP-0010) ─────
+
+test('fingerprintEd25519B64 matches fp-001', () => {
+  // Fingerprint of the all-zero-seed Ed25519 public key.
+  const p = AcdpProducer.fromSeed(Buffer.alloc(32), AGENT_DID, KEY_ID);
+  assert.equal(
+    AcdpVerifier.fingerprintEd25519B64(p.publicKeyB64),
+    'sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070',
+  );
+});
+
+// rcpt-001 golden vector: receipt minted by the [0x11u8; 32]-seed
+// registry key, binding the sig-001 content_hash and the fp-001
+// producer-key fingerprint.
+const RCPT_001 = {
+  registry_did: 'did:web:registry.example.com',
+  ctx_id:
+    'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+  lineage_id:
+    'lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a',
+  origin_registry: 'registry.example.com',
+  created_at: '2026-04-16T10:30:15.123Z',
+  content_hash:
+    'sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5',
+  key_fingerprint:
+    'sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070',
+  signature: {
+    algorithm: 'ed25519',
+    key_id: 'did:web:registry.example.com#receipt-key-1',
+    value:
+      'vBgQKmn17pHXXY95C07BBeconmjDIdYIvxN5B+YXrQ7tIzFsDNsh1TglzgxOyPUp8lwTz7zwMNiK+Sn5whveDg==',
+  },
+};
+
+// The registry's receipt-signing public key. DID resolution stays in JS
+// land by design — here the "resolved" key is derived from the known
+// test seed.
+const RCPT_REGISTRY_KEY_B64 = AcdpProducer.fromSeed(
+  Buffer.alloc(32, 0x11),
+  'did:web:x',
+  'did:web:x#k',
+).publicKeyB64;
+
+test('rcpt-001 registry signing key matches the spec-pinned public key', () => {
+  assert.equal(
+    RCPT_REGISTRY_KEY_B64,
+    '0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=',
+  );
+});
+
+test('verifyReceipt accepts rcpt-001', () => {
+  assert.equal(
+    AcdpVerifier.verifyReceipt(
+      JSON.stringify(RCPT_001),
+      RCPT_REGISTRY_KEY_B64,
+      RCPT_001.ctx_id,
+      RCPT_001.content_hash,
+      RCPT_001.key_fingerprint,
+    ),
+    true,
+  );
+});
+
+test('verifyReceipt rejects a producer-key fingerprint mismatch', () => {
+  assert.throws(() =>
+    AcdpVerifier.verifyReceipt(
+      JSON.stringify(RCPT_001),
+      RCPT_REGISTRY_KEY_B64,
+      RCPT_001.ctx_id,
+      RCPT_001.content_hash,
+      'sha256:' + '9'.repeat(64),
+    ),
+  );
+});
+
+test('verifyReceipt rejects a mutated created_at (signature break)', () => {
+  const tampered = { ...RCPT_001, created_at: '2026-04-16T10:30:15.124Z' };
+  assert.throws(() =>
+    AcdpVerifier.verifyReceipt(
+      JSON.stringify(tampered),
+      RCPT_REGISTRY_KEY_B64,
+      RCPT_001.ctx_id,
+      RCPT_001.content_hash,
+      RCPT_001.key_fingerprint,
+    ),
+  );
+});
+
+test('verifyReceipt rejects a non-canonical created_at byte form', () => {
+  // Same instant, wrong byte form: two fractional digits instead of the
+  // canonical three (RFC-ACDP-0010 §8 step 6). The raw wire bytes must
+  // be canonical BEFORE hashing — a struct-re-serializing verifier
+  // would normalize ".12" to ".120" and hash a preimage the registry
+  // never signed.
+  const nonCanonical = { ...RCPT_001, created_at: '2026-04-16T10:30:15.12Z' };
+  assert.throws(
+    () =>
+      AcdpVerifier.verifyReceipt(
+        JSON.stringify(nonCanonical),
+        RCPT_REGISTRY_KEY_B64,
+        RCPT_001.ctx_id,
+        RCPT_001.content_hash,
+        RCPT_001.key_fingerprint,
+      ),
+    /canonical/,
+  );
+});
+
+test('verifyReceipt rejects unknown receipt members (closed schema)', () => {
+  // RegistryReceipt is deny_unknown_fields since ACDP 0.2 — an extra
+  // member must fail parsing outright, not be silently ignored.
+  const extended = { ...RCPT_001, extra_member: 'x' };
+  assert.throws(() =>
+    AcdpVerifier.verifyReceipt(
+      JSON.stringify(extended),
+      RCPT_REGISTRY_KEY_B64,
+      RCPT_001.ctx_id,
+      RCPT_001.content_hash,
+      RCPT_001.key_fingerprint,
+    ),
   );
 });

@@ -66,6 +66,11 @@ def test_golden_content_hash():
     the same hash the Rust suite asserts in
     `crypto::hash::tests::golden_content_hash` and
     `producer::builder::tests::unset_optional_fields_are_omitted_from_hash_preimage`.
+
+    sig-001 was signed under the 0.1.x form with `acdp_version` OMITTED.
+    The builder now emits `acdp_version: "0.2.0"` explicitly by
+    default — a *different JCS preimage* — so reproducing the golden
+    hash requires the explicit `omit_acdp_version=True` opt-out.
     """
     seed = bytes(32)  # all-zero seed = sig-001 test producer
     p = acdp.AcdpProducer.from_seed(
@@ -76,8 +81,10 @@ def test_golden_content_hash():
     raw = p.build_publish_request(
         title="Golden test vector — minimal first version",
         context_type="data_snapshot",
+        omit_acdp_version=True,
     )
     req = json.loads(raw)
+    assert "acdp_version" not in req
     assert (
         req["content_hash"]
         == "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5"
@@ -86,6 +93,31 @@ def test_golden_content_hash():
     assert req["signature"]["value"] == (
         "ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ=="
     )
+
+
+def test_default_emits_acdp_version_and_changes_hash():
+    """The builder emits `acdp_version: "0.2.0"` explicitly by
+    default. The omitted and explicit forms are distinct JCS preimages,
+    so the default build of the sig-001 fields must carry the field AND
+    hash differently from the pinned golden vector — while still
+    self-verifying."""
+    seed = bytes(32)
+    p = acdp.AcdpProducer.from_seed(
+        seed,
+        "did:web:agents.example.com:test-producer",
+        "did:web:agents.example.com:test-producer#key-1",
+    )
+    raw = p.build_publish_request(
+        title="Golden test vector — minimal first version",
+        context_type="data_snapshot",
+    )
+    req = json.loads(raw)
+    assert req["acdp_version"] == "0.2.0"
+    assert req["content_hash"] != (
+        "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5"
+    )
+    # The explicit form is in the preimage — the body still re-verifies.
+    assert acdp.AcdpVerifier.verify_content_hash(raw, req["content_hash"])
 
 
 def test_verify_content_hash_roundtrip():
@@ -352,6 +384,9 @@ def test_p256_golden_content_hash_and_signature():
     content_hash is algorithm-independent (signature is excluded from
     the preimage), so it matches sig-001. The signature value is the
     RFC 6979 deterministic ECDSA value from the fixture.
+
+    Like sig-001, the fixture was signed with `acdp_version` omitted —
+    the 0.2 explicit-emission default must be opted out of.
     """
     p = acdp.AcdpP256Producer.from_seed(
         P256_GOLDEN_SEED,
@@ -362,6 +397,7 @@ def test_p256_golden_content_hash_and_signature():
         p.build_publish_request(
             title="Golden test vector — minimal first version",
             context_type="data_snapshot",
+            omit_acdp_version=True,
         )
     )
     assert req["content_hash"] == P256_GOLDEN_HASH

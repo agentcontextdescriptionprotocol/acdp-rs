@@ -34,9 +34,13 @@ pub struct VerificationPolicy {
     /// Default `true`.
     pub allow_unknown_status: bool,
 
-    /// If true, attempt to verify the optional `registry_receipt`
-    /// (RFC-ACDP-0009 §2.7, reserved for v0.1+). Default `false`.
-    pub verify_registry_receipt: bool,
+    /// Registry-receipt handling (ACDP 0.2, RFC-ACDP-0010).
+    /// Default [`ReceiptPolicy::VerifyIfPresent`].
+    pub receipts: ReceiptPolicy,
+
+    /// Historical-key handling (ACDP 0.2, WS-B). Default
+    /// [`HistoricalKeyPolicy::AcceptWithReceipt`].
+    pub historical_keys: HistoricalKeyPolicy,
 }
 
 impl Default for VerificationPolicy {
@@ -44,9 +48,59 @@ impl Default for VerificationPolicy {
         Self {
             validate_body_schema: true,
             allow_unknown_status: true,
-            verify_registry_receipt: false,
+            receipts: ReceiptPolicy::VerifyIfPresent,
+            historical_keys: HistoricalKeyPolicy::AcceptWithReceipt,
         }
     }
+}
+
+/// How to treat the optional `registry_receipt` on retrieval
+/// (RFC-ACDP-0010).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReceiptPolicy {
+    /// Skip receipt verification entirely (0.1.0 behavior). The
+    /// receipt value is still preserved verbatim on the context.
+    Ignore,
+    /// Verify the receipt when one is present; absence is not an
+    /// error (the registry may simply be a 0.1.0 registry). Default.
+    #[default]
+    VerifyIfPresent,
+    /// Fail closed unless a receipt is present AND verifies. Use when
+    /// the deployment requires audit-grade provenance — registry
+    /// claims (`ctx_id`, `created_at`, `origin_registry`) are
+    /// assertions, not proofs, without a receipt.
+    Require,
+}
+
+/// How to treat a producer key that is present in the DID document's
+/// `verificationMethod` but no longer in `assertionMethod` — i.e. a
+/// key the producer rotated out but retained per the RFC-ACDP-0010
+/// key-retention rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoricalKeyPolicy {
+    /// Strict 0.1.0 behavior: only `assertionMethod` keys verify.
+    /// Every context signed by a rotated-out key fails.
+    Reject,
+    /// Accept a retained key **only** when a verified registry receipt
+    /// attests (via `key_fingerprint`) that this exact key was the
+    /// authorized one at publish time. Without a verified receipt the
+    /// historical path never activates — fail closed. Default.
+    #[default]
+    AcceptWithReceipt,
+}
+
+/// How the producer key that verified the body relates to the
+/// producer's *current* DID document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAuthorization {
+    /// The signing key is currently listed in `assertionMethod`.
+    CurrentlyAuthorized,
+    /// The signing key was rotated out of `assertionMethod` but is
+    /// retained in `verificationMethod`, and a verified registry
+    /// receipt attests it was the authorized key at publish time
+    /// (RFC-ACDP-0010). Weigh accordingly: valid history, not a
+    /// current endorsement.
+    HistoricallyAuthorized,
 }
 
 impl VerificationPolicy {
@@ -61,17 +115,34 @@ impl VerificationPolicy {
     /// available in this crate in v0.1.0 — they would be separately-named
     /// opt-ins per §9.2, and are not currently implemented.
     ///
-    /// Identical to [`Default::default()`]; provided as a named constructor
-    /// so callers can write `VerificationPolicy::strict_v0_1_0()` to match
-    /// the RFC-ACDP-0001 §9.2 RECOMMENDED API shape.
+    /// NOT identical to [`Default::default()`] as of 0.2: the default
+    /// policy is receipt-aware (`VerifyIfPresent` + `AcceptWithReceipt`),
+    /// while this named profile preserves the exact v0.1.0 semantics —
+    /// receipts inert ([`ReceiptPolicy::Ignore`]) and only
+    /// `assertionMethod` keys accepted
+    /// ([`HistoricalKeyPolicy::Reject`]). Callers pinned to this
+    /// constructor keep v0.1.0 behavior across the 0.2 upgrade.
     pub fn strict_v0_1_0() -> Self {
-        Self::default()
+        Self {
+            validate_body_schema: true,
+            allow_unknown_status: true,
+            receipts: ReceiptPolicy::Ignore,
+            historical_keys: HistoricalKeyPolicy::Reject,
+        }
     }
 }
 
 /// A retrieved context that has been cryptographically verified.
+#[derive(Debug)]
 pub struct VerifiedContext {
     pub inner: FullContext,
+    /// Whether the body verified against a currently authorized key or
+    /// a receipt-attested historical one (ACDP 0.2, WS-B).
+    pub key_status: KeyAuthorization,
+    /// The verified registry receipt, when one was present and the
+    /// policy verified it (RFC-ACDP-0010). `None` under
+    /// [`ReceiptPolicy::Ignore`] or when the registry minted none.
+    pub verified_receipt: Option<crate::types::receipt::RegistryReceipt>,
 }
 
 impl VerifiedContext {
@@ -109,14 +180,68 @@ impl VerifiedContext {
             crate::validation::validate_body(&ctx.body)?;
         }
 
-        // BUG-05: use `verify_body_signed` (hash + signature only) so
-        // the schema / embedded-hash checks above stay policy-controlled.
-        // Calling `verify_body` here would re-run `validate_body`
-        // unconditionally. `verify_body_signed` still enforces `did:web`
-        // for the producer key (RFC-ACDP-0001 §5.4) — that enforcement
-        // is unconditional in v0.1.0 and is not policy-tunable.
+        // Hash recomputation first: from here on `ctx.body.content_hash`
+        // IS the independently recomputed value, which the receipt
+        // cross-check below relies on.
         let verifier = Verifier::new(resolver);
-        verifier.verify_body_signed(&ctx.body).await?;
+        verifier.verify_body_hash(&ctx.body)?;
+
+        // ── Receipt phase (RFC-ACDP-0010) ───────────────────────────
+        // Verified BEFORE the signature phase because the historical-
+        // key path is gated on a verified receipt.
+        let serving_authority = client
+            .authority()
+            .unwrap_or_else(|| ctx_id.authority().to_string());
+        let verified_receipt = match (policy.receipts, &ctx.registry_receipt) {
+            (ReceiptPolicy::Ignore, _) | (ReceiptPolicy::VerifyIfPresent, None) => None,
+            (ReceiptPolicy::Require, None) => {
+                return Err(AcdpError::InvalidReceipt(
+                    "policy requires a registry receipt but the response carries none \
+                     (registry without the acdp-registry-receipts profile, or a \
+                     pre-receipts context)"
+                        .into(),
+                ));
+            }
+            (_, Some(value)) => {
+                let fingerprint = crate::crypto::fingerprint::fingerprint_for_key_id(
+                    &ctx.body.signature.key_id,
+                    &ctx.body.signature.algorithm,
+                    resolver,
+                )
+                .await?;
+                Some(
+                    super::receipt::verify_receipt_value(
+                        value,
+                        ctx_id,
+                        &ctx.body,
+                        &ctx.body.content_hash,
+                        &fingerprint,
+                        &serving_authority,
+                        resolver,
+                    )
+                    .await?,
+                )
+            }
+        };
+
+        // ── Signature phase ──────────────────────────────────────────
+        // Standard path enforces assertionMethod membership. A
+        // KeyNotAuthorized failure falls back to the historical path
+        // only under AcceptWithReceipt AND a verified receipt — the
+        // receipt's key_fingerprint (already cross-checked against this
+        // exact key above) is what attests publish-time authorization.
+        let key_status = match verifier.verify_body_signature(&ctx.body).await {
+            Ok(()) => KeyAuthorization::CurrentlyAuthorized,
+            Err(AcdpError::KeyNotAuthorized(_))
+                if policy.historical_keys == HistoricalKeyPolicy::AcceptWithReceipt
+                    && verified_receipt.is_some() =>
+            {
+                crate::crypto::verify::verify_body_signature_historical(&ctx.body, resolver)
+                    .await?;
+                KeyAuthorization::HistoricallyAuthorized
+            }
+            Err(e) => return Err(e),
+        };
 
         if !policy.allow_unknown_status {
             if let Some(other) = ctx.registry_state.status.as_other() {
@@ -126,13 +251,11 @@ impl VerifiedContext {
             }
         }
 
-        if policy.verify_registry_receipt && ctx.registry_receipt.is_some() {
-            return Err(AcdpError::NotImplemented(
-                "registry_receipt verification reserved for v0.1+ (RFC-ACDP-0009 §2.7)".into(),
-            ));
-        }
-
-        Ok(Self { inner: ctx })
+        Ok(Self {
+            inner: ctx,
+            key_status,
+            verified_receipt,
+        })
     }
 
     /// Retrieve + verify, returning a structured [`VerificationReport`]
@@ -225,10 +348,16 @@ impl VerifiedContext {
             report.data_ref_external.push(None);
         }
 
-        // Decide whether to surface the verified handle.
+        // Decide whether to surface the verified handle. Report paths
+        // run the strict assertionMethod check only (no receipt /
+        // historical handling — use `fetch_with_policy` for those).
         let all_top_level_pass = report.schema_ok && report.body_hash_ok && report.signature_ok;
         let verified = if all_top_level_pass {
-            Some(Self { inner: ctx })
+            Some(Self {
+                inner: ctx,
+                key_status: KeyAuthorization::CurrentlyAuthorized,
+                verified_receipt: None,
+            })
         } else {
             None
         };
@@ -315,7 +444,14 @@ impl VerifiedContext {
             report.data_ref_external.push(slot);
         }
 
-        Ok((Self { inner: ctx }, report))
+        Ok((
+            Self {
+                inner: ctx,
+                key_status: KeyAuthorization::CurrentlyAuthorized,
+                verified_receipt: None,
+            },
+            report,
+        ))
     }
 
     pub fn body(&self) -> &crate::types::body::Body {
@@ -326,29 +462,63 @@ impl VerifiedContext {
         &self.inner.registry_state
     }
 
-    /// Optional registry receipt placeholder (RFC-ACDP-0009 §2.7,
-    /// reserved for v0.1+).
+    /// Raw registry receipt value as served on the wire
+    /// (RFC-ACDP-0010), preserved verbatim. For the verified, typed
+    /// form see [`Self::verified_receipt`].
     pub fn receipt(&self) -> Option<&serde_json::Value> {
         self.inner.registry_receipt.as_ref()
     }
 
-    /// Verify the registry receipt, when one is present.
+    /// Verify the registry receipt, when one is present
+    /// (RFC-ACDP-0010).
     ///
-    /// In v0.1.0 receipts are not specified; this method is forward-compat
-    /// scaffolding:
-    /// - Returns `Ok(())` when no receipt is present (typical case).
-    /// - Returns [`AcdpError::NotImplemented`] when a receipt **is**
-    ///   present, signaling the consumer is talking to a v0.1+ registry
-    ///   while running this v0.1.0 library. Consumers SHOULD upgrade.
-    pub async fn verify_receipt(&self, _resolver: &WebResolver) -> Result<(), AcdpError> {
-        if self.inner.registry_receipt.is_some() {
-            return Err(AcdpError::NotImplemented(
-                "registry_receipt verification is reserved for ACDP v0.1+ \
-                 (RFC-ACDP-0009 §2.7); upgrade the acdp library to verify receipts"
-                    .into(),
-            ));
+    /// Standalone variant for contexts obtained via the report paths or
+    /// constructed externally; `fetch_with_policy` already does this
+    /// under [`ReceiptPolicy::VerifyIfPresent`]/`Require`. The serving
+    /// authority is taken from the context's own `ctx_id` — correct
+    /// when the context was fetched from its home registry, which is
+    /// the only retrieval shape v0.2 defines.
+    ///
+    /// Returns `Ok(None)` when no receipt is present, `Ok(Some(_))`
+    /// with the verified receipt otherwise.
+    pub async fn verify_receipt(
+        &self,
+        resolver: &WebResolver,
+    ) -> Result<Option<crate::types::receipt::RegistryReceipt>, AcdpError> {
+        let Some(value) = &self.inner.registry_receipt else {
+            return Ok(None);
+        };
+        // Recompute the body hash rather than trusting the echoed
+        // `body.content_hash`: all fields of this type are public, so a
+        // caller may have constructed it around an unverified
+        // FullContext, and the receipt cross-check is only meaningful
+        // against an independently recomputed hash (RFC-ACDP-0010 §8
+        // step 4).
+        let body_val = serde_json::to_value(&self.inner.body)?;
+        let recomputed = crate::crypto::compute_content_hash(&body_val)?;
+        if recomputed != self.inner.body.content_hash {
+            return Err(AcdpError::HashMismatch {
+                stored: self.inner.body.content_hash.clone(),
+                recomputed,
+            });
         }
-        Ok(())
+        let fingerprint = crate::crypto::fingerprint::fingerprint_for_key_id(
+            &self.inner.body.signature.key_id,
+            &self.inner.body.signature.algorithm,
+            resolver,
+        )
+        .await?;
+        let receipt = super::receipt::verify_receipt_value(
+            value,
+            &self.inner.body.ctx_id,
+            &self.inner.body,
+            &self.inner.body.content_hash,
+            &fingerprint,
+            self.inner.body.ctx_id.authority(),
+            resolver,
+        )
+        .await?;
+        Ok(Some(receipt))
     }
 }
 
@@ -405,15 +575,22 @@ impl DataRefFetcher for NoFetcher {
 
 #[cfg(test)]
 mod tests {
-    use super::VerificationPolicy;
+    use super::{HistoricalKeyPolicy, ReceiptPolicy, VerificationPolicy};
 
-    /// BUG-01 — the RFC-ACDP-0001 §9.2 RECOMMENDED named constructor
-    /// `strict_v0_1_0()` MUST be exactly the strict default policy.
+    /// The RFC-ACDP-0001 §9.2 named constructor preserves exact v0.1.0
+    /// semantics: receipts inert, assertionMethod-only keys. It is
+    /// deliberately NOT the 0.2 default (which is receipt-aware).
     #[test]
-    fn strict_v0_1_0_equals_default() {
-        assert_eq!(
-            VerificationPolicy::strict_v0_1_0(),
-            VerificationPolicy::default()
+    fn strict_v0_1_0_preserves_v0_1_0_semantics() {
+        let strict = VerificationPolicy::strict_v0_1_0();
+        assert!(strict.validate_body_schema);
+        assert!(strict.allow_unknown_status);
+        assert_eq!(strict.receipts, ReceiptPolicy::Ignore);
+        assert_eq!(strict.historical_keys, HistoricalKeyPolicy::Reject);
+        assert_ne!(
+            strict,
+            VerificationPolicy::default(),
+            "the 0.2 default is receipt-aware; the v0.1.0 profile is not"
         );
     }
 }
