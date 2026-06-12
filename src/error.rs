@@ -144,6 +144,15 @@ pub enum AcdpError {
     #[error("cross-registry resolution failed: {0}")]
     CrossRegistryResolutionFailed(String),
 
+    // ── Registry receipts (ACDP 0.2, RFC-ACDP-0010) ─────────────────────
+    /// Wire code: `invalid_receipt`. A `registry_receipt` failed
+    /// verification: bad signature, a cross-check mismatch (`ctx_id`,
+    /// `content_hash`, `key_fingerprint`, serving authority), a
+    /// malformed shape, or a receipt required by policy but absent.
+    /// Permanent — the receipt will not verify on retry.
+    #[error("invalid registry receipt: {0}")]
+    InvalidReceipt(String),
+
     // ── Wire / transport ─────────────────────────────────────────────────
     /// Wire code: `internal_error`.
     #[error("registry internal error: {0}")]
@@ -244,6 +253,7 @@ impl AcdpError {
             "invalid_cursor" => AcdpError::InvalidCursor(msg),
             "duplicate_publish" => AcdpError::DuplicatePublish(msg),
             "cross_registry_resolution_failed" => AcdpError::CrossRegistryResolutionFailed(msg),
+            "invalid_receipt" => AcdpError::InvalidReceipt(msg),
             "internal_error" => AcdpError::RegistryInternal(msg),
             "superseded_target" => {
                 let reason = wire
@@ -304,8 +314,8 @@ mod tests {
     }
 
     #[test]
-    fn all_20_wire_codes_round_trip() {
-        // Test-coverage matrix entry: "All 20 error codes parse from WireError".
+    fn all_21_wire_codes_round_trip() {
+        // Test-coverage matrix entry: "All 21 error codes parse from WireError".
         // Every code enumerated by acdp-error.schema.json's enum MUST map to a
         // typed AcdpError variant (or, for `superseded_target` with details,
         // produce the right SupersessionReason).
@@ -362,13 +372,16 @@ mod tests {
             ("cross_registry_resolution_failed", |e| {
                 matches!(e, AcdpError::CrossRegistryResolutionFailed(_))
             }),
+            ("invalid_receipt", |e| {
+                matches!(e, AcdpError::InvalidReceipt(_))
+            }),
             ("internal_error", |e| {
                 matches!(e, AcdpError::RegistryInternal(_))
             }),
         ];
-        // Schema enumerates exactly 20 codes (RFC-ACDP-0007 §5,
-        // acdp-error.schema.json `error.code` enum).
-        assert_eq!(cases.len(), 20);
+        // Schema enumerates exactly 21 codes (RFC-ACDP-0007 §5 + the
+        // RFC-ACDP-0010 `invalid_receipt` addition).
+        assert_eq!(cases.len(), 21);
         for (code, expected) in cases {
             let err = AcdpError::from_wire_error(wire(code, "msg", None));
             assert!(
@@ -449,5 +462,7 @@ mod tests {
         // retrying the SAME publish/fetch will return the same answer.
         // The spec marks it permanent, not retryable.
         assert!(!AcdpError::DataRefHashMismatch("x".into()).is_transient());
+        // RFC-ACDP-0010: a failed receipt will not verify on retry.
+        assert!(!AcdpError::InvalidReceipt("x".into()).is_transient());
     }
 }

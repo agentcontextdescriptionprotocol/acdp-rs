@@ -84,8 +84,12 @@ fn full_producer_round_trip() {
         "did:web:agents.example.com:test-producer#key-1",
     );
 
+    // sig-001 was signed under the 0.1.x omitted-`acdp_version` form;
+    // the 0.2 builder emits the field by default, so reproduce the
+    // golden preimage via the explicit opt-out.
     let req = prod
         .publish_request()
+        .omit_acdp_version()
         .title("Golden test vector — minimal first version")
         .context_type(ContextType::DataSnapshot)
         .visibility(Visibility::Public)
@@ -133,4 +137,107 @@ fn exclusion_set_invariant() {
 
     let h2 = compute_content_hash(&serde_json::Value::Object(with_excluded)).unwrap();
     assert_eq!(h1, h2, "excluded fields must not affect content_hash");
+}
+
+// ── sig-003 — did:key (Ed25519) golden vector (ACDP 0.2) ─────────────────────
+//
+// Pins the canonical `sig-003-did-key-golden.json` spec fixture: seed
+// 0x42×32, the producer identity IS the key (`did:key`), and the body
+// carries `acdp_version: "0.2.0"` explicitly as 0.2.0 producers MUST
+// (RFC-ACDP-0001 §6). If any constant drifts, the did:key wire format
+// is broken.
+
+const SIG_003_SEED: [u8; 32] = [0x42u8; 32];
+const SIG_003_DID: &str = "did:key:z6MkghLt1e8m1fmANsdJJco3aCLV8Xnigr5UWwC3u5iZFPd3";
+const SIG_003_TITLE: &str = "Golden test vector — did:key first version";
+const SIG_003_CONTENT_HASH: &str =
+    "sha256:937448afc35bf79590bcf96f96da328d363d3ef6f2b87d274e2c1b242a09974f";
+const SIG_003_SIGNATURE: &str =
+    "3uDdFeyoU0kI53g0tQ6CbIPDaBxMsnZoSD77bE/3Bb0Hv8G+6iARbnZv7pgayyY3mksLjjqPno/DIPlrgeVVCA==";
+
+#[test]
+fn did_key_golden_vector_sig_003() {
+    use acdp::producer::Producer;
+    use acdp::types::{ContextType, Visibility};
+
+    let key = SigningKey::from_bytes(&SIG_003_SEED);
+    let p = Producer::new_did_key(key);
+    let req = p
+        .publish_request()
+        .acdp_version("0.2.0")
+        .title(SIG_003_TITLE)
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+
+    assert_eq!(req.agent_id.as_str(), SIG_003_DID);
+    assert_eq!(
+        req.signature.key_id,
+        format!("{SIG_003_DID}#{}", &SIG_003_DID["did:key:".len()..]),
+        "did:key key_id fragment must equal the method-specific identifier"
+    );
+    assert_eq!(req.content_hash.as_str(), SIG_003_CONTENT_HASH);
+    assert_eq!(req.signature.value, SIG_003_SIGNATURE);
+    assert_eq!(req.signature.algorithm, "ed25519");
+
+    // Offline verification — no resolver, pure core.
+    acdp::crypto::verify::verify_publish_request_signature_offline(&req)
+        .expect("did:key publish request must verify offline");
+}
+
+#[test]
+fn did_key_resolution_is_pure_and_matches_signing_key() {
+    use acdp::did::{resolve_did_key, DidKeyMaterial};
+    let key = SigningKey::from_bytes(&SIG_003_SEED);
+    let expected_pub = key.verifying_key_bytes();
+    match resolve_did_key(SIG_003_DID).unwrap() {
+        DidKeyMaterial::Ed25519(pub_bytes) => assert_eq!(pub_bytes, expected_pub),
+        other => panic!("expected Ed25519 material, got {other:?}"),
+    }
+}
+
+#[test]
+fn did_key_tampered_body_fails_offline_verification() {
+    use acdp::producer::Producer;
+    use acdp::types::{ContextType, Visibility};
+
+    let key = SigningKey::from_bytes(&[0u8; 32]);
+    let p = Producer::new_did_key(key);
+    let mut req = p
+        .publish_request()
+        .title("original")
+        .context_type(ContextType::DataSnapshot)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+
+    // Tamper with the signature (hash recomputation is the caller's
+    // job; the offline envelope check must catch a bad signature).
+    req.signature.value = SIG_003_SIGNATURE.into(); // signature of a different body
+    let err = acdp::crypto::verify::verify_publish_request_signature_offline(&req).unwrap_err();
+    assert!(
+        matches!(err, acdp::AcdpError::InvalidSignature(_)),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn did_key_p256_round_trips_offline() {
+    use acdp::crypto::sign::P256SigningKey;
+    use acdp::producer::Producer;
+    use acdp::types::{ContextType, Visibility};
+
+    let p = Producer::new_did_key_p256(P256SigningKey::generate()).unwrap();
+    let req = p
+        .publish_request()
+        .title("p256 did:key")
+        .context_type(ContextType::Analysis)
+        .visibility(Visibility::Public)
+        .build()
+        .unwrap();
+    assert_eq!(req.signature.algorithm, "ecdsa-p256");
+    assert!(req.agent_id.as_str().starts_with("did:key:z"));
+    acdp::crypto::verify::verify_publish_request_signature_offline(&req)
+        .expect("did:key p256 request must verify offline");
 }

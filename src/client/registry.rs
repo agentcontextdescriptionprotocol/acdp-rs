@@ -45,6 +45,19 @@ pub struct RetrievalMetadata {
 }
 
 impl RegistryClient {
+    /// The authority (host, plus port when non-default) of the registry
+    /// this client talks to — the value a receipt's `registry_did`
+    /// must match (RFC-ACDP-0010 serving-authority cross-check).
+    pub fn authority(&self) -> Option<String> {
+        url::Url::parse(&self.base).ok().and_then(|u| {
+            let host = u.host_str()?.to_string();
+            Some(match u.port() {
+                Some(p) => format!("{host}:{p}"),
+                None => host,
+            })
+        })
+    }
+
     /// Connect to a registry at `base_url` (e.g. `https://registry.example.com`).
     ///
     /// Uses `rustls` for TLS; does not use the system OpenSSL. Applies

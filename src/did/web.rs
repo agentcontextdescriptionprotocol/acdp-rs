@@ -89,6 +89,30 @@ impl WebResolver {
         Self::from_parts(capacity, SsrfPolicy::default(), Some(pem.to_vec()))
     }
 
+    /// Resolver pinned to a fixed socket address for a logical hostname,
+    /// trusting the given root certificate — the resolver-side analogue
+    /// of [`crate::client::RegistryClient::with_test_endpoint`]. Lets a
+    /// test resolve `did:web:localhost` (and path DIDs under it) against
+    /// an in-process TLS server bound to `127.0.0.1:<port>` without the
+    /// port appearing in the DID. Uses the loopback-permitting SSRF
+    /// policy. Use only in tests.
+    #[doc(hidden)]
+    pub fn with_test_endpoint(
+        pem: &[u8],
+        host: &str,
+        target: std::net::SocketAddr,
+    ) -> Result<Self, AcdpError> {
+        let cap = NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).expect("capacity > 0");
+        let policy = SsrfPolicy::allow_test_loopback();
+        let http = build_http_client_pinned(Some(pem), &policy, Some((host, target)))?;
+        Ok(Self {
+            http,
+            cache: Arc::new(Mutex::new(LruCache::new(cap))),
+            ssrf_policy: policy,
+            root_cert_pem: Some(pem.to_vec()),
+        })
+    }
+
     fn from_parts(
         capacity: usize,
         ssrf_policy: SsrfPolicy,
@@ -241,6 +265,17 @@ fn build_http_client(
     extra_root_pem: Option<&[u8]>,
     ssrf_policy: &SsrfPolicy,
 ) -> Result<reqwest::Client, AcdpError> {
+    build_http_client_pinned(extra_root_pem, ssrf_policy, None)
+}
+
+/// Like [`build_http_client`] but optionally pins `host` to a fixed
+/// socket address via reqwest's `.resolve()` hook (test endpoints).
+#[cfg(feature = "client")]
+fn build_http_client_pinned(
+    extra_root_pem: Option<&[u8]>,
+    ssrf_policy: &SsrfPolicy,
+    pin: Option<(&str, std::net::SocketAddr)>,
+) -> Result<reqwest::Client, AcdpError> {
     let policy = redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= MAX_REDIRECTS {
             return attempt.error(format!("DID resolver: exceeded {MAX_REDIRECTS} redirects"));
@@ -271,6 +306,10 @@ fn build_http_client(
         let cert = reqwest::Certificate::from_pem(pem)
             .map_err(|e| AcdpError::Http(format!("invalid root cert PEM: {e}")))?;
         builder = builder.add_root_certificate(cert);
+    }
+
+    if let Some((host, target)) = pin {
+        builder = builder.resolve(host, target);
     }
 
     builder

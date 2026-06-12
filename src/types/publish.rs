@@ -124,6 +124,13 @@ pub struct PublishResponse {
     pub created_at: DateTime<Utc>,
     /// Lifecycle status. MUST be `Active` on a successful first-publish.
     pub status: Status,
+    /// Registry-signed publication receipt (ACDP 0.2, RFC-ACDP-0010).
+    /// Present when the registry advertises the
+    /// `acdp-registry-receipts` profile; absent from 0.1.0 registries.
+    /// Carried as opaque JSON for wire stability — parse with
+    /// [`crate::types::receipt::RegistryReceipt::from_value`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_receipt: Option<serde_json::Value>,
 }
 
 /// Wire error envelope returned by the registry on all error responses.

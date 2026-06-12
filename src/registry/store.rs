@@ -54,6 +54,18 @@ pub trait RegistryStore: Send + Sync {
 
     /// First-version `ctx_id` for a lineage, used to derive the
     /// lineage_id of a supersession publish per RFC-ACDP-0001 §5.6.
+    ///
+    /// LINEAGE ANCHORING (WS-D3). Implementations SHOULD answer this
+    /// (and the supersession checks in [`Self::commit_publish`]) from
+    /// **persisted rows** — the immediate predecessor's stored
+    /// `lineage_id`/`version` and a lineage index — NOT by re-walking
+    /// the full `supersedes` chain at publish time. A registry's own
+    /// storage is trusted; anchoring removes the
+    /// `lineage_walk_failed` liveness failure where a v(N+1) publish is
+    /// rejected because some deep intermediate is unretrievable even
+    /// though the immediate predecessor exists. Reserve the full
+    /// chain walk for offline integrity audits, off the publish path.
+    /// (`InMemoryStore` implements exactly this pattern.)
     fn first_version_ctx_id(&self, lineage_id: &LineageId) -> Result<Option<CtxId>, AcdpError>;
 
     /// Keyword/filter search. Implementations MUST apply the RFC-ACDP-0008
@@ -87,6 +99,18 @@ pub trait RegistryStore: Send + Sync {
     // evict is a no-op. A `RegistryServer` configured with
     // `caps.supports_idempotency_key = false` MUST never call them
     // (RFC-ACDP-0007 §3.2).
+    //
+    // ATOMICITY CONTRACT (WS-D4). Keys are scoped per `agent_id`: two
+    // different agents using the same key never interact. The
+    // idempotency record and the body persistence MUST commit
+    // atomically (single transaction / compare-and-swap / one lock —
+    // see `commit_publish`); a backend that cannot provide this (e.g.
+    // an eventually-consistent store) MUST NOT be paired with
+    // `supports_idempotency_key: true`, because concurrent identical-key
+    // publishes could mint two ctx_ids and silently defeat the
+    // guarantee the capability advertises. Durable backends should
+    // enforce a UNIQUE constraint on `(agent_id, idempotency_key)` and
+    // insert it in the same transaction as the context row.
 
     /// Look up a prior publish record for `(agent_id, key)`.
     ///
@@ -175,6 +199,18 @@ pub struct PublishCommit<'a> {
     /// crash between insert and a separate stamping UPDATE). Stores that do
     /// not implement tenancy ignore it.
     pub tenant: Option<&'a str>,
+    /// Receipt minting hook (ACDP 0.2, RFC-ACDP-0010). When present,
+    /// the store MUST invoke it with the fully assigned [`Body`]
+    /// (ctx_id / lineage_id / created_at populated) **inside the same
+    /// critical section / transaction as the insert**, persist the
+    /// returned receipt with the context, and include it in the
+    /// response. A context published under the
+    /// `acdp-registry-receipts` profile must never exist without its
+    /// receipt — a crash between insert and mint must not be
+    /// observable. `None` for receipt-less (0.1.0-mode) registries.
+    #[allow(clippy::type_complexity)]
+    pub receipt_minter:
+        Option<&'a (dyn Fn(&Body) -> Result<serde_json::Value, AcdpError> + Send + Sync)>,
 }
 
 /// Idempotency parameters threaded through [`PublishCommit`].
@@ -448,6 +484,7 @@ impl RegistryStore for InMemoryStore {
             // InMemoryStore does not model tenancy (it is a single-tenant
             // reference/test backend); the durable backends honor this.
             tenant: _,
+            receipt_minter,
         } = commit;
         let now = chrono::Utc::now();
         let mut g = self.lock();
@@ -600,13 +637,18 @@ impl RegistryStore for InMemoryStore {
                 "ctx_id collision: '{ctx_id_str}' already exists"
             )));
         }
+        // Receipt minting (RFC-ACDP-0010) — inside the critical section,
+        // before the insert becomes visible, so a context published
+        // under the receipts profile never exists without its receipt.
+        let registry_receipt = receipt_minter.map(|mint| mint(&body)).transpose()?;
+
         let stored = FullContext {
             body,
             registry_state: RegistryState {
                 status: Status::Active,
                 extensions: Default::default(),
             },
-            registry_receipt: None,
+            registry_receipt: registry_receipt.clone(),
             extensions: Default::default(),
         };
         g.by_ctx.insert(ctx_id_str.clone(), stored);
@@ -628,6 +670,7 @@ impl RegistryStore for InMemoryStore {
             version: req.version,
             created_at,
             status: Status::Active,
+            registry_receipt,
         };
 
         // ── 7. Idempotency record ───────────────────────────────────

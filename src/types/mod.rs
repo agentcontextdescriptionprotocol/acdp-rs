@@ -3,6 +3,7 @@ pub mod capabilities;
 pub mod data_ref;
 pub mod primitives;
 pub mod publish;
+pub mod receipt;
 pub mod search;
 pub(crate) mod serde_helpers;
 
@@ -11,4 +12,5 @@ pub use capabilities::{CapabilitiesDocument, Limits};
 pub use data_ref::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding, Location};
 pub use primitives::{AgentDid, ContentHash, ContextType, CtxId, LineageId, Status, Visibility};
 pub use publish::{PublishRequest, PublishResponse, WireError, WireErrorBody};
+pub use receipt::{ReceiptSigner, RegistryReceipt};
 pub use search::{SearchParams, SearchParamsBuilder, SearchResponse, SearchResult};

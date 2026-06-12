@@ -95,7 +95,10 @@ impl PyAcdpDidDocument {
         let doc: DidDocument = serde_json::from_str(json_str)
             .map_err(|e| did_err("parse_failed", format!("DID document parse: {e}")))?;
         if doc.id.is_empty() {
-            return Err(did_err("parse_failed", "DID document missing required `id`"));
+            return Err(did_err(
+                "parse_failed",
+                "DID document missing required `id`",
+            ));
         }
         if doc.id != expected_did {
             return Err(did_err(

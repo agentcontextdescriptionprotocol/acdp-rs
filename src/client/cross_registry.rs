@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::client::{RegistryClient, VerifiedContext};
+use crate::client::{ReceiptPolicy, RegistryClient, VerificationPolicy, VerifiedContext};
 use crate::did::WebResolver;
 use crate::error::AcdpError;
 use crate::safe_http::SsrfPolicy;
@@ -227,8 +227,21 @@ impl CrossRegistryResolver {
             )));
         }
 
-        // Steps 4–6: retrieve + verify
-        VerifiedContext::fetch(&registry, &self.did_resolver, &parsed).await
+        // Steps 4–6: retrieve + verify. fed-009 / RFC-ACDP-0010 §7+§11:
+        // an upstream advertising `acdp-registry-receipts` MUST always
+        // serve a receipt — absence is a registry fault (`invalid_receipt`),
+        // not a degraded mode — so the policy escalates to `Require` for
+        // such upstreams. Receipt-less upstreams proceed under the
+        // v0.1.0 trust model (receipt verified only if one is present).
+        let policy = if caps.claims_profile(crate::profile::Profile::RegistryReceipts) {
+            VerificationPolicy {
+                receipts: ReceiptPolicy::Require,
+                ..VerificationPolicy::default()
+            }
+        } else {
+            VerificationPolicy::default()
+        };
+        VerifiedContext::fetch_with_policy(&registry, &self.did_resolver, &parsed, &policy).await
     }
 
     /// Walk the `derived_from` graph rooted at `body` with cycle detection,

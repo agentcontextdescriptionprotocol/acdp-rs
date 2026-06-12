@@ -6,6 +6,7 @@
 //! shape are JS-idiomatic.
 
 use acdp::crypto::{P256SigningKey, SigningKey};
+use acdp::did::{did_key_from_ed25519, did_key_from_p256_sec1};
 use acdp::producer::{Producer, RequestBuilder};
 use acdp::types::{AgentDid, Body, CtxId};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -64,6 +65,21 @@ pub struct PublishOpts {
     /// Self-verifying `lin:sha256:<hex>` lineage id. v2+ supersession
     /// only — rejected on first-version publishes.
     pub expected_lineage_id: Option<String>,
+    /// Explicit `acdp_version` string for the emitted request.
+    ///
+    /// **SDK default (since 0.2): `acdp_version` is emitted explicitly,
+    /// set to the library's current ACDP protocol version
+    /// (`acdp::ACDP_VERSION` — `"0.2.0"` as of this release).** Per
+    /// RFC-ACDP-0001 §6 consumers treat an absent field as `"0.1.0"`,
+    /// but the omitted and explicit forms are *different JCS preimages*
+    /// and therefore hash differently — pick one form per lineage and
+    /// never switch mid-lineage.
+    pub acdp_version: Option<String>,
+    /// When `true`, omit `acdp_version` entirely (the 0.1.x SDK default
+    /// form). Use this only to reproduce hashes signed under the
+    /// omitted form (e.g. the sig-001 golden vector); takes precedence
+    /// over `acdpVersion`.
+    pub omit_acdp_version: Option<bool>,
 }
 
 /// Options for `buildSupersedeRequest`. Any field omitted is carried
@@ -85,6 +101,37 @@ pub struct SupersedeOpts {
     pub data_period: Option<String>,
     /// Self-verifying `lin:sha256:<hex>` lineage id (v2+).
     pub expected_lineage_id: Option<String>,
+    /// Explicit `acdp_version` string. **By default (since 0.2) the
+    /// library's current ACDP protocol version (`acdp::ACDP_VERSION` —
+    /// `"0.2.0"` as of this release) is emitted explicitly** — see
+    /// `PublishOpts.acdpVersion`. Do not switch the form mid-lineage.
+    pub acdp_version: Option<String>,
+    /// When `true`, omit `acdp_version` entirely (the 0.1.x form);
+    /// takes precedence over `acdpVersion`.
+    pub omit_acdp_version: Option<bool>,
+}
+
+/// Apply the `acdp_version` controls shared by every build path.
+///
+/// **SDK default (since 0.2): `acdp_version` is emitted explicitly,
+/// set to the library's current ACDP protocol version
+/// (`acdp::ACDP_VERSION` — `"0.2.0"` as of this release).**
+/// `omitAcdpVersion: true` restores the 0.1.x omitted
+/// form (needed to reproduce hashes signed under it, e.g. the sig-001
+/// golden vector); it takes precedence over an explicit `acdpVersion`
+/// string.
+fn apply_acdp_version(
+    mut b: RequestBuilder<'_>,
+    acdp_version: Option<String>,
+    omit_acdp_version: Option<bool>,
+) -> RequestBuilder<'_> {
+    if let Some(v) = acdp_version {
+        b = b.acdp_version(v);
+    }
+    if omit_acdp_version.unwrap_or(false) {
+        b = b.omit_acdp_version();
+    }
+    b
 }
 
 /// Apply the optional first-version `Body` fields shared by the Ed25519
@@ -136,7 +183,11 @@ fn apply_publish_fields(
     if let Some(l) = opts.expected_lineage_id {
         b = b.expected_lineage_id(parse_lineage_id(&l)?);
     }
-    Ok(b)
+    Ok(apply_acdp_version(
+        b,
+        opts.acdp_version,
+        opts.omit_acdp_version,
+    ))
 }
 
 /// Apply the optional override fields shared by the supersession paths.
@@ -178,10 +229,15 @@ fn apply_supersede_fields(
     if let Some(l) = opts.expected_lineage_id {
         b = b.expected_lineage_id(parse_lineage_id(&l)?);
     }
-    Ok(b)
+    Ok(apply_acdp_version(
+        b,
+        opts.acdp_version,
+        opts.omit_acdp_version,
+    ))
 }
 
-/// An ACDP producer: an Ed25519 signing key and its did:web identity.
+/// An ACDP producer: an Ed25519 signing key and its DID identity
+/// (`did:web`, or `did:key` via the `*DidKey` factories — ACDP 0.2).
 ///
 /// All methods return wire-ready JSON strings the caller sends via its
 /// own HTTP client. No HTTP calls are made inside this class.
@@ -199,6 +255,41 @@ pub struct AcdpProducer {
     key_id: String,
 }
 
+impl AcdpProducer {
+    /// Reconstruct the core [`Producer`] for this identity. For
+    /// `did:key` identities the agent_id/key_id are re-derived from the
+    /// key itself (the stored strings are display copies) and the
+    /// derived DID is checked against the stored one — a mismatch
+    /// (e.g. `fromSeed(seed, "did:key:zWRONG", …)`) throws instead of
+    /// silently signing under a different identity; for `did:web` the
+    /// stored strings are authoritative.
+    fn core_producer(&self) -> Result<Producer> {
+        let key = SigningKey::from_bytes(&self.seed);
+        if self.agent_did.starts_with("did:key:") {
+            // `Producer::new_did_key` derives agent_id/key_id from the
+            // key itself via this exact function; check the derived DID
+            // against the stored one before handing back the producer.
+            let derived = did_key_from_ed25519(&key.verifying_key_bytes());
+            if derived != self.agent_did {
+                return Err(Error::from_reason(format!(
+                    "seed does not correspond to the stored did:key: the seed derives \
+                     '{derived}' but this producer was constructed with '{stored}'. \
+                     A did:key identity IS its key — use fromSeedDidKey to derive the \
+                     DID from the seed, or pass the matching seed.",
+                    stored = self.agent_did
+                )));
+            }
+            Ok(Producer::new_did_key(key))
+        } else {
+            Ok(Producer::new(
+                key,
+                AgentDid::new(&self.agent_did),
+                &self.key_id,
+            ))
+        }
+    }
+}
+
 #[napi]
 impl AcdpProducer {
     /// Generate a producer with a fresh random Ed25519 key (OsRng).
@@ -210,6 +301,52 @@ impl AcdpProducer {
             agent_did,
             key_id,
         }
+    }
+
+    /// Generate a producer whose identity **is** its fresh Ed25519 key
+    /// (`did:key`, ACDP 0.2). The `agentDid` and `keyId` are derived
+    /// from the public key — no domain, no DID-document hosting.
+    /// Consumers verify did:key contexts offline
+    /// (`AcdpVerifier.verifyBodyOffline`), with no dependency on the
+    /// producer's infrastructure remaining online.
+    ///
+    /// Tradeoff: did:key cannot rotate — a new key is a new identity,
+    /// and `supersedes` requires the same `agent_id`, so lineage
+    /// continuity ends with the key. Use `did:web` for long-lived
+    /// organizational anchors; use did:key for ephemeral or
+    /// archival-critical producers.
+    #[napi(factory)]
+    pub fn generate_did_key() -> Self {
+        let key = SigningKey::generate();
+        let did = did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Self {
+            seed: Zeroizing::new(key.seed_bytes()),
+            agent_did: did,
+            key_id,
+        }
+    }
+
+    /// Construct a `did:key` producer from a 32-byte Ed25519 seed.
+    ///
+    /// Deterministic — the same seed always derives the same
+    /// `agentDid` / `keyId`. The seed is the private key — protect it
+    /// as such. See [`AcdpProducer::generate_did_key`] for the did:key
+    /// rotation tradeoff.
+    #[napi(factory)]
+    pub fn from_seed_did_key(seed: Buffer) -> Result<Self> {
+        let arr: [u8; 32] = seed
+            .as_ref()
+            .try_into()
+            .map_err(|_| Error::from_reason("seed must be exactly 32 bytes"))?;
+        let key = SigningKey::from_bytes(&arr);
+        let did = did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Ok(Self {
+            seed: Zeroizing::new(arr),
+            agent_did: did,
+            key_id,
+        })
     }
 
     /// Construct from a 32-byte Ed25519 seed (deterministic).
@@ -226,13 +363,14 @@ impl AcdpProducer {
         })
     }
 
-    /// The producer's DID (`did:web:…`).
+    /// The producer's DID (`did:web:…` or `did:key:…`).
     #[napi(getter)]
     pub fn agent_did(&self) -> String {
         self.agent_did.clone()
     }
 
-    /// The producer's signing-key DID URL (`did:web:…#key-1`).
+    /// The producer's signing-key DID URL (`did:web:…#key-1`, or the
+    /// `did:key:z…#z…` self-fragment form).
     #[napi(getter)]
     pub fn key_id(&self) -> String {
         self.key_id.clone()
@@ -255,11 +393,16 @@ impl AcdpProducer {
 
     /// Build and sign a first-version PublishRequest. Returns the
     /// wire JSON string.
+    ///
+    /// **By default (since 0.2) `acdp_version` is emitted explicitly,
+    /// set to the library's current ACDP protocol version
+    /// (`acdp::ACDP_VERSION` — `"0.2.0"` as of this release).** Pass
+    /// `omitAcdpVersion: true` to reproduce the 0.1.x omitted form (a
+    /// distinct JCS preimage, so a distinct `content_hash`), or
+    /// `acdpVersion` to pin another string.
     #[napi]
     pub fn build_publish_request(&self, opts: PublishOpts) -> Result<String> {
-        let key = SigningKey::from_bytes(&self.seed);
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new(key, did, &self.key_id);
+        let producer = self.core_producer()?;
         let ctx_type = parse_context_type(&opts.context_type)?;
         let vis = parse_visibility(opts.visibility.as_deref().unwrap_or("public"))?;
 
@@ -277,15 +420,19 @@ impl AcdpProducer {
     /// Build and sign a supersession PublishRequest from a previous
     /// version's `Body` JSON. Version is propagated automatically
     /// (`previous.version + 1`) and `lineage_id` is carried forward.
+    ///
+    /// **By default (since 0.2) `acdp_version` is emitted explicitly,
+    /// set to the library's current ACDP protocol version
+    /// (`acdp::ACDP_VERSION` — `"0.2.0"` as of this release)** — see
+    /// `buildPublishRequest`. Do not switch between the omitted and
+    /// explicit forms mid-lineage.
     #[napi]
     pub fn build_supersede_request(
         &self,
         previous_body_json: String,
         opts: SupersedeOpts,
     ) -> Result<String> {
-        let key = SigningKey::from_bytes(&self.seed);
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new(key, did, &self.key_id);
+        let producer = self.core_producer()?;
 
         let previous: Body = serde_json::from_str(&previous_body_json)
             .map_err(|e| Error::from_reason(format!("invalid body JSON: {e}")))?;
@@ -328,6 +475,44 @@ pub struct AcdpP256Producer {
     key_id: String,
 }
 
+impl AcdpP256Producer {
+    /// Reconstruct the core [`Producer`] for this identity. For
+    /// `did:key` identities the agent_id/key_id are re-derived from the
+    /// key itself (the stored strings are display copies) and the
+    /// derived DID is checked against the stored one — a mismatch
+    /// (e.g. `fromSeed(seed, "did:key:zWRONG", …)`) throws instead of
+    /// silently signing under a different identity; for `did:web` the
+    /// stored strings are authoritative.
+    fn core_producer(&self) -> Result<Producer> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        if self.agent_did.starts_with("did:key:") {
+            // `Producer::new_did_key_p256` derives agent_id/key_id from
+            // the key itself via this exact function; check the derived
+            // DID against the stored one before handing back the
+            // producer.
+            let derived = did_key_from_p256_sec1(&key.verifying_key_sec1())
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+            if derived != self.agent_did {
+                return Err(Error::from_reason(format!(
+                    "seed does not correspond to the stored did:key: the seed derives \
+                     '{derived}' but this producer was constructed with '{stored}'. \
+                     A did:key identity IS its key — use fromSeedDidKey to derive the \
+                     DID from the seed, or pass the matching seed.",
+                    stored = self.agent_did
+                )));
+            }
+            Producer::new_did_key_p256(key).map_err(|e| Error::from_reason(e.to_string()))
+        } else {
+            Ok(Producer::new_p256(
+                key,
+                AgentDid::new(&self.agent_did),
+                &self.key_id,
+            ))
+        }
+    }
+}
+
 #[napi]
 impl AcdpP256Producer {
     /// Generate a producer with a fresh random P-256 key (OsRng).
@@ -339,6 +524,44 @@ impl AcdpP256Producer {
             agent_did,
             key_id,
         }
+    }
+
+    /// Generate a producer whose identity **is** its fresh P-256 key
+    /// (`did:key`, ACDP 0.2). See [`AcdpProducer::generate_did_key`]
+    /// for the did:key rotation tradeoff.
+    #[napi(factory)]
+    pub fn generate_did_key() -> Result<Self> {
+        let key = P256SigningKey::generate();
+        let did = did_key_from_p256_sec1(&key.verifying_key_sec1())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Ok(Self {
+            seed: Zeroizing::new(key.seed_bytes()),
+            agent_did: did,
+            key_id,
+        })
+    }
+
+    /// Construct a `did:key` producer from a 32-byte P-256 private
+    /// scalar (big-endian). Deterministic — the same seed always
+    /// derives the same `agentDid` / `keyId`. Throws if the bytes are
+    /// not exactly 32 or are not a valid scalar.
+    #[napi(factory)]
+    pub fn from_seed_did_key(seed: Buffer) -> Result<Self> {
+        let arr: [u8; 32] = seed
+            .as_ref()
+            .try_into()
+            .map_err(|_| Error::from_reason("seed must be exactly 32 bytes"))?;
+        let key =
+            P256SigningKey::from_bytes(&arr).map_err(|e| Error::from_reason(e.to_string()))?;
+        let did = did_key_from_p256_sec1(&key.verifying_key_sec1())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Ok(Self {
+            seed: Zeroizing::new(arr),
+            agent_did: did,
+            key_id,
+        })
     }
 
     /// Construct from a 32-byte P-256 private scalar (deterministic).
@@ -358,13 +581,14 @@ impl AcdpP256Producer {
         })
     }
 
-    /// The producer's DID (`did:web:…`).
+    /// The producer's DID (`did:web:…` or `did:key:…`).
     #[napi(getter)]
     pub fn agent_did(&self) -> String {
         self.agent_did.clone()
     }
 
-    /// The producer's signing-key DID URL (`did:web:…#key-1`).
+    /// The producer's signing-key DID URL (`did:web:…#key-1`, or the
+    /// `did:key:z…#z…` self-fragment form).
     #[napi(getter)]
     pub fn key_id(&self) -> String {
         self.key_id.clone()
@@ -418,14 +642,14 @@ impl AcdpP256Producer {
     }
 
     /// Build and sign a first-version PublishRequest. Returns the wire
-    /// JSON string. Same surface as [`AcdpProducer::build_publish_request`];
-    /// only the signature algorithm differs.
+    /// JSON string. Same surface as [`AcdpProducer::build_publish_request`]
+    /// — including the explicit `acdp_version` default (the library's
+    /// current ACDP protocol version, `"0.2.0"` as of this release) and
+    /// the `acdpVersion` / `omitAcdpVersion` controls; only the
+    /// signature algorithm differs.
     #[napi]
     pub fn build_publish_request(&self, opts: PublishOpts) -> Result<String> {
-        let key = P256SigningKey::from_bytes(&self.seed)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new_p256(key, did, &self.key_id);
+        let producer = self.core_producer()?;
         let ctx_type = parse_context_type(&opts.context_type)?;
         let vis = parse_visibility(opts.visibility.as_deref().unwrap_or("public"))?;
 
@@ -442,17 +666,16 @@ impl AcdpP256Producer {
 
     /// Build and sign a supersession PublishRequest from a previous
     /// version's `Body` JSON. Same semantics as
-    /// [`AcdpProducer::build_supersede_request`].
+    /// [`AcdpProducer::build_supersede_request`], including the
+    /// explicit `acdp_version` default (the library's current ACDP
+    /// protocol version, `"0.2.0"` as of this release).
     #[napi]
     pub fn build_supersede_request(
         &self,
         previous_body_json: String,
         opts: SupersedeOpts,
     ) -> Result<String> {
-        let key = P256SigningKey::from_bytes(&self.seed)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new_p256(key, did, &self.key_id);
+        let producer = self.core_producer()?;
 
         let previous: Body = serde_json::from_str(&previous_body_json)
             .map_err(|e| Error::from_reason(format!("invalid body JSON: {e}")))?;

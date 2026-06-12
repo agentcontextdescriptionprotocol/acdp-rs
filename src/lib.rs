@@ -72,11 +72,17 @@ pub mod registry;
 
 /// The ACDP protocol version this library implements.
 ///
-/// Per the spec CHANGELOG the `0.0.1` identifier was never promoted past
-/// draft and is superseded by `0.1.0`. Note that an absent
-/// `acdp_version` field on a publish request is interpreted as this
-/// version by the protocol — see [`producer::RequestBuilder::acdp_version`].
-pub const ACDP_VERSION: &str = "0.1.0";
+/// `0.2.0` carries the Trust & Hardening amendments (registry receipts
+/// — RFC-ACDP-0010, `did:key` producers, mandatory explicit
+/// `acdp_version`, lineage anchoring); those RFC sections are Draft
+/// until the 0.2.0 conformance pack passes two independent
+/// implementations. Every v0.1.0 body, signature, and `content_hash`
+/// remains valid. Note that an absent `acdp_version` field on a publish
+/// request is interpreted as `0.1.0` by the protocol — see
+/// [`producer::RequestBuilder::acdp_version`]; 0.2.0 builders MUST
+/// emit the field explicitly (RFC-ACDP-0001 §6), which this library's
+/// builder does by default.
+pub const ACDP_VERSION: &str = "0.2.0";
 
 /// The JSON Schema namespace (`$id` prefix) for this protocol version,
 /// e.g. `<ACDP_SCHEMA_NAMESPACE>/acdp-error.schema.json`.

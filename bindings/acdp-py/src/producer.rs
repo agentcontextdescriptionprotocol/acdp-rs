@@ -14,6 +14,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use acdp::crypto::{P256SigningKey, SigningKey};
+use acdp::did::{did_key_from_ed25519, did_key_from_p256_sec1};
 use acdp::producer::{Producer, RequestBuilder};
 use acdp::types::{AgentDid, Body, CtxId};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -25,6 +26,31 @@ use crate::helpers::{
     parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id, parse_timestamp,
     parse_visibility,
 };
+
+/// Apply the `acdp_version` controls shared by every build path.
+///
+/// **SDK default (since 0.2): `acdp_version` is emitted explicitly as
+/// the library's current ACDP protocol version (`acdp::ACDP_VERSION`,
+/// now `"0.2.0"`).** Per RFC-ACDP-0001 §6 consumers treat an absent
+/// field as `"0.1.0"`, but the omitted and explicit forms are
+/// *different JCS preimages* and therefore hash differently — pick one
+/// form per lineage and never switch mid-lineage. `omit_acdp_version=True`
+/// restores the 0.1.x omitted form (needed to reproduce hashes signed
+/// under it, e.g. the sig-001 golden vector); it takes precedence over
+/// an explicit `acdp_version` string.
+fn apply_acdp_version(
+    mut b: RequestBuilder<'_>,
+    acdp_version: Option<String>,
+    omit_acdp_version: Option<bool>,
+) -> RequestBuilder<'_> {
+    if let Some(v) = acdp_version {
+        b = b.acdp_version(v);
+    }
+    if omit_acdp_version.unwrap_or(false) {
+        b = b.omit_acdp_version();
+    }
+    b
+}
 
 /// Apply the optional first-version `Body` fields shared by the Ed25519
 /// and P-256 publish paths. The complex fields (`data_refs`,
@@ -46,6 +72,8 @@ fn apply_publish_fields(
     expires_at: Option<String>,
     data_period: Option<String>,
     expected_lineage_id: Option<String>,
+    acdp_version: Option<String>,
+    omit_acdp_version: Option<bool>,
 ) -> PyResult<RequestBuilder<'_>> {
     if let Some(d) = description {
         b = b.description(d);
@@ -88,7 +116,7 @@ fn apply_publish_fields(
     if let Some(l) = expected_lineage_id {
         b = b.expected_lineage_id(parse_lineage_id(&l)?);
     }
-    Ok(b)
+    Ok(apply_acdp_version(b, acdp_version, omit_acdp_version))
 }
 
 /// Apply the optional override fields shared by the supersession paths.
@@ -106,6 +134,8 @@ fn apply_supersede_fields(
     expires_at: Option<String>,
     data_period: Option<String>,
     expected_lineage_id: Option<String>,
+    acdp_version: Option<String>,
+    omit_acdp_version: Option<bool>,
 ) -> PyResult<RequestBuilder<'_>> {
     if let Some(t) = title {
         b = b.title(t);
@@ -139,10 +169,11 @@ fn apply_supersede_fields(
     if let Some(l) = expected_lineage_id {
         b = b.expected_lineage_id(parse_lineage_id(&l)?);
     }
-    Ok(b)
+    Ok(apply_acdp_version(b, acdp_version, omit_acdp_version))
 }
 
-/// An ACDP producer: an Ed25519 signing key and its did:web identity.
+/// An ACDP producer: an Ed25519 signing key and its DID identity
+/// (`did:web`, or `did:key` via the `*_did_key` constructors — ACDP 0.2).
 ///
 /// All methods return wire-ready JSON strings the caller sends via its
 /// own HTTP client (httpx, requests, etc.). No HTTP calls are made
@@ -160,6 +191,38 @@ pub struct PyAcdpProducer {
     seed: Zeroizing<[u8; 32]>,
     agent_did: String,
     key_id: String,
+}
+
+impl PyAcdpProducer {
+    /// Reconstruct the core [`Producer`] for this identity. For
+    /// `did:key` identities the agent_id/key_id are re-derived from the
+    /// key itself, and the derivation MUST reproduce the stored
+    /// `agent_did` — a mismatch (e.g. `from_seed` paired with someone
+    /// else's did:key) raises `ValueError` instead of silently signing
+    /// under a different identity. For `did:web` the stored strings are
+    /// authoritative.
+    fn core_producer(&self) -> PyResult<Producer> {
+        let key = SigningKey::from_bytes(&self.seed);
+        if self.agent_did.starts_with("did:key:") {
+            let derived = did_key_from_ed25519(&key.verifying_key_bytes());
+            if derived != self.agent_did {
+                return Err(PyValueError::new_err(format!(
+                    "did:key identity mismatch: this seed derives '{derived}', \
+                     not the stored agent_did '{}' — the seed does not correspond \
+                     to the stored did:key (use from_seed_did_key, or pass the \
+                     seed that owns this DID)",
+                    self.agent_did
+                )));
+            }
+            Ok(Producer::new_did_key(key))
+        } else {
+            Ok(Producer::new(
+                key,
+                AgentDid::new(&self.agent_did),
+                &self.key_id,
+            ))
+        }
+    }
 }
 
 #[pymethods]
@@ -196,13 +259,59 @@ impl PyAcdpProducer {
         })
     }
 
-    /// The producer's DID (`did:web:…`).
+    /// Generate a producer with a fresh random Ed25519 key whose
+    /// identity **is** the key (`did:key`, ACDP 0.2).
+    ///
+    /// `agent_did` and `key_id` are derived from the public key — no
+    /// domain, no DID-document hosting. Consumers verify did:key
+    /// contexts fully offline via `AcdpVerifier.verify_body_offline`.
+    ///
+    /// Tradeoff: did:key cannot rotate — a new key is a new identity,
+    /// and `supersedes` requires the same `agent_id`, so lineage
+    /// continuity ends with the key. Use `did:web` for long-lived
+    /// organizational anchors; use did:key for ephemeral or
+    /// archival-critical producers.
+    #[staticmethod]
+    fn generate_did_key() -> Self {
+        let key = SigningKey::generate();
+        let did = did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Self {
+            seed: Zeroizing::new(key.seed_bytes()),
+            agent_did: did,
+            key_id,
+        }
+    }
+
+    /// Construct a `did:key` producer from a 32-byte Ed25519 seed.
+    ///
+    /// Deterministic — the same seed always derives the same
+    /// `agent_did` / `key_id`. The seed is the private key — protect it
+    /// as such. See [`PyAcdpProducer::generate_did_key`] for the
+    /// did:key rotation tradeoff.
+    #[staticmethod]
+    fn from_seed_did_key(seed: &[u8]) -> PyResult<Self> {
+        let arr: [u8; 32] = seed
+            .try_into()
+            .map_err(|_| PyValueError::new_err("seed must be exactly 32 bytes"))?;
+        let key = SigningKey::from_bytes(&arr);
+        let did = did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Ok(Self {
+            seed: Zeroizing::new(arr),
+            agent_did: did,
+            key_id,
+        })
+    }
+
+    /// The producer's DID (`did:web:…` or `did:key:…`).
     #[getter]
     fn agent_did(&self) -> &str {
         &self.agent_did
     }
 
-    /// The producer's signing-key DID URL (`did:web:…#key-1`).
+    /// The producer's signing-key DID URL (`did:web:…#key-1`, or the
+    /// `did:key:z…#z…` self-fragment form).
     #[getter]
     fn key_id(&self) -> &str {
         &self.key_id
@@ -238,13 +347,23 @@ impl PyAcdpProducer {
     /// `{"start": <rfc3339>, "end": <rfc3339>}`; `expires_at` an RFC 3339
     /// timestamp string; `expected_lineage_id` a `lin:sha256:<hex>`
     /// string (v2+ only — rejected on first-version publishes).
+    ///
+    /// **`acdp_version` default (since 0.2): emitted explicitly as the
+    /// library's current ACDP protocol version (`acdp::ACDP_VERSION`,
+    /// now `"0.2.0"`).** The omitted and explicit forms are *different
+    /// JCS preimages* and hash differently — pick one form per lineage
+    /// and never switch mid-lineage. Pass `acdp_version` to override
+    /// the string, or `omit_acdp_version=True` to restore the 0.1.x
+    /// omitted form (e.g. to reproduce the sig-001 golden hash); the
+    /// latter takes precedence.
     #[pyo3(signature = (
         title, context_type,
         visibility=None, description=None, summary=None,
         tags=None, domain=None, metadata=None,
         derived_from=None, audience=None, schema_uri=None,
         contributors=None, data_refs=None, expires_at=None,
-        data_period=None, expected_lineage_id=None
+        data_period=None, expected_lineage_id=None,
+        acdp_version=None, omit_acdp_version=None
     ))]
     fn build_publish_request(
         &self,
@@ -264,10 +383,10 @@ impl PyAcdpProducer {
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
+        acdp_version: Option<String>,
+        omit_acdp_version: Option<bool>,
     ) -> PyResult<String> {
-        let key = SigningKey::from_bytes(&self.seed);
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new(key, did, &self.key_id);
+        let producer = self.core_producer()?;
         let ctx_type = parse_context_type(&context_type)?;
         let vis = parse_visibility(visibility.as_deref().unwrap_or("public"))?;
 
@@ -291,6 +410,8 @@ impl PyAcdpProducer {
             expires_at,
             data_period,
             expected_lineage_id,
+            acdp_version,
+            omit_acdp_version,
         )?;
 
         let req = b
@@ -307,12 +428,19 @@ impl PyAcdpProducer {
     /// (`previous.version + 1`) and `lineage_id` is carried forward.
     /// Any kwargs override the corresponding field from the previous
     /// body; omitted fields are retained (mirrors `new_version_from`).
+    ///
+    /// `acdp_version` / `omit_acdp_version` behave as in
+    /// [`PyAcdpProducer::build_publish_request`] — the explicit default
+    /// (the library's current ACDP protocol version, now `"0.2.0"`) and
+    /// the omitted form are *distinct preimages*; keep a lineage on
+    /// whichever form it started with.
     #[pyo3(signature = (
         previous_body_json,
         title=None, summary=None, description=None,
         tags=None, domain=None, metadata=None,
         data_refs=None, expires_at=None, data_period=None,
-        expected_lineage_id=None
+        expected_lineage_id=None,
+        acdp_version=None, omit_acdp_version=None
     ))]
     fn build_supersede_request(
         &self,
@@ -327,10 +455,10 @@ impl PyAcdpProducer {
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
+        acdp_version: Option<String>,
+        omit_acdp_version: Option<bool>,
     ) -> PyResult<String> {
-        let key = SigningKey::from_bytes(&self.seed);
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new(key, did, &self.key_id);
+        let producer = self.core_producer()?;
 
         let previous: Body = serde_json::from_str(previous_body_json)
             .map_err(|e| PyValueError::new_err(format!("invalid body JSON: {e}")))?;
@@ -348,6 +476,8 @@ impl PyAcdpProducer {
             expires_at,
             data_period,
             expected_lineage_id,
+            acdp_version,
+            omit_acdp_version,
         )?;
 
         let req = b
@@ -394,6 +524,40 @@ pub struct PyAcdpP256Producer {
     key_id: String,
 }
 
+impl PyAcdpP256Producer {
+    /// Reconstruct the core [`Producer`] for this identity. For
+    /// `did:key` identities the agent_id/key_id are re-derived from the
+    /// key itself, and the derivation MUST reproduce the stored
+    /// `agent_did` — a mismatch (e.g. `from_seed` paired with someone
+    /// else's did:key) raises `ValueError` instead of silently signing
+    /// under a different identity. For `did:web` the stored strings are
+    /// authoritative.
+    fn core_producer(&self) -> PyResult<Producer> {
+        let key = P256SigningKey::from_bytes(&self.seed)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        if self.agent_did.starts_with("did:key:") {
+            let derived = did_key_from_p256_sec1(&key.verifying_key_sec1())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            if derived != self.agent_did {
+                return Err(PyValueError::new_err(format!(
+                    "did:key identity mismatch: this seed derives '{derived}', \
+                     not the stored agent_did '{}' — the seed does not correspond \
+                     to the stored did:key (use from_seed_did_key, or pass the \
+                     seed that owns this DID)",
+                    self.agent_did
+                )));
+            }
+            Producer::new_did_key_p256(key).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        } else {
+            Ok(Producer::new_p256(
+                key,
+                AgentDid::new(&self.agent_did),
+                &self.key_id,
+            ))
+        }
+    }
+}
+
 #[pymethods]
 impl PyAcdpP256Producer {
     /// Generate a producer with a fresh random P-256 key (OsRng).
@@ -430,13 +594,54 @@ impl PyAcdpP256Producer {
         })
     }
 
-    /// The producer's DID (`did:web:…`).
+    /// Generate a producer with a fresh random P-256 key whose identity
+    /// **is** the key (`did:key`, ACDP 0.2). P-256 counterpart of
+    /// [`PyAcdpProducer::generate_did_key`] — same derivation, same
+    /// no-rotation tradeoff.
+    ///
+    /// [`PyAcdpProducer::generate_did_key`]: crate::producer::PyAcdpProducer
+    #[staticmethod]
+    fn generate_did_key() -> PyResult<Self> {
+        let key = P256SigningKey::generate();
+        let did = did_key_from_p256_sec1(&key.verifying_key_sec1())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Ok(Self {
+            seed: Zeroizing::new(key.seed_bytes()),
+            agent_did: did,
+            key_id,
+        })
+    }
+
+    /// Construct a `did:key` producer from a 32-byte P-256 private
+    /// scalar (big-endian). Deterministic — the same seed always
+    /// derives the same `agent_did` / `key_id`. Raises `ValueError` if
+    /// the bytes are not exactly 32 or are not a valid scalar.
+    #[staticmethod]
+    fn from_seed_did_key(seed: &[u8]) -> PyResult<Self> {
+        let arr: [u8; 32] = seed
+            .try_into()
+            .map_err(|_| PyValueError::new_err("seed must be exactly 32 bytes"))?;
+        let key =
+            P256SigningKey::from_bytes(&arr).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let did = did_key_from_p256_sec1(&key.verifying_key_sec1())
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let key_id = format!("{did}#{msi}", msi = &did["did:key:".len()..]);
+        Ok(Self {
+            seed: Zeroizing::new(arr),
+            agent_did: did,
+            key_id,
+        })
+    }
+
+    /// The producer's DID (`did:web:…` or `did:key:…`).
     #[getter]
     fn agent_did(&self) -> &str {
         &self.agent_did
     }
 
-    /// The producer's signing-key DID URL (`did:web:…#key-1`).
+    /// The producer's signing-key DID URL (`did:web:…#key-1`, or the
+    /// `did:key:z…#z…` self-fragment form).
     #[getter]
     fn key_id(&self) -> &str {
         &self.key_id
@@ -493,7 +698,9 @@ impl PyAcdpP256Producer {
 
     /// Build and sign a first-version PublishRequest. Returns the wire
     /// JSON string. Identical surface to
-    /// [`PyAcdpProducer::build_publish_request`]; only the signature
+    /// [`PyAcdpProducer::build_publish_request`] (including the
+    /// explicit-`acdp_version` default and the `omit_acdp_version`
+    /// opt-out — distinct preimages, see there); only the signature
     /// algorithm differs.
     #[pyo3(signature = (
         title, context_type,
@@ -501,7 +708,8 @@ impl PyAcdpP256Producer {
         tags=None, domain=None, metadata=None,
         derived_from=None, audience=None, schema_uri=None,
         contributors=None, data_refs=None, expires_at=None,
-        data_period=None, expected_lineage_id=None
+        data_period=None, expected_lineage_id=None,
+        acdp_version=None, omit_acdp_version=None
     ))]
     fn build_publish_request(
         &self,
@@ -521,11 +729,10 @@ impl PyAcdpP256Producer {
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
+        acdp_version: Option<String>,
+        omit_acdp_version: Option<bool>,
     ) -> PyResult<String> {
-        let key = P256SigningKey::from_bytes(&self.seed)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new_p256(key, did, &self.key_id);
+        let producer = self.core_producer()?;
         let ctx_type = parse_context_type(&context_type)?;
         let vis = parse_visibility(visibility.as_deref().unwrap_or("public"))?;
 
@@ -549,6 +756,8 @@ impl PyAcdpP256Producer {
             expires_at,
             data_period,
             expected_lineage_id,
+            acdp_version,
+            omit_acdp_version,
         )?;
 
         let req = b
@@ -559,13 +768,15 @@ impl PyAcdpP256Producer {
 
     /// Build and sign a supersession PublishRequest from a previous
     /// version's `Body` JSON. Same semantics as
-    /// [`PyAcdpProducer::build_supersede_request`].
+    /// [`PyAcdpProducer::build_supersede_request`] (including the
+    /// `acdp_version` / `omit_acdp_version` distinct-preimage rule).
     #[pyo3(signature = (
         previous_body_json,
         title=None, summary=None, description=None,
         tags=None, domain=None, metadata=None,
         data_refs=None, expires_at=None, data_period=None,
-        expected_lineage_id=None
+        expected_lineage_id=None,
+        acdp_version=None, omit_acdp_version=None
     ))]
     fn build_supersede_request(
         &self,
@@ -580,11 +791,10 @@ impl PyAcdpP256Producer {
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
+        acdp_version: Option<String>,
+        omit_acdp_version: Option<bool>,
     ) -> PyResult<String> {
-        let key = P256SigningKey::from_bytes(&self.seed)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let did = AgentDid::new(&self.agent_did);
-        let producer = Producer::new_p256(key, did, &self.key_id);
+        let producer = self.core_producer()?;
 
         let previous: Body = serde_json::from_str(previous_body_json)
             .map_err(|e| PyValueError::new_err(format!("invalid body JSON: {e}")))?;
@@ -602,6 +812,8 @@ impl PyAcdpP256Producer {
             expires_at,
             data_period,
             expected_lineage_id,
+            acdp_version,
+            omit_acdp_version,
         )?;
 
         let req = b

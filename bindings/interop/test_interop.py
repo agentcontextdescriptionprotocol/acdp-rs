@@ -48,6 +48,11 @@ GOLDEN_HASH = (
 GOLDEN_SIG = (
     "ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ=="
 )
+# sig-001/sig-002 were signed under the 0.1.x omitted-`acdp_version`
+# form; the 0.2 builders emit the field by default, so the golden
+# tests reproduce the pinned preimage via the explicit opt-out.
+PY_OMIT = {"omit_acdp_version": True}
+NODE_OMIT = {"omitAcdpVersion": True}
 
 
 # ── Node side: a subprocess worker driven over JSON-RPC ─────────────────
@@ -138,6 +143,7 @@ def test_python_matches_golden_hash_and_signature():
         {
             "title": "Golden test vector — minimal first version",
             "context_type": "data_snapshot",
+            **PY_OMIT,
         }
     )
     req = json.loads(raw)
@@ -151,6 +157,7 @@ def test_node_matches_golden_hash_and_signature(node):
         {
             "title": "Golden test vector — minimal first version",
             "contextType": "data_snapshot",
+            **NODE_OMIT,
         },
     )
     req = json.loads(raw)
@@ -325,7 +332,9 @@ def _node_p256_publish(node, opts_camel: dict) -> str:
 
 def test_p256_python_matches_golden():
     req = json.loads(
-        _python_p256_publish({**P256_MINIMAL, "context_type": "data_snapshot"})
+        _python_p256_publish(
+            {**P256_MINIMAL, "context_type": "data_snapshot", **PY_OMIT}
+        )
     )
     assert req["content_hash"] == P256_GOLDEN_HASH
     assert req["signature"]["algorithm"] == "ecdsa-p256"
@@ -334,7 +343,9 @@ def test_p256_python_matches_golden():
 
 def test_p256_node_matches_golden(node):
     req = json.loads(
-        _node_p256_publish(node, {**P256_MINIMAL, "contextType": "data_snapshot"})
+        _node_p256_publish(
+            node, {**P256_MINIMAL, "contextType": "data_snapshot", **NODE_OMIT}
+        )
     )
     assert req["content_hash"] == P256_GOLDEN_HASH
     assert req["signature"]["algorithm"] == "ecdsa-p256"

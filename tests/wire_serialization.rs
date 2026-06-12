@@ -71,6 +71,7 @@ fn search_response_rejects_null_next_cursor() {
 #[test]
 fn publish_response_has_exactly_5_keys() {
     let resp = PublishResponse {
+        registry_receipt: None,
         ctx_id: CtxId("acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into()),
         lineage_id: LineageId(
             "lin:sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),

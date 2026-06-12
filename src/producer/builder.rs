@@ -68,6 +68,45 @@ impl Producer {
         }
     }
 
+    /// Create a producer whose identity **is** its Ed25519 key
+    /// (`did:key`, ACDP 0.2).
+    ///
+    /// The `agent_id` and `key_id` are derived from the public key — no
+    /// domain, no DID-document hosting, no manual DID string. Consumers
+    /// verify did:key contexts offline
+    /// ([`crate::crypto::verify::verify_body_offline`]), with no
+    /// dependency on the producer's infrastructure remaining online.
+    ///
+    /// Tradeoff: did:key cannot rotate. A new key is a new identity,
+    /// and `supersedes` requires the same `agent_id`, so lineage
+    /// continuity ends with the key. Use `did:web` for long-lived
+    /// organizational anchors; use did:key for ephemeral or
+    /// archival-critical producers.
+    pub fn new_did_key(signing_key: SigningKey) -> Self {
+        let did = crate::did::key::did_key_from_ed25519(&signing_key.verifying_key_bytes());
+        let key_id = crate::did::key::did_key_url(&did)
+            .expect("did_key_from_ed25519 always yields a did:key DID");
+        Self {
+            signing_key: AcdpSigningKey::Ed25519(signing_key),
+            agent_id: AgentDid::new(did),
+            key_id,
+        }
+    }
+
+    /// Create a producer whose identity **is** its ECDSA-P256 key
+    /// (`did:key`, ACDP 0.2). See [`Producer::new_did_key`] for the
+    /// rotation tradeoff. Fails only if the key's SEC1 point is
+    /// malformed (cannot happen for a key produced by this crate).
+    pub fn new_did_key_p256(signing_key: P256SigningKey) -> Result<Self, AcdpError> {
+        let did = crate::did::key::did_key_from_p256_sec1(&signing_key.verifying_key_sec1())?;
+        let key_id = crate::did::key::did_key_url(&did)?;
+        Ok(Self {
+            signing_key: AcdpSigningKey::P256(signing_key),
+            agent_id: AgentDid::new(did),
+            key_id,
+        })
+    }
+
     /// Start building a new first-version publish request.
     pub fn publish_request(&self) -> RequestBuilder<'_> {
         RequestBuilder::new(self)
@@ -197,7 +236,15 @@ impl<'a> RequestBuilder<'a> {
             data_period: None,
             metadata: None,
             schema_uri: None,
-            acdp_version: None,
+            // ACDP 0.2 (trust & hardening, WS-D1): emit the protocol
+            // version explicitly by default. An absent `acdp_version`
+            // and an explicit one produce different content_hash values
+            // (the JCS preimages differ); defaulting to explicit
+            // emission removes the omitted-vs-explicit ambiguity for
+            // everything built going forward. Use
+            // [`RequestBuilder::omit_acdp_version`] to reproduce the
+            // 0.1.x omitted form (e.g. the sig-001 golden vector).
+            acdp_version: Some(crate::ACDP_VERSION.to_string()),
         }
     }
 
@@ -317,25 +364,31 @@ impl<'a> RequestBuilder<'a> {
     /// Set the ACDP protocol version string explicitly (e.g.
     /// [`crate::ACDP_VERSION`]).
     ///
-    /// **SDK default: omitted.** Per RFC-ACDP-0001 §6, a conformant
-    /// consumer treats an absent `acdp_version` as `"0.1.0"`. This
-    /// builder defaults to omission for golden-vector stability (the
-    /// `sig-001` fixture was signed without the field; changing the
-    /// default would break every hash that doesn't include
-    /// `acdp_version`).
+    /// **SDK default (since 0.2): emitted explicitly** as
+    /// [`crate::ACDP_VERSION`]. Per RFC-ACDP-0001 §6 a conformant
+    /// consumer treats an absent `acdp_version` as `"0.1.0"`, but an
+    /// absent field and an explicit one are *different JCS preimages*
+    /// and therefore produce *different `content_hash` values* — the
+    /// single most common source of cross-implementation hash
+    /// divergence after timestamp precision. Explicit emission removes
+    /// the ambiguity for everything built going forward.
     ///
-    /// **Distinct preimage warning.** An absent `acdp_version` and an
-    /// explicit `"0.1.0"` are *semantically identical* to consumers but
-    /// produce *different `content_hash` values* because the JCS byte
-    /// sequences differ. Pick one and sign over exactly what you emit;
-    /// do not switch mid-lineage.
-    ///
-    /// **One-line explicit emission:**
-    /// ```rust,ignore
-    /// builder.acdp_version(acdp::ACDP_VERSION)
-    /// ```
+    /// **Distinct preimage warning.** Pick one form and sign over
+    /// exactly what you emit; do not switch mid-lineage. To reproduce a
+    /// hash signed under the 0.1.x omitted form (e.g. the `sig-001`
+    /// golden vector), call [`Self::omit_acdp_version`].
     pub fn acdp_version(mut self, v: impl Into<String>) -> Self {
         self.acdp_version = Some(v.into());
+        self
+    }
+
+    /// Omit `acdp_version` from the publish request (the 0.1.x SDK
+    /// default form). Consumers treat the absent field as `"0.1.0"`
+    /// (RFC-ACDP-0001 §6); the omitted and explicit forms hash
+    /// differently. Use this only to reproduce hashes signed under the
+    /// omitted form — new lineages should keep the explicit default.
+    pub fn omit_acdp_version(mut self) -> Self {
+        self.acdp_version = None;
         self
     }
 
@@ -621,9 +674,12 @@ mod tests {
     fn unset_optional_fields_are_omitted_from_hash_preimage() {
         // Regression test: unset Options must NOT serialize as JSON null in
         // the canonical form, otherwise the golden vector hash diverges.
+        // sig-001 was signed under the 0.1.x omitted-`acdp_version` form,
+        // reproduced here via the explicit opt-out.
         let p = test_producer();
         let req = p
             .publish_request()
+            .omit_acdp_version()
             .title("Golden test vector — minimal first version")
             .context_type(ContextType::DataSnapshot)
             .visibility(Visibility::Public)
@@ -633,6 +689,34 @@ mod tests {
         assert_eq!(
             req.content_hash.as_str(),
             "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5"
+        );
+    }
+
+    /// WS-D1 — the 0.2 builder emits `acdp_version` explicitly by
+    /// default; the default form hashes identically to an explicit
+    /// `.acdp_version(ACDP_VERSION)` call and differently from the
+    /// omitted form (distinct JCS preimages).
+    #[test]
+    fn default_emits_acdp_version_explicitly() {
+        let p = test_producer();
+        let build = |b: RequestBuilder<'_>| {
+            b.title("t")
+                .context_type(ContextType::DataSnapshot)
+                .build()
+                .unwrap()
+        };
+        let default_form = build(p.publish_request());
+        let explicit_form = build(p.publish_request().acdp_version(crate::ACDP_VERSION));
+        let omitted_form = build(p.publish_request().omit_acdp_version());
+
+        assert_eq!(
+            default_form.acdp_version.as_deref(),
+            Some(crate::ACDP_VERSION)
+        );
+        assert_eq!(default_form.content_hash, explicit_form.content_hash);
+        assert_ne!(
+            default_form.content_hash, omitted_form.content_hash,
+            "omitted and explicit acdp_version are distinct JCS preimages"
         );
     }
 

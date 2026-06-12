@@ -22,6 +22,9 @@ pub enum Profile {
     RegistryDiscovery,
     /// `acdp-registry-federated` — adds cross-registry resolution.
     RegistryFederated,
+    /// `acdp-registry-receipts` — mints registry-signed publication
+    /// receipts (ACDP 0.2, RFC-ACDP-0010).
+    RegistryReceipts,
     /// `acdp-consumer` — a consumer of contexts (not a registry).
     Consumer,
 }
@@ -34,6 +37,7 @@ impl Profile {
             Profile::RegistryCore => "acdp-registry-core",
             Profile::RegistryDiscovery => "acdp-registry-discovery",
             Profile::RegistryFederated => "acdp-registry-federated",
+            Profile::RegistryReceipts => "acdp-registry-receipts",
             Profile::Consumer => "acdp-consumer",
         }
     }

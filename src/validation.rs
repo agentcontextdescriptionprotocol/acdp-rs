@@ -195,6 +195,7 @@ pub fn validate_publish_request(req: &PublishRequest) -> Result<(), AcdpError> {
     }
 
     validate_signature_length(&req.signature.algorithm, &req.signature.value)?;
+    validate_did_key_key_id_form(&req.signature.key_id)?;
     ContentHash::parse(req.content_hash.as_str())?;
 
     // Identifier patterns on every supplied ctx_id
@@ -318,6 +319,7 @@ fn validate_body_inner(body: &Body, check_embedded_hashes: bool) -> Result<(), A
     }
 
     validate_signature_length(&body.signature.algorithm, &body.signature.value)?;
+    validate_did_key_key_id_form(&body.signature.key_id)?;
     validate_identifiers(&body.ctx_id, &body.lineage_id, &body.content_hash)?;
 
     // Every entry in supersedes / derived_from MUST be a valid ctx_id.
@@ -770,10 +772,41 @@ fn validate_tag(tag: &str) -> Result<(), AcdpError> {
 
 /// Validate a DID used as `agent_id`.
 ///
-/// RFC-ACDP-0001 §5.4 mandates `did:web` for v0.1.0 producers. Earlier
-/// revisions accepted any method; this closes a silent acceptance bug
-/// for `did:key`-signed publications.
+/// Producers MUST use a resolvable method: `did:web` (RFC-ACDP-0001
+/// §5.4, the v0.1.0 baseline) or `did:key` (ACDP 0.2 — pure offline
+/// resolution; the DID is the key). For did:key the embedded key
+/// material is decoded here so a garbage identifier fails at schema
+/// validation rather than at signature verification. Whether a given
+/// *registry* accepts did:key producers is a capabilities decision
+/// (`supported_did_methods`), enforced by
+/// `registry::PublishValidator` — this function checks protocol-level
+/// well-formedness only.
+/// Validate the `signature.key_id` form when it is a `did:key` URL
+/// (ACDP 0.2). The only verification method a did:key document has is
+/// the key itself, so the fragment MUST equal the method-specific
+/// identifier and the key material MUST decode. No-op for other
+/// methods — their key_id resolves against a DID document at
+/// verification time.
+fn validate_did_key_key_id_form(key_id: &str) -> Result<(), AcdpError> {
+    if !key_id.starts_with("did:key:") {
+        return Ok(());
+    }
+    crate::did::key::resolve_did_key_url(key_id).map_err(|e| {
+        AcdpError::SchemaViolation(format!(
+            "signature.key_id is not a well-formed did:key URL: {e}"
+        ))
+    })?;
+    Ok(())
+}
+
 fn validate_agent_did(did: &AgentDid) -> Result<(), AcdpError> {
+    if did.as_str().starts_with("did:key:") {
+        AgentDid::parse(did.as_str())?;
+        crate::did::key::resolve_did_key(did.as_str()).map_err(|e| {
+            AcdpError::SchemaViolation(format!("agent_id is not a well-formed did:key: {e}"))
+        })?;
+        return Ok(());
+    }
     AgentDid::parse_web(did.as_str())?;
     Ok(())
 }
