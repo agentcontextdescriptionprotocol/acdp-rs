@@ -132,6 +132,71 @@ impl PyAcdpDidDocument {
         requested_key_id: &str,
         requested_alg: &str,
     ) -> PyResult<HashMap<String, String>> {
+        let (vm_id, public_key_b64) = self.resolve_key(requested_key_id, requested_alg)?;
+
+        if !self.inner.is_assertion_method(requested_key_id) {
+            return Err(did_err(
+                "key_not_authorized",
+                format!(
+                    "verificationMethod '{requested_key_id}' is not in assertionMethod \
+                     (cannot sign challenges)"
+                ),
+            ));
+        }
+
+        let mut out = HashMap::with_capacity(3);
+        out.insert("key_id".to_string(), vm_id);
+        out.insert("algorithm".to_string(), requested_alg.to_string());
+        out.insert("public_key_b64".to_string(), public_key_b64);
+        Ok(out)
+    }
+
+    /// Resolve a **registry receipt** signing key, applying the
+    /// RFC-ACDP-0010 §9 lifecycle instead of the `assertionMethod` gate:
+    /// retired receipt keys MUST remain in `verificationMethod`
+    /// indefinitely and MUST still verify historical receipts even after
+    /// rotation removes them from `assertionMethod`. A key absent from
+    /// `verificationMethod` entirely still fails
+    /// (`.reason == "key_not_found"`) — full removal is the registry's
+    /// compromise-revocation signal.
+    ///
+    /// Returns `{"key_id", "algorithm", "public_key_b64", "historical"}`
+    /// where `historical` is `"true"` when the key is no longer in
+    /// `assertionMethod` (verify the receipt, but report it with the
+    /// distinguishable *historically authorized* status) and `"false"`
+    /// for a current receipt key. The algorithm-downgrade defense
+    /// (RFC-ACDP-0008 §3.9) and key decoding are enforced identically to
+    /// `key_for_algorithm`.
+    ///
+    /// Use `key_for_algorithm` for producer keys and auth challenges —
+    /// publish-time authorization still requires `assertionMethod`.
+    fn receipt_key_for_algorithm(
+        &self,
+        requested_key_id: &str,
+        requested_alg: &str,
+    ) -> PyResult<HashMap<String, String>> {
+        let (vm_id, public_key_b64) = self.resolve_key(requested_key_id, requested_alg)?;
+        let historical = !self.inner.is_assertion_method(requested_key_id);
+
+        let mut out = HashMap::with_capacity(4);
+        out.insert("key_id".to_string(), vm_id);
+        out.insert("algorithm".to_string(), requested_alg.to_string());
+        out.insert("public_key_b64".to_string(), public_key_b64);
+        out.insert("historical".to_string(), historical.to_string());
+        Ok(out)
+    }
+}
+
+impl PyAcdpDidDocument {
+    /// Shared gate: method exists by exact `#fragment`, declared
+    /// algorithm matches (downgrade defense), key bytes decode. The
+    /// `assertionMethod` policy is the caller's — producer keys require
+    /// it; receipt keys apply the RFC-ACDP-0010 §9 lifecycle instead.
+    fn resolve_key(
+        &self,
+        requested_key_id: &str,
+        requested_alg: &str,
+    ) -> PyResult<(String, String)> {
         if requested_alg != "ed25519" && requested_alg != "ecdsa-p256" {
             return Err(did_err(
                 "unsupported_algorithm",
@@ -153,16 +218,6 @@ impl PyAcdpDidDocument {
                 format!("no verificationMethod with id '{requested_key_id}'"),
             )
         })?;
-
-        if !self.inner.is_assertion_method(requested_key_id) {
-            return Err(did_err(
-                "key_not_authorized",
-                format!(
-                    "verificationMethod '{requested_key_id}' is not in assertionMethod \
-                     (cannot sign challenges)"
-                ),
-            ));
-        }
 
         if let Some(declared) = vm.declared_algorithm() {
             if declared != requested_alg {
@@ -188,10 +243,6 @@ impl PyAcdpDidDocument {
             STANDARD.encode(bytes)
         };
 
-        let mut out = HashMap::with_capacity(3);
-        out.insert("key_id".to_string(), vm.id.clone());
-        out.insert("algorithm".to_string(), requested_alg.to_string());
-        out.insert("public_key_b64".to_string(), public_key_b64);
-        Ok(out)
+        Ok((vm.id.clone(), public_key_b64))
     }
 }

@@ -42,6 +42,23 @@ pub struct ResolvedDidKey {
     pub public_key_b64: String,
 }
 
+/// [`ResolvedDidKey`] plus the RFC-ACDP-0010 §9 lifecycle signal for
+/// registry receipt keys.
+#[napi(object)]
+pub struct ResolvedReceiptKey {
+    /// Verification-method id (full DID URL with `#fragment`).
+    pub key_id: String,
+    /// `ed25519` or `ecdsa-p256`.
+    pub algorithm: String,
+    /// Standard base64 of the raw key bytes (see [`ResolvedDidKey`]).
+    pub public_key_b64: String,
+    /// `true` when the key is retained in `verificationMethod` but no
+    /// longer referenced by `assertionMethod` — a retired receipt key.
+    /// Verify the receipt, but report it with the distinguishable
+    /// *historically authorized* status (RFC-ACDP-0010 §9).
+    pub historical: bool,
+}
+
 /// Stateless did:web string helpers. All methods are static.
 #[napi]
 pub struct AcdpDid;
@@ -138,6 +155,71 @@ impl AcdpDidDocument {
         requested_key_id: String,
         requested_alg: String,
     ) -> Result<ResolvedDidKey, String> {
+        let (key_id, public_key_b64) = self.resolve_key(&requested_key_id, &requested_alg)?;
+
+        if !self.inner.is_assertion_method(&requested_key_id) {
+            return Err(err(
+                "key_not_authorized",
+                format!(
+                    "verificationMethod '{requested_key_id}' is not in assertionMethod \
+                     (cannot sign challenges)"
+                ),
+            ));
+        }
+
+        Ok(ResolvedDidKey {
+            key_id,
+            algorithm: requested_alg,
+            public_key_b64,
+        })
+    }
+
+    /// Resolve a **registry receipt** signing key, applying the
+    /// RFC-ACDP-0010 §9 lifecycle instead of the `assertionMethod` gate:
+    /// retired receipt keys MUST remain in `verificationMethod`
+    /// indefinitely and MUST still verify historical receipts even after
+    /// rotation removes them from `assertionMethod`. A key absent from
+    /// `verificationMethod` entirely still fails
+    /// (`.code === "key_not_found"`) — full removal is the registry's
+    /// compromise-revocation signal.
+    ///
+    /// `historical` on the result is `true` when the key is no longer in
+    /// `assertionMethod`: verify the receipt, but report it with the
+    /// distinguishable *historically authorized* status. The
+    /// algorithm-downgrade defense (RFC-ACDP-0008 §3.9) and key decoding
+    /// are enforced identically to `keyForAlgorithm`.
+    ///
+    /// Use `keyForAlgorithm` for producer keys and auth challenges —
+    /// publish-time authorization still requires `assertionMethod`.
+    #[napi]
+    pub fn receipt_key_for_algorithm(
+        &self,
+        requested_key_id: String,
+        requested_alg: String,
+    ) -> Result<ResolvedReceiptKey, String> {
+        let (key_id, public_key_b64) = self.resolve_key(&requested_key_id, &requested_alg)?;
+        let historical = !self.inner.is_assertion_method(&requested_key_id);
+
+        Ok(ResolvedReceiptKey {
+            key_id,
+            algorithm: requested_alg,
+            public_key_b64,
+            historical,
+        })
+    }
+}
+
+impl AcdpDidDocument {
+    /// Shared gate: method exists by exact `#fragment` (no loose suffix
+    /// match), declared algorithm matches (downgrade defense,
+    /// RFC-ACDP-0008 §3.9), key bytes decode. The `assertionMethod`
+    /// policy is the caller's — producer keys require it; receipt keys
+    /// apply the RFC-ACDP-0010 §9 lifecycle instead.
+    fn resolve_key(
+        &self,
+        requested_key_id: &str,
+        requested_alg: &str,
+    ) -> Result<(String, String), String> {
         if requested_alg != "ed25519" && requested_alg != "ecdsa-p256" {
             return Err(err(
                 "unsupported_algorithm",
@@ -145,9 +227,6 @@ impl AcdpDidDocument {
             ));
         }
 
-        // Look up by exact #fragment (the core `find_by_fragment` rejects
-        // loose suffix matches); fall back to full-id equality for a
-        // fragment-less key_id.
         let vm = match requested_key_id.rsplit_once('#') {
             Some((_, frag)) => self.inner.find_by_fragment(frag),
             None => self
@@ -163,19 +242,6 @@ impl AcdpDidDocument {
             )
         })?;
 
-        if !self.inner.is_assertion_method(&requested_key_id) {
-            return Err(err(
-                "key_not_authorized",
-                format!(
-                    "verificationMethod '{requested_key_id}' is not in assertionMethod \
-                     (cannot sign challenges)"
-                ),
-            ));
-        }
-
-        // Algorithm-downgrade defense: when the method declares an
-        // algorithm, it MUST match the requested one before any key bytes
-        // are touched.
         if let Some(declared) = vm.declared_algorithm() {
             if declared != requested_alg {
                 return Err(err(
@@ -200,10 +266,6 @@ impl AcdpDidDocument {
             STANDARD.encode(bytes)
         };
 
-        Ok(ResolvedDidKey {
-            key_id: vm.id.clone(),
-            algorithm: requested_alg,
-            public_key_b64,
-        })
+        Ok((vm.id.clone(), public_key_b64))
     }
 }
