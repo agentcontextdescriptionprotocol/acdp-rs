@@ -20,6 +20,25 @@ export interface ResolvedDidKey {
   publicKeyB64: string
 }
 /**
+ * [`ResolvedDidKey`] plus the RFC-ACDP-0010 §9 lifecycle signal for
+ * registry receipt keys.
+ */
+export interface ResolvedReceiptKey {
+  /** Verification-method id (full DID URL with `#fragment`). */
+  keyId: string
+  /** `ed25519` or `ecdsa-p256`. */
+  algorithm: string
+  /** Standard base64 of the raw key bytes (see [`ResolvedDidKey`]). */
+  publicKeyB64: string
+  /**
+   * `true` when the key is retained in `verificationMethod` but no
+   * longer referenced by `assertionMethod` — a retired receipt key.
+   * Verify the receipt, but report it with the distinguishable
+   * *historically authorized* status (RFC-ACDP-0010 §9).
+   */
+  historical: boolean
+}
+/**
  * Options for `buildPublishRequest`. Field names map directly to the
  * PublishRequest wire schema (camelCase on the JS side).
  */
@@ -193,6 +212,26 @@ export declare class AcdpDidDocument {
    * is the full DID URL from the signature's `key_id`.
    */
   keyForAlgorithm(requestedKeyId: string, requestedAlg: string): ResolvedDidKey
+  /**
+   * Resolve a **registry receipt** signing key, applying the
+   * RFC-ACDP-0010 §9 lifecycle instead of the `assertionMethod` gate:
+   * retired receipt keys MUST remain in `verificationMethod`
+   * indefinitely and MUST still verify historical receipts even after
+   * rotation removes them from `assertionMethod`. A key absent from
+   * `verificationMethod` entirely still fails
+   * (`.code === "key_not_found"`) — full removal is the registry's
+   * compromise-revocation signal.
+   *
+   * `historical` on the result is `true` when the key is no longer in
+   * `assertionMethod`: verify the receipt, but report it with the
+   * distinguishable *historically authorized* status. The
+   * algorithm-downgrade defense (RFC-ACDP-0008 §3.9) and key decoding
+   * are enforced identically to `keyForAlgorithm`.
+   *
+   * Use `keyForAlgorithm` for producer keys and auth challenges —
+   * publish-time authorization still requires `assertionMethod`.
+   */
+  receiptKeyForAlgorithm(requestedKeyId: string, requestedAlg: string): ResolvedReceiptKey
 }
 /** RFC 8785 canonicalization utilities. All methods are static. */
 export declare class AcdpCanonicalizer {

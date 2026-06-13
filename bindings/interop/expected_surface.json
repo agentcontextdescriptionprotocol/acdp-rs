@@ -58,7 +58,8 @@
     "AcdpDidDocument": [
       "id",
       "key_for_algorithm",
-      "parse"
+      "parse",
+      "receipt_key_for_algorithm"
     ]
   }
 }
