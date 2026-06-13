@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
+## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/v0.1.0...v0.2.0) - 2026-06-13
+
+### Added
+
+- *(registry)* add publish_verified_did_key_in_tenant
+- [**breaking**] ACDP 0.2.0 trust & hardening — registry receipts, did:key, divergence diagnostics
+
+### Fixed
+
+- *(registry)* scope the §7 no-degraded-mode check to newly inserted contexts
+
+### Other
+
+- add unit coverage for core types and crypto error paths
+- add supersession + end-to-end examples and negative-input tests
+- add library usage guides under docs/
+
 Implements the four workstreams of
 `plans/acdp-0.2-trust-hardening-2026-06-12.md`, verified against the
 spec's published 0.2.0 Draft (RFC-ACDP-0010 + the RFC-ACDP-0001
