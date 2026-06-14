@@ -7,6 +7,9 @@ on:
       - 'docs/**'
       - 'bindings/**'
       - 'README.md'
+  # Manual trigger to re-sync the website on demand (e.g. to verify the
+  # dispatch token without pushing a dummy docs change).
+  workflow_dispatch:
 
 jobs:
   notify:
@@ -15,6 +18,6 @@ jobs:
       - name: Trigger website sync
         uses: peter-evans/repository-dispatch@v4
         with:
-          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          token: ${{ secrets.ACDP_WEBSITE_SYNC_TOKEN }}
           repository: agentcontextdistributionprotocol/acdp-website
           event-type: docs-updated
