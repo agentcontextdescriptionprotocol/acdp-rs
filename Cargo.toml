@@ -1,6 +1,6 @@
 [package]
 name    = "acdp"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description   = "Rust client library for the Agent Context Distribution Protocol (ACDP v0.1.0)"
 license       = "MIT OR Apache-2.0"
