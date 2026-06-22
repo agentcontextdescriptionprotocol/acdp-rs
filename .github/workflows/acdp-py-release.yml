@@ -56,7 +56,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             manylinux: auto
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # maturin-action picks up `abi3-py39` from Cargo.toml and emits a
       # single cp39-abi3 wheel per target; `manylinux: auto` builds the
       # Linux wheels in a manylinux container (and cross-compiles aarch64).
@@ -76,7 +76,7 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/acdp-py
