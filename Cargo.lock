@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-crypto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acdp-did",
  "acdp-jcs",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-did"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acdp-crypto",
  "acdp-primitives",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-jcs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acdp-primitives",
  "hex",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-primitives"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "reqwest",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-safe-http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acdp-primitives",
  "reqwest",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
