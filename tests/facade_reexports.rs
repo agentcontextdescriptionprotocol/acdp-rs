@@ -46,6 +46,21 @@ fn crypto_module_exposes_low_and_high_level_paths() {
         acdp::crypto::verify_body_offline;
     // JCS canonicalization re-exported under crate::crypto::jcs.
     let _j: fn(&serde_json::Value) -> Vec<u8> = acdp::crypto::jcs::canonicalize_value;
+    // Historical module path acdp::crypto::verify::* must still resolve to
+    // both the byte-level and the high-level verifiers.
+    let _k: fn(&[u8; 32], &str, &str) -> Result<(), acdp::AcdpError> =
+        acdp::crypto::verify::verify_ed25519;
+    let _l: fn(&acdp::types::body::Body) -> Result<(), acdp::AcdpError> =
+        acdp::crypto::verify::verify_body_offline;
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn historical_verifier_path_resolves() {
+    // `acdp::crypto::verify::Verifier` was the only public path to the
+    // resolver-backed verifier before the split; keep it working.
+    #[allow(unused_imports)]
+    use acdp::crypto::verify::Verifier;
 }
 
 #[test]

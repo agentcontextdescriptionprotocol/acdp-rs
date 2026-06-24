@@ -66,6 +66,15 @@ pub use acdp_verify as verify;
 pub mod crypto {
     pub use acdp_crypto::*;
 
+    /// Preserves the historical `acdp::crypto::verify` module path, merging
+    /// the byte-level verifiers (`acdp-crypto`) with the high-level,
+    /// resolver-backed pipeline (`acdp-verify`). Shadows the byte-level
+    /// `verify` module brought in by the glob above.
+    pub mod verify {
+        pub use acdp_crypto::verify::*;
+        pub use acdp_verify::*;
+    }
+
     #[cfg(feature = "client")]
     pub use crate::verify::verify_publish_request_signature;
     pub use crate::verify::{
