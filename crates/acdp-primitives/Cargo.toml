@@ -1,0 +1,34 @@
+[package]
+name        = "acdp-primitives"
+version     = "0.1.0"
+edition     = "2021"
+description = "Foundational types and error vocabulary for the Agent Context Distribution Protocol (ACDP)"
+license     = "MIT OR Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+homepage    = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp-primitives"
+keywords    = ["acdp", "agent", "context", "did", "verifiable"]
+categories  = ["data-structures", "web-programming"]
+rust-version = "1.86"
+
+[features]
+# Enables the `From<reqwest::Error> for AcdpError` impl. The orphan rule
+# forces this impl to live in the crate defining `AcdpError`, so the
+# reqwest dependency is gated here and turned on by the `client` feature
+# of higher crates.
+reqwest = ["dep:reqwest"]
+
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+chrono     = { version = "0.4", features = ["serde"] }
+uuid       = { version = "1", features = ["v4"] }
+thiserror  = "1"
+reqwest    = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

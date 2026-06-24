@@ -182,7 +182,7 @@ fn did_key_golden_vector_sig_003() {
     assert_eq!(req.signature.algorithm, "ed25519");
 
     // Offline verification — no resolver, pure core.
-    acdp::crypto::verify::verify_publish_request_signature_offline(&req)
+    acdp::verify::verify_publish_request_signature_offline(&req)
         .expect("did:key publish request must verify offline");
 }
 
@@ -215,7 +215,7 @@ fn did_key_tampered_body_fails_offline_verification() {
     // Tamper with the signature (hash recomputation is the caller's
     // job; the offline envelope check must catch a bad signature).
     req.signature.value = SIG_003_SIGNATURE.into(); // signature of a different body
-    let err = acdp::crypto::verify::verify_publish_request_signature_offline(&req).unwrap_err();
+    let err = acdp::verify::verify_publish_request_signature_offline(&req).unwrap_err();
     assert!(
         matches!(err, acdp::AcdpError::InvalidSignature(_)),
         "got {err:?}"
@@ -238,6 +238,6 @@ fn did_key_p256_round_trips_offline() {
         .unwrap();
     assert_eq!(req.signature.algorithm, "ecdsa-p256");
     assert!(req.agent_id.as_str().starts_with("did:key:z"));
-    acdp::crypto::verify::verify_publish_request_signature_offline(&req)
+    acdp::verify::verify_publish_request_signature_offline(&req)
         .expect("did:key p256 request must verify offline");
 }

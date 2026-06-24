@@ -6,6 +6,17 @@ version = 4
 name = "acdp"
 version = "0.2.1"
 dependencies = [
+ "acdp-client",
+ "acdp-crypto",
+ "acdp-did",
+ "acdp-jcs",
+ "acdp-primitives",
+ "acdp-producer",
+ "acdp-safe-http",
+ "acdp-server",
+ "acdp-types",
+ "acdp-validation",
+ "acdp-verify",
  "anyhow",
  "axum",
  "axum-server",
@@ -14,24 +25,212 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hex",
- "lru",
  "p256",
  "proptest",
- "rand_core 0.6.4",
  "rcgen",
- "reqwest",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "urlencoding",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "acdp-cli"
+version = "0.1.0"
+dependencies = [
+ "acdp",
+ "base64",
+ "chrono",
+ "hex",
+ "serde_json",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "acdp-client"
+version = "0.1.0"
+dependencies = [
+ "acdp-crypto",
+ "acdp-did",
+ "acdp-primitives",
+ "acdp-safe-http",
+ "acdp-types",
+ "acdp-validation",
+ "acdp-verify",
+ "anyhow",
+ "base64",
+ "chrono",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "url",
  "urlencoding",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "acdp-crypto"
+version = "0.1.0"
+dependencies = [
+ "acdp-did",
+ "acdp-jcs",
+ "acdp-primitives",
+ "base64",
+ "bs58",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "p256",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
  "zeroize",
+]
+
+[[package]]
+name = "acdp-did"
+version = "0.1.0"
+dependencies = [
+ "acdp-crypto",
+ "acdp-primitives",
+ "acdp-safe-http",
+ "base64",
+ "bs58",
+ "hex",
+ "lru",
+ "p256",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "acdp-jcs"
+version = "0.1.0"
+dependencies = [
+ "acdp-primitives",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "acdp-primitives"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "acdp-producer"
+version = "0.1.0"
+dependencies = [
+ "acdp-crypto",
+ "acdp-did",
+ "acdp-primitives",
+ "acdp-types",
+ "acdp-validation",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "acdp-safe-http"
+version = "0.1.0"
+dependencies = [
+ "acdp-primitives",
+ "reqwest",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "acdp-server"
+version = "0.1.0"
+dependencies = [
+ "acdp-crypto",
+ "acdp-did",
+ "acdp-primitives",
+ "acdp-producer",
+ "acdp-safe-http",
+ "acdp-types",
+ "acdp-validation",
+ "acdp-verify",
+ "base64",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "acdp-types"
+version = "0.1.0"
+dependencies = [
+ "acdp-crypto",
+ "acdp-did",
+ "acdp-jcs",
+ "acdp-primitives",
+ "base64",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "acdp-validation"
+version = "0.1.0"
+dependencies = [
+ "acdp-crypto",
+ "acdp-did",
+ "acdp-primitives",
+ "acdp-producer",
+ "acdp-types",
+ "base64",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "acdp-verify"
+version = "0.1.0"
+dependencies = [
+ "acdp-crypto",
+ "acdp-did",
+ "acdp-primitives",
+ "acdp-types",
+ "acdp-validation",
+ "serde_json",
 ]
 
 [[package]]

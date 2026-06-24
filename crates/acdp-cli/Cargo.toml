@@ -1,0 +1,39 @@
+[package]
+name        = "acdp-cli"
+version     = "0.1.0"
+edition     = "2021"
+description = "Command-line client (`acdp` binary) for the Agent Context Distribution Protocol (ACDP)"
+license     = "MIT OR Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+homepage    = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp-cli"
+keywords    = ["acdp", "cli", "agent", "context", "did"]
+categories  = ["command-line-utilities"]
+rust-version = "1.86"
+
+[[bin]]
+name = "acdp"
+path = "src/main.rs"
+
+[dependencies]
+# Manual std::env::args parsing is intentional — no clap, to keep the
+# dependency graph aligned with the library.
+acdp  = { path = "../..", version = "0.2.1", default-features = false, features = ["client"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"], default-features = false }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+chrono = { version = "0.4", features = ["serde"] }
+hex    = "0.4"
+url    = "2"
+
+[dev-dependencies]
+tokio      = { version = "1", features = ["full"] }
+serde_json = "1"
+wiremock   = "0.6"
+base64     = "0.22"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1,3 +1,8 @@
+[workspace]
+members  = ["crates/*"]
+exclude  = ["bindings"]
+resolver = "2"
+
 [package]
 name    = "acdp"
 version = "0.2.1"
@@ -26,15 +31,12 @@ exclude       = [
 
 [features]
 default = ["client"]
-client  = ["dep:reqwest", "dep:lru", "dep:tokio"]
-server  = []
-tracing = ["dep:tracing"]
-cli     = ["client", "tokio/macros", "tokio/rt-multi-thread"]
-
-[[bin]]
-name              = "acdp"
-path              = "src/bin/acdp.rs"
-required-features = ["cli"]
+# Enabling `client` also turns on the resolver-backed server path *only
+# when `server` is already enabled* (`acdp-server?/client`), so the
+# combined client+server test harness gets RegistryServer::publish_verified.
+client  = ["dep:acdp-client", "acdp-primitives/reqwest", "acdp-server?/client"]
+server  = ["dep:acdp-server"]
+tracing = ["acdp-did/tracing", "acdp-client?/tracing"]
 
 # TLS-backed fixture conformance tests need both the `client` (resolver,
 # RegistryClient, CrossRegistryResolver) and `server` (RegistryServer,
@@ -55,13 +57,6 @@ name              = "end_to_end"
 path              = "examples/end_to_end.rs"
 required-features = ["client"]
 
-# CLI subprocess tests need the `cli` feature so the `acdp` binary is
-# actually built.
-[[test]]
-name              = "cli"
-path              = "tests/cli.rs"
-required-features = ["cli"]
-
 # Receipt end-to-end tests (RFC-ACDP-0010) drive the in-process TLS
 # registry harness: `client` for the resolver/RegistryClient, `server`
 # for RegistryServer + InMemoryStore.
@@ -70,52 +65,36 @@ name              = "receipts"
 path              = "tests/receipts.rs"
 required-features = ["client", "server"]
 
+# The umbrella `acdp` crate is a thin facade: its library is pure
+# re-exports of the workspace crates below. The concrete third-party
+# crates live in `[dev-dependencies]` (used only by the integration
+# tests and examples that still live here).
 [dependencies]
-# Serialisation
-serde      = { version = "1", features = ["derive"] }
-# `float_roundtrip` makes float PARSING correctly-rounded (bit-accurate)
-# rather than serde_json's default ~17-significant-digit approximation.
-# JCS / RFC 8785 number canonicalization (see `crypto::jcs`) requires the
-# exact IEEE-754 value so the ECMAScript `Number::toString` shortest form
-# matches the spec vectors (e.g. `1.23e+25`, not `1.2299999999999998e+25`).
-serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+acdp-primitives = { path = "crates/acdp-primitives", version = "0.1.0" }
+acdp-jcs        = { path = "crates/acdp-jcs", version = "0.1.0" }
+acdp-safe-http  = { path = "crates/acdp-safe-http", version = "0.1.0" }
+acdp-did        = { path = "crates/acdp-did", version = "0.1.0" }
+acdp-crypto     = { path = "crates/acdp-crypto", version = "0.1.0" }
+acdp-types      = { path = "crates/acdp-types", version = "0.1.0" }
+acdp-validation = { path = "crates/acdp-validation", version = "0.1.0" }
+acdp-verify     = { path = "crates/acdp-verify", version = "0.1.0" }
+acdp-producer   = { path = "crates/acdp-producer", version = "0.1.0" }
+acdp-client     = { path = "crates/acdp-client", version = "0.1.0", optional = true }
+acdp-server     = { path = "crates/acdp-server", version = "0.1.0", optional = true }
 
-# Cryptography
+[dev-dependencies]
+serde         = { version = "1", features = ["derive"] }
+serde_json    = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 sha2          = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 p256          = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 base64        = "0.22"
 hex           = "0.4"
-zeroize       = { version = "1", features = ["derive"] }
-# RNG trait used by both ed25519-dalek and p256 for key generation.
-# Already a transitive dep — promoted to direct so `SigningKey::generate()`
-# and `P256SigningKey::generate()` can plumb `OsRng` through both libraries.
-rand_core     = { version = "0.6", features = ["std"] }
-
-# Identity / time
-chrono      = { version = "0.4", features = ["serde"] }
-uuid        = { version = "1", features = ["v4"] }
-url         = "2"
-urlencoding = "2"
-bs58        = "0.5"      # base58btc for publicKeyMultibase
-
-# Error handling
-thiserror = "1"
-
-# HTTP client (feature-gated)
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
-
-# Cache (used by the DID resolver under the client feature)
-lru = { version = "0.16", optional = true }
-
-# Async runtime hooks (sleep for retry backoff). Reqwest already pulls
-# in tokio transitively, but being explicit keeps the dep graph honest.
-tokio = { version = "1", features = ["time"], optional = true, default-features = false }
-
-# Optional structured logging
-tracing = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
-
-[dev-dependencies]
+bs58          = "0.5"
+chrono        = { version = "0.4", features = ["serde"] }
+uuid          = { version = "1", features = ["v4"] }
+url           = "2"
+urlencoding   = "2"
 tokio    = { version = "1", features = ["full"] }
 anyhow   = "1"
 wiremock = "0.6"

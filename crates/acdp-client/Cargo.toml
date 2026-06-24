@@ -1,0 +1,48 @@
+[package]
+name        = "acdp-client"
+version     = "0.1.0"
+edition     = "2021"
+description = "Consumer client (RegistryClient, VerifiedContext, CrossRegistryResolver) for the Agent Context Distribution Protocol (ACDP)"
+license     = "MIT OR Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+homepage    = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp-client"
+keywords    = ["acdp", "client", "agent", "context", "consumer"]
+categories  = ["web-programming::http-client", "cryptography"]
+rust-version = "1.86"
+
+[features]
+tracing = ["dep:tracing", "acdp-did/tracing"]
+
+[dependencies]
+acdp-primitives = { path = "../acdp-primitives", version = "0.1.0", features = ["reqwest"] }
+acdp-types      = { path = "../acdp-types", version = "0.1.0" }
+acdp-crypto     = { path = "../acdp-crypto", version = "0.1.0", features = ["client"] }
+acdp-did        = { path = "../acdp-did", version = "0.1.0", features = ["client"] }
+acdp-validation = { path = "../acdp-validation", version = "0.1.0" }
+acdp-verify     = { path = "../acdp-verify", version = "0.1.0", features = ["client"] }
+acdp-safe-http  = { path = "../acdp-safe-http", version = "0.1.0", features = ["client"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+chrono     = { version = "0.4", features = ["serde"] }
+base64     = "0.22"
+hex        = "0.4"
+sha2       = "0.10"
+url        = "2"
+urlencoding = "2"
+uuid       = { version = "1", features = ["v4"] }
+reqwest    = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio      = { version = "1", features = ["time"], default-features = false }
+tracing    = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
+
+[dev-dependencies]
+tokio    = { version = "1", features = ["full"] }
+wiremock = "0.6"
+anyhow   = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

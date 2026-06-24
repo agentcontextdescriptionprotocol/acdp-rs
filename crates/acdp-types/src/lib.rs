@@ -1,0 +1,32 @@
+//! # acdp-types — wire types for the Agent Context Distribution Protocol
+//!
+//! The protocol's JSON wire shapes: the immutable [`body::Body`],
+//! [`publish::PublishRequest`]/[`publish::PublishResponse`], data
+//! references, capabilities documents, registry receipts, and search
+//! parameters/results — plus the [`profile`] vocabulary. The opaque
+//! identifier primitives and error vocabulary live in
+//! [`acdp-primitives`](https://docs.rs/acdp-primitives) and are re-exported
+//! here under the historical `primitives` path.
+
+pub mod body;
+pub mod capabilities;
+pub mod data_ref;
+pub mod profile;
+pub mod publish;
+pub mod receipt;
+pub mod search;
+
+// `primitives` / `serde_helpers` / `wire_error` live in acdp-primitives;
+// re-export so the historical `crate::types::*` paths keep resolving in the
+// umbrella crate and inside this crate's own modules.
+pub use acdp_primitives::primitives;
+pub(crate) use acdp_primitives::serde_helpers;
+
+pub use acdp_primitives::wire_error::{WireError, WireErrorBody};
+pub use body::{Body, DataPeriod, FullContext, RegistryState, Signature};
+pub use capabilities::{CapabilitiesDocument, Limits};
+pub use data_ref::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding, Location};
+pub use primitives::{AgentDid, ContentHash, ContextType, CtxId, LineageId, Status, Visibility};
+pub use publish::{PublishRequest, PublishResponse};
+pub use receipt::{ReceiptSigner, RegistryReceipt};
+pub use search::{SearchParams, SearchParamsBuilder, SearchResponse, SearchResult};

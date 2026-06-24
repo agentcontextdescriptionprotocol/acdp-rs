@@ -1,0 +1,36 @@
+[package]
+name        = "acdp-validation"
+version     = "0.1.0"
+edition     = "2021"
+description = "Schema/structural validation for the Agent Context Distribution Protocol (ACDP)"
+license     = "MIT OR Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+homepage    = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp-validation"
+keywords    = ["acdp", "validation", "schema", "agent", "context"]
+categories  = ["data-structures", "encoding"]
+rust-version = "1.86"
+
+[dependencies]
+acdp-primitives = { path = "../acdp-primitives", version = "0.1.0" }
+acdp-types      = { path = "../acdp-types", version = "0.1.0" }
+acdp-crypto     = { path = "../acdp-crypto", version = "0.1.0" }
+acdp-did        = { path = "../acdp-did", version = "0.1.0" }
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+chrono     = { version = "0.4", features = ["serde"] }
+base64     = "0.22"
+hex        = "0.4"
+sha2       = "0.10"
+
+[dev-dependencies]
+# Some validation tests build a request via the producer. acdp-producer
+# depends on acdp-validation at build time; dev-only cycle (allowed).
+acdp-producer = { path = "../acdp-producer" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
