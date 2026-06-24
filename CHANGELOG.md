@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
+## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.2.1...acdp-v0.3.0) - 2026-06-24
+
+### Other
+
+- preserve acdp::crypto::verify::* module path in the facade
+- split acdp into a fine-grained Cargo workspace
+
 ## [0.2.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/v0.2.0...v0.2.1) - 2026-06-14
 
 ### Added
