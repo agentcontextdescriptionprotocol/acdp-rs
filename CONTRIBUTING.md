@@ -15,12 +15,17 @@ Before opening a pull request, please run:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-features --all-targets -- -D warnings
-cargo clippy --no-default-features --all-targets -- -D warnings
-cargo test --all-features
-cargo test --no-default-features
-RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps
+cargo clippy --workspace --all-features --all-targets -- -D warnings
+cargo clippy -p acdp --no-default-features --all-targets -- -D warnings
+cargo test --workspace --all-features
+cargo test -p acdp --no-default-features
+RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --workspace --all-features --no-deps
 ```
+
+This repository is a Cargo **workspace**: the umbrella `acdp` crate is a thin
+facade re-exporting the fine-grained crates under `crates/`. `--workspace` runs
+the checks across every crate; `--no-default-features` is scoped to `-p acdp`
+because the pure-core feature matrix lives on the facade.
 
 (CI runs the same set on every PR.)
 

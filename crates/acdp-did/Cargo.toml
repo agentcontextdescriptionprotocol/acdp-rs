@@ -1,0 +1,47 @@
+[package]
+name        = "acdp-did"
+version     = "0.1.0"
+edition     = "2021"
+description = "did:web and did:key resolution for the Agent Context Distribution Protocol (ACDP)"
+license     = "MIT OR Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+homepage    = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp-did"
+keywords    = ["acdp", "did", "did-web", "did-key", "identity"]
+categories  = ["cryptography", "web-programming"]
+rust-version = "1.86"
+
+[features]
+# Enables the HTTPS-backed `WebResolver` (reqwest + LRU cache + SSRF
+# policy). Without it, only the pure `did:key` helpers and `did:web`
+# string parsing are available.
+client = ["dep:reqwest", "dep:lru", "acdp-safe-http/client"]
+tracing = ["dep:tracing"]
+
+[dependencies]
+acdp-primitives = { path = "../acdp-primitives", version = "0.1.0" }
+acdp-safe-http  = { path = "../acdp-safe-http", version = "0.1.0" }
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+base64     = "0.22"
+bs58       = "0.5"
+hex        = "0.4"
+p256       = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+urlencoding = "2"
+reqwest    = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
+lru        = { version = "0.16", optional = true }
+tracing    = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
+
+[dev-dependencies]
+# did:key P256 round-trip test builds a key with acdp-crypto. acdp-crypto
+# depends on acdp-did at build time; this dev-only edge is the allowed
+# dev-dependency cycle.
+acdp-crypto = { path = "../acdp-crypto" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

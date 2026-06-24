@@ -1,0 +1,31 @@
+[package]
+name        = "acdp-safe-http"
+version     = "0.1.0"
+edition     = "2021"
+description = "SSRF defenses and HTTPS guards (RFC-ACDP-0006 §7) for the Agent Context Distribution Protocol (ACDP)"
+license     = "MIT OR Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+homepage    = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp-safe-http"
+keywords    = ["acdp", "ssrf", "security", "http", "dns-rebinding"]
+categories  = ["network-programming", "web-programming"]
+rust-version = "1.86"
+
+[features]
+# Pulls in the reqwest-backed `SafeDnsResolver` and `pin_resolved_ip`
+# path used by client-side resolution. Server-side `SsrfPolicy` checks
+# work without it.
+client = ["dep:reqwest", "dep:tokio"]
+
+[dependencies]
+acdp-primitives = { path = "../acdp-primitives", version = "0.1.0" }
+url     = "2"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
+tokio   = { version = "1", features = ["net"], optional = true, default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

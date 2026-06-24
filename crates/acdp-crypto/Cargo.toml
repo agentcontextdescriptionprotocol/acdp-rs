@@ -1,0 +1,39 @@
+[package]
+name        = "acdp-crypto"
+version     = "0.1.0"
+edition     = "2021"
+description = "Content-hashing, signing, verification, and key fingerprinting for the Agent Context Distribution Protocol (ACDP)"
+license     = "MIT OR Apache-2.0"
+readme      = "README.md"
+repository  = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+homepage    = "https://github.com/agentcontextdistributionprotocol/acdp-rs"
+documentation = "https://docs.rs/acdp-crypto"
+keywords    = ["acdp", "ed25519", "ecdsa", "sha256", "cryptography"]
+categories  = ["cryptography"]
+rust-version = "1.86"
+
+[features]
+# Enables the resolver-backed fingerprint helper that takes a WebResolver.
+client = ["acdp-did/client"]
+
+[dependencies]
+acdp-primitives = { path = "../acdp-primitives", version = "0.1.0" }
+acdp-jcs        = { path = "../acdp-jcs", version = "0.1.0" }
+acdp-did        = { path = "../acdp-did", version = "0.1.0" }
+serde         = { version = "1", features = ["derive"] }
+serde_json    = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+chrono        = { version = "0.4", features = ["serde"] }
+sha2          = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+p256          = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+base64        = "0.22"
+hex           = "0.4"
+bs58          = "0.5"
+zeroize       = { version = "1", features = ["derive"] }
+rand_core     = { version = "0.6", features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -48,45 +48,64 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-pub mod crypto;
-pub mod did;
-pub mod error;
-pub mod limits;
-pub mod producer;
-pub mod profile;
-pub mod safe_http;
-pub mod time;
-pub mod types;
-pub mod validation;
+// Wire types and the profile vocabulary now live in the `acdp-types`
+// crate; re-export under the historical `acdp::types` / `acdp::profile`
+// paths.
+pub use acdp_types as types;
+pub use acdp_types::profile;
 
+// Validation, high-level verification, and the producer builder are now
+// their own crates; re-export under their historical module paths.
+pub use acdp_producer as producer;
+pub use acdp_validation as validation;
+pub use acdp_verify as verify;
+
+/// Cryptographic primitives — re-exports the `acdp-crypto` crate plus the
+/// high-level verification helpers (which live in [`crate::verify`], one
+/// layer up) under their historical `crate::crypto::*` paths.
+pub mod crypto {
+    pub use acdp_crypto::*;
+
+    /// Preserves the historical `acdp::crypto::verify` module path, merging
+    /// the byte-level verifiers (`acdp-crypto`) with the high-level,
+    /// resolver-backed pipeline (`acdp-verify`). Shadows the byte-level
+    /// `verify` module brought in by the glob above.
+    pub mod verify {
+        pub use acdp_crypto::verify::*;
+        pub use acdp_verify::*;
+    }
+
+    #[cfg(feature = "client")]
+    pub use crate::verify::verify_publish_request_signature;
+    pub use crate::verify::{
+        verify_body_offline, verify_did_key_envelope, verify_publish_request_signature_offline,
+    };
+}
+
+// DID resolution now lives in the `acdp-did` crate.
+pub use acdp_did as did;
+
+// Foundational layer now lives in the `acdp-primitives` crate; re-export
+// it under the historical module paths so `acdp::error`, `acdp::limits`,
+// and `acdp::time` are unchanged for downstream users.
+pub use acdp_primitives::{error, limits, time};
+
+// SSRF defenses moved to the `acdp-safe-http` crate; re-export under the
+// historical `acdp::safe_http` path.
+pub use acdp_safe_http as safe_http;
+
+// Consumer client and registry/server building blocks are their own
+// crates; re-export under the historical `acdp::client` / `acdp::registry`
+// / `acdp::pagination` paths.
 #[cfg(feature = "client")]
-pub mod client;
+pub use acdp_client as client;
 
 #[cfg(feature = "server")]
-pub mod pagination;
-
-#[cfg(feature = "server")]
-pub mod registry;
+pub use acdp_server::{pagination, registry};
 
 // ── Protocol version ──────────────────────────────────────────────────────────
-
-/// The ACDP protocol version this library implements.
-///
-/// `0.2.0` carries the Trust & Hardening amendments (registry receipts
-/// — RFC-ACDP-0010, `did:key` producers, mandatory explicit
-/// `acdp_version`, lineage anchoring); those RFC sections are Draft
-/// until the 0.2.0 conformance pack passes two independent
-/// implementations. Every v0.1.0 body, signature, and `content_hash`
-/// remains valid. Note that an absent `acdp_version` field on a publish
-/// request is interpreted as `0.1.0` by the protocol — see
-/// [`producer::RequestBuilder::acdp_version`]; 0.2.0 builders MUST
-/// emit the field explicitly (RFC-ACDP-0001 §6), which this library's
-/// builder does by default.
-pub const ACDP_VERSION: &str = "0.2.0";
-
-/// The JSON Schema namespace (`$id` prefix) for this protocol version,
-/// e.g. `<ACDP_SCHEMA_NAMESPACE>/acdp-error.schema.json`.
-pub const ACDP_SCHEMA_NAMESPACE: &str = "https://schemas.acdp.io/v0.1.0";
+// Defined in `acdp-primitives`; re-exported here for the historical paths.
+pub use acdp_primitives::{ACDP_SCHEMA_NAMESPACE, ACDP_VERSION};
 
 // ── Convenience re-exports ────────────────────────────────────────────────────
 pub use error::{AcdpError, SupersessionReason};
