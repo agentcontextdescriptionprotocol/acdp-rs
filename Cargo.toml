@@ -70,12 +70,12 @@ required-features = ["client", "server"]
 # crates live in `[dev-dependencies]` (used only by the integration
 # tests and examples that still live here).
 [dependencies]
-acdp-primitives = { path = "crates/acdp-primitives", version = "0.1.0" }
-acdp-jcs        = { path = "crates/acdp-jcs", version = "0.1.0" }
-acdp-safe-http  = { path = "crates/acdp-safe-http", version = "0.1.0" }
-acdp-did        = { path = "crates/acdp-did", version = "0.1.0" }
-acdp-crypto     = { path = "crates/acdp-crypto", version = "0.1.0" }
-acdp-types      = { path = "crates/acdp-types", version = "0.1.0" }
+acdp-primitives = { path = "crates/acdp-primitives", version = "0.1.1" }
+acdp-jcs        = { path = "crates/acdp-jcs", version = "0.1.1" }
+acdp-safe-http  = { path = "crates/acdp-safe-http", version = "0.1.1" }
+acdp-did        = { path = "crates/acdp-did", version = "0.1.1" }
+acdp-crypto     = { path = "crates/acdp-crypto", version = "0.1.1" }
+acdp-types      = { path = "crates/acdp-types", version = "0.1.1" }
 acdp-validation = { path = "crates/acdp-validation", version = "0.1.0" }
 acdp-verify     = { path = "crates/acdp-verify", version = "0.1.0" }
 acdp-producer   = { path = "crates/acdp-producer", version = "0.1.0" }
