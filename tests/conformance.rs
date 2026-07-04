@@ -65,6 +65,59 @@ fn read_json(path: &Path) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("invalid JSON in {}: {e}", path.display()))
 }
 
+/// True when `ACDP_REQUIRE_CONFORMANCE` is set (the dedicated CI job).
+fn require_conformance() -> bool {
+    std::env::var("ACDP_REQUIRE_CONFORMANCE").is_ok()
+}
+
+/// Existence gate for fixtures/examples that are part of the PUBLISHED
+/// spec.
+///
+/// Returns `true` (→ caller skips) when the file is absent. Under
+/// `ACDP_REQUIRE_CONFORMANCE` an absent published fixture is a hard
+/// failure instead: previously only the spec *checkout* was required,
+/// so a test whose referenced fixture went missing (renamed, or newer
+/// than the checkout) silently no-opped even in the required CI job.
+fn fixture_missing(path: &Path) -> bool {
+    if path.exists() {
+        return false;
+    }
+    assert!(
+        !require_conformance(),
+        "ACDP_REQUIRE_CONFORMANCE is set but published fixture {} is missing",
+        path.display()
+    );
+    eprintln!("fixture {} not present; skipping", path.display());
+    true
+}
+
+/// Existence gate for fixtures that only exist on an unpublished spec
+/// DRAFT branch — currently the ACDP 0.2.0 families (`sig-003`, `fp-*`,
+/// `rcpt-*`, `dk-*`, `can-012`, `rot-001`) on
+/// `spec/0.2.0-trust-hardening`.
+///
+/// These skip with a notice even under `ACDP_REQUIRE_CONFORMANCE`,
+/// because spec `main` does not carry them yet and the required CI job
+/// must stay green against the published spec. Setting
+/// `ACDP_REQUIRE_CONFORMANCE_DRAFT` additionally hard-fails on them
+/// (use when pointing `ACDP_SPEC_DIR` at the draft branch). Flip call
+/// sites to [`fixture_missing`] when the 0.2.0 spec merges to main.
+fn draft_fixture_missing(path: &Path) -> bool {
+    if path.exists() {
+        return false;
+    }
+    assert!(
+        std::env::var("ACDP_REQUIRE_CONFORMANCE_DRAFT").is_err(),
+        "ACDP_REQUIRE_CONFORMANCE_DRAFT is set but draft fixture {} is missing",
+        path.display()
+    );
+    eprintln!(
+        "draft (0.2.0) fixture {} not present in this spec checkout; skipping",
+        path.display()
+    );
+    true
+}
+
 #[test]
 fn all_conformance_fixtures_parse_as_valid_json() {
     let Some(root) = spec_root() else {
@@ -561,7 +614,7 @@ fn did_web_enforcement_fixtures() {
         "pub-010-non-did-web-contributor.json",
     ] {
         let path = dir.join(fixture);
-        if !path.exists() {
+        if fixture_missing(&path) {
             continue;
         }
         let _v = read_json(&path);
@@ -660,7 +713,7 @@ fn capabilities_example_deserializes() {
         return;
     };
     let path = root.join("examples/capabilities/acdp-capabilities.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -736,7 +789,7 @@ fn retrieval_examples_deserialize_as_body() {
 fn body_001_origin_registry_hostname_accepted() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/body-001-origin-registry-hostname.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -839,7 +892,7 @@ fn search_response_example_deserializes() {
         return;
     };
     let path = root.join("examples/search/keyword-search-response.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -853,7 +906,7 @@ fn error_example_deserializes() {
         return;
     };
     let path = root.join("examples/error/invalid-signature.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -867,7 +920,7 @@ fn lineage_multi_step_example_parses_each_body() {
         return;
     };
     let path = root.join("examples/lineage/multi-step-derivation.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -892,7 +945,7 @@ fn supersession_example_v2_deserializes() {
         return;
     };
     let path = root.join("examples/supersession/v2-supersedes-v1.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -912,7 +965,7 @@ fn mixed_data_refs_example_deserializes() {
         return;
     };
     let path = root.join("examples/mixed-data-refs/alert-mixed-data-refs.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -1020,7 +1073,7 @@ async fn did_ssrf_conformance_fixtures() {
     let mut checked = 0usize;
     for (filename, did) in &cases {
         let path = dir.join(filename);
-        if !path.exists() {
+        if fixture_missing(&path) {
             continue;
         }
         let _fixture = read_json(&path); // validates the fixture JSON parses
@@ -1047,7 +1100,7 @@ async fn did_ssrf_conformance_fixtures() {
 fn sig_002_ecdsa_p256_verify_against_spec_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/sig-002-ecdsa-p256-golden.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -1070,7 +1123,7 @@ fn sig_002_ecdsa_p256_verify_against_spec_fixture() {
 fn sig_002_ecdsa_p256_sign_round_trip() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/sig-002-ecdsa-p256-golden.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -1144,7 +1197,7 @@ fn sig_001_full_round_trip_against_spec_fixture() {
         return;
     };
     let path = root.join("schemas/conformance/sig-001-ed25519-golden.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -1182,7 +1235,7 @@ fn can_008_body_roundtrip_preserves_unknown_producer_field() {
     use sha2::{Digest, Sha256};
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/can-008-body-with-unknown-producer-field.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1263,7 +1316,7 @@ fn can_009_exclusion_set_keys_by_name_not_by_typed_knowledge() {
     use sha2::{Digest, Sha256};
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/can-009-body-with-unknown-excluded-field.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1284,7 +1337,7 @@ fn can_009_exclusion_set_keys_by_name_not_by_typed_knowledge() {
 fn schema_003_embedded_extra_field_rejected() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/schema-003-embedded-extra-field.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1346,7 +1399,7 @@ async fn data_ref_008_external_hash_mismatch_surfaced_as_data_ref_hash_mismatch(
 
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/data-ref-008-external-data-ref-hash-mismatch.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1420,7 +1473,7 @@ fn full_context_preserves_unknown_top_level_field() {
 fn pub_002_hash_mismatch_rejected_by_validator() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/pub-002-hash-mismatch.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1463,7 +1516,7 @@ fn pub_002_hash_mismatch_rejected_by_validator() {
 fn pub_005_restricted_without_audience_rejected() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/pub-005-restricted-without-audience.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1544,7 +1597,7 @@ fn idem_family_present_in_spec() {
 fn rate_001_response_shape_parses() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/rate-001-rate-limited-response-shape.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1579,7 +1632,7 @@ fn ret_001_and_err_001_present() {
 fn pub_004_first_version_with_lineage_id_rejected() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/pub-004-first-version-with-lineage.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1639,7 +1692,7 @@ fn pub_004_first_version_with_lineage_id_rejected() {
 fn pub_007_publish_response_shape() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/pub-007-publish-response-shape.json");
-    if !path.exists() {
+    if fixture_missing(&path) {
         return;
     }
     let fixture = read_json(&path);
@@ -1994,7 +2047,7 @@ mod registry_behavior {
 fn sig_003_did_key_golden_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/sig-003-did-key-golden.json");
-    if !path.exists() {
+    if draft_fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -2048,7 +2101,7 @@ fn sig_003_did_key_golden_fixture() {
 fn fp_001_fingerprint_vectors_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/fp-001-key-fingerprint-vectors.json");
-    if !path.exists() {
+    if draft_fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -2074,7 +2127,7 @@ fn fp_001_fingerprint_vectors_fixture() {
 fn rcpt_001_receipt_golden_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/rcpt-001-receipt-golden.json");
-    if !path.exists() {
+    if draft_fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -2153,7 +2206,7 @@ fn rcpt_001_receipt_golden_fixture() {
 fn can_012_divergence_corpus_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/can-012-divergence-corpus.json");
-    if !path.exists() {
+    if draft_fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -2329,6 +2382,449 @@ fn rcpt_negative_fixtures() {
             acdp::did::authority_to_did_web(serving),
             claimed,
             "rcpt-004 premise: the claimed registry_did must not match the serving authority"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// cur-* — cursor pagination failure modes (RFC-ACDP-0005 §2.5.4)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// cur-001 / cur-002 — the two distinct cursor failure modes, bound
+/// behaviorally against `InMemoryStore` through the public
+/// `RegistryStore::search` path (the same decode used by
+/// `RegistryServer::search`).
+#[cfg(feature = "server")]
+mod cursor_fixtures {
+    use super::*;
+    use acdp::registry::{InMemoryStore, RegistryStore};
+    use acdp::types::search::{SearchParams, SearchResponse};
+
+    fn search_with_cursor(cursor: &str) -> Result<SearchResponse, acdp::AcdpError> {
+        let params = SearchParams {
+            cursor: Some(cursor.to_owned()),
+            ..Default::default()
+        };
+        InMemoryStore::new().search(&params, None, true)
+    }
+
+    /// cur-001 — a cursor that WAS validly issued but has aged past the
+    /// TTL window MUST fail with `cursor_expired` (HTTP 400). A registry
+    /// MUST NOT silently treat an expired cursor as a first-page request.
+    #[test]
+    fn cur_001_expired_cursor() {
+        let Some(root) = spec_root() else { return };
+        let path = root.join("schemas/conformance/cur-001-expired-cursor.json");
+        if fixture_missing(&path) {
+            return;
+        }
+        let v = read_json(&path);
+        assert_eq!(v["expected"]["error_code"], "cursor_expired");
+        assert_eq!(v["expected"]["http_status"], 400);
+
+        // Craft a cursor in the documented stable encoding —
+        // base64("<mint_ms>:<anchor_ms>:<ctx_id>") — whose mint timestamp
+        // is two hours old, past the store's 1-hour CURSOR_TTL. This is a
+        // cursor that WAS well-formed (decodes cleanly) but aged out,
+        // which is exactly the cur-001 vs cur-002 distinction.
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let mint_ms = chrono::Utc::now().timestamp_millis() - 2 * 3_600 * 1_000;
+        let cursor = STANDARD.encode(format!(
+            "{mint_ms}:{mint_ms}:acdp://registry.example.com/contexts/00000000-0000-4000-8000-000000000000"
+        ));
+        let err = search_with_cursor(&cursor).expect_err("cur-001: aged cursor MUST be rejected");
+        assert!(
+            matches!(err, acdp::AcdpError::CursorExpired),
+            "cur-001: expected CursorExpired, got {err:?}"
+        );
+    }
+
+    /// cur-002 — a cursor that was NEVER parseable (garbage, truncated,
+    /// forged) MUST fail with `invalid_cursor`, distinct from
+    /// `cursor_expired`, and MUST NOT be best-effort interpreted.
+    #[test]
+    fn cur_002_invalid_cursor() {
+        let Some(root) = spec_root() else { return };
+        let path = root.join("schemas/conformance/cur-002-invalid-cursor.json");
+        if fixture_missing(&path) {
+            return;
+        }
+        let v = read_json(&path);
+        assert_eq!(v["expected"]["error_code"], "invalid_cursor");
+        assert_eq!(v["expected"]["http_status"], 400);
+
+        // The fixture's endpoint carries `cursor=not-a-real-cursor-%21%21%21`
+        // (percent-decoded here); also probe truncated and empty forms.
+        for garbage in ["not-a-real-cursor-!!!", "AAAA", ""] {
+            let err = search_with_cursor(garbage)
+                .expect_err(&format!("cur-002: {garbage:?} MUST be rejected"));
+            assert!(
+                matches!(err, acdp::AcdpError::InvalidCursor(_)),
+                "cur-002: {garbage:?} expected InvalidCursor, got {err:?}"
+            );
+        }
+        // Well-formed base64 of a wrong-shape payload is still
+        // invalid_cursor — a partially-decoded cursor MUST never be
+        // best-effort interpreted.
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let wrong_shape = STANDARD.encode("no-colons-here");
+        let err = search_with_cursor(&wrong_shape)
+            .expect_err("cur-002: wrong-shape cursor MUST be rejected");
+        assert!(
+            matches!(err, acdp::AcdpError::InvalidCursor(_)),
+            "cur-002: wrong-shape expected InvalidCursor, got {err:?}"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// *-ssrf-004 / *-ssrf-005 / fed-007 / fed-008 — Clarifications round 2
+// (RFC-ACDP-0006 §7.1 mixed-answer rejection, §7.5 same-authority)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Mixed-answer rejection and same-authority-port fixtures, bound
+/// data-driven from each fixture's `dns_mock` / `redirect_*` inputs
+/// against the exact public enforcement points the client uses:
+/// [`acdp::safe_http::reject_if_any_forbidden`] (shared by
+/// `SafeDnsResolver` and `pin_resolved_ip`) and
+/// [`acdp::safe_http::same_fetch_authority`] / `classify_redirect`.
+#[cfg(feature = "client")]
+mod ssrf_addendum_fixtures {
+    use super::*;
+    use acdp::safe_http::{reject_if_any_forbidden, same_fetch_authority, SsrfPolicy};
+    use std::net::{IpAddr, SocketAddr};
+
+    fn answer_set(v: &serde_json::Value) -> Vec<SocketAddr> {
+        v.as_array()
+            .expect("fixture answers array")
+            .iter()
+            .map(|a| {
+                let ip: IpAddr = a
+                    .as_str()
+                    .expect("answer is a string")
+                    .parse()
+                    .expect("fixture IP parses");
+                SocketAddr::new(ip, 443)
+            })
+            .collect()
+    }
+
+    /// did-ssrf-004 / data-ref-ssrf-004 / fed-007 — when ANY address in
+    /// a DNS answer set is forbidden, the ENTIRE resolution is rejected.
+    /// Filter-and-proceed (connect to the surviving public address) is
+    /// explicitly non-conformant.
+    #[test]
+    fn mixed_answer_fixtures_reject_entire_resolution() {
+        let Some(root) = spec_root() else { return };
+        let policy = SsrfPolicy::default();
+        for name in [
+            "did-ssrf-004-mixed-answer-rejection.json",
+            "data-ref-ssrf-004-mixed-answer-rejection.json",
+            "fed-007-mixed-answer-rejection.json",
+        ] {
+            let path = root.join("schemas/conformance").join(name);
+            if fixture_missing(&path) {
+                continue;
+            }
+            let v = read_json(&path);
+            let input = &v["input"];
+            assert_eq!(
+                v["expected"]["outcome"], "failure",
+                "{name}: fixture contract"
+            );
+
+            let mut cases = vec![(
+                input["dns_mock"]["host"]
+                    .as_str()
+                    .expect("dns_mock.host")
+                    .to_owned(),
+                answer_set(&input["dns_mock"]["answers"]),
+            )];
+            if let Some(extra) = input["additional_test_cases"].as_array() {
+                for c in extra {
+                    cases.push((
+                        c["host"].as_str().expect("case host").to_owned(),
+                        answer_set(&c["answers"]),
+                    ));
+                }
+            }
+            for (host, answers) in cases {
+                assert!(
+                    answers.len() >= 2,
+                    "{name}/{host}: mixed-answer case needs at least two answers"
+                );
+                // Premise check: the set is genuinely MIXED — a
+                // filter-and-proceed implementation would still have a
+                // public address to connect to, which is exactly the
+                // bypass this fixture forbids.
+                assert!(
+                    answers.iter().any(|a| policy.check_ip(a.ip()).is_ok()),
+                    "{name}/{host}: fixture must contain at least one public address"
+                );
+                reject_if_any_forbidden(&policy, &host, &answers).expect_err(&format!(
+                    "{name}/{host}: mixed answer set MUST reject the ENTIRE resolution"
+                ));
+            }
+        }
+    }
+
+    /// did-ssrf-005 / data-ref-ssrf-005 / fed-008 — "same authority" is
+    /// scheme + host (case-insensitive) + EFFECTIVE port. A same-host
+    /// different-port redirect is cross-authority and MUST be refused;
+    /// an explicit `:443` on `https://` is the SAME authority.
+    #[test]
+    fn same_host_different_port_redirect_fixtures() {
+        let Some(root) = spec_root() else { return };
+        let policy = SsrfPolicy::default();
+        for name in [
+            "did-ssrf-005-same-host-different-port-redirect.json",
+            "data-ref-ssrf-005-same-host-different-port-redirect.json",
+            "fed-008-same-host-different-port-redirect.json",
+        ] {
+            let path = root.join("schemas/conformance").join(name);
+            if fixture_missing(&path) {
+                continue;
+            }
+            let v = read_json(&path);
+            let input = &v["input"];
+            let from_raw = input["redirect_from"].as_str().expect("redirect_from");
+            let to_raw = input["redirect_to"].as_str().expect("redirect_to");
+            let from: url::Url = from_raw.parse().expect("redirect_from parses");
+            let to: url::Url = to_raw.parse().expect("redirect_to parses");
+
+            assert!(
+                !same_fetch_authority(&from, &to),
+                "{name}: {from_raw} -> {to_raw} MUST NOT share a fetch authority"
+            );
+            policy
+                .classify_redirect(from_raw, to_raw)
+                .expect_err(&format!(
+                    "{name}: cross-port redirect {from_raw} -> {to_raw} MUST be refused"
+                ));
+
+            if let Some(extra) = input["additional_test_cases"].as_array() {
+                for c in extra {
+                    let to2_raw = c["redirect_to"].as_str().expect("case redirect_to");
+                    let to2: url::Url = to2_raw.parse().expect("case redirect_to parses");
+                    let want = c["authority_match"].as_bool().expect("authority_match");
+                    assert_eq!(
+                        same_fetch_authority(&from, &to2),
+                        want,
+                        "{name}: {from_raw} -> {to2_raw} authority_match must be {want}"
+                    );
+                    if !want {
+                        policy
+                            .classify_redirect(from_raw, to2_raw)
+                            .expect_err(&format!(
+                                "{name}: {from_raw} -> {to2_raw} MUST be refused"
+                            ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// idem-* — Idempotency-Key behavior (RFC-ACDP-0003 §6), bound
+// behaviorally against RegistryServer + InMemoryStore
+// ═══════════════════════════════════════════════════════════════════════
+
+/// idem-001..006 driven through `publish_verified_did_key` (offline
+/// did:key verification — full crypto, no network) so the idempotency
+/// path under test is the same one `publish_verified` commits through.
+/// The concurrent-race variant of idem-006 is additionally exercised in
+/// `tests/store_contract.rs`.
+#[cfg(feature = "server")]
+mod idempotency_fixtures {
+    use super::*;
+    use acdp::crypto::SigningKey;
+    use acdp::producer::Producer;
+    use acdp::registry::{InMemoryStore, RegistryServer};
+    use acdp::types::capabilities::Limits;
+    use acdp::types::{ContextType, Visibility};
+
+    fn caps_idem(supports_idempotency_key: bool) -> CapabilitiesDocument {
+        CapabilitiesDocument {
+            acdp_version: "0.2.0".into(),
+            registry_did: "did:web:registry.example.com".into(),
+            supported_signature_algorithms: vec!["ed25519".into()],
+            supported_did_methods: vec!["did:web".into(), "did:key".into()],
+            profiles: vec!["acdp-registry-core".into()],
+            limits: Limits {
+                max_payload_bytes: 1_048_576,
+                max_embedded_bytes: 65_536,
+                idempotency_key_ttl_seconds: if supports_idempotency_key {
+                    Some(86_400)
+                } else {
+                    None
+                },
+            },
+            read_authentication_methods: vec![],
+            anonymous_public_reads: true,
+            supports_idempotency_key,
+            extensions: Default::default(),
+        }
+    }
+
+    fn server(supports: bool) -> RegistryServer<InMemoryStore> {
+        RegistryServer::new(
+            InMemoryStore::new(),
+            caps_idem(supports),
+            "registry.example.com",
+        )
+    }
+
+    fn did_key_producer(seed: u8) -> Producer {
+        Producer::new_did_key(SigningKey::from_bytes(&[seed; 32]))
+    }
+
+    fn request(p: &Producer, title: &str) -> acdp::types::publish::PublishRequest {
+        p.publish_request()
+            .title(title)
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid publish request")
+    }
+
+    fn fixture_gate(name: &str) -> bool {
+        let Some(root) = spec_root() else {
+            return false;
+        };
+        let path = root.join("schemas/conformance").join(name);
+        !fixture_missing(&path)
+    }
+
+    /// idem-001 — first publish with an Idempotency-Key succeeds
+    /// normally (201-equivalent) and records the key.
+    #[test]
+    fn idem_001_first_publish() {
+        if !fixture_gate("idem-001-first-publish.json") {
+            return;
+        }
+        let server = server(true);
+        let p = did_key_producer(11);
+        let resp = server
+            .publish_verified_did_key(&request(&p, "first"), Some("idem-key-AAAA"))
+            .expect("idem-001: first publish succeeds");
+        assert_eq!(resp.version, 1);
+        assert_eq!(resp.status, acdp::types::Status::Active);
+    }
+
+    /// idem-002 — replaying the SAME (agent, key, content_hash) returns
+    /// the stored response: same ctx_id / lineage_id / created_at, no
+    /// re-execution, no second persisted context.
+    #[test]
+    fn idem_002_retry_same_hash_replays_stored_response() {
+        if !fixture_gate("idem-002-retry-same-hash.json") {
+            return;
+        }
+        let server = server(true);
+        let p = did_key_producer(12);
+        let req = request(&p, "retry-me");
+        let first = server
+            .publish_verified_did_key(&req, Some("idem-key-AAAA"))
+            .expect("first publish");
+        let second = server
+            .publish_verified_did_key(&req, Some("idem-key-AAAA"))
+            .expect("idem-002: replay MUST succeed");
+        assert_eq!(second.ctx_id, first.ctx_id, "idem-002: same ctx_id");
+        assert_eq!(second.lineage_id, first.lineage_id);
+        assert_eq!(second.created_at, first.created_at);
+        assert_eq!(second.version, first.version);
+    }
+
+    /// idem-003 — the SAME key with DIFFERENT content is a client bug:
+    /// duplicate_publish (409). The registry must not persist the new
+    /// body, mint a new ctx_id, or overwrite the idempotency record.
+    #[test]
+    fn idem_003_same_key_different_hash_conflicts() {
+        if !fixture_gate("idem-003-different-hash.json") {
+            return;
+        }
+        let server = server(true);
+        let p = did_key_producer(13);
+        let first = server
+            .publish_verified_did_key(&request(&p, "content-A"), Some("idem-key-AAAA"))
+            .expect("first publish");
+        let err = server
+            .publish_verified_did_key(&request(&p, "content-B"), Some("idem-key-AAAA"))
+            .expect_err("idem-003: same key + different hash MUST conflict");
+        assert!(
+            matches!(err, acdp::AcdpError::DuplicatePublish(_)),
+            "idem-003: expected DuplicatePublish, got {err:?}"
+        );
+        // The original record must be untouched and retrievable.
+        let ctx = server
+            .retrieve(&first.ctx_id, None)
+            .expect("retrieve ok")
+            .expect("original context still present");
+        assert_eq!(ctx.body.title, "content-A");
+    }
+
+    /// idem-004 — idempotency keys are scoped PER AGENT: a different
+    /// producer reusing the same key string mints a fresh context.
+    #[test]
+    fn idem_004_key_scoped_per_agent() {
+        if !fixture_gate("idem-004-new-key-same-content.json") {
+            return;
+        }
+        let server = server(true);
+        let a = did_key_producer(14);
+        let b = did_key_producer(15);
+        let first = server
+            .publish_verified_did_key(&request(&a, "shared-title"), Some("idem-key-AAAA"))
+            .expect("agent A publish");
+        let second = server
+            .publish_verified_did_key(&request(&b, "shared-title"), Some("idem-key-AAAA"))
+            .expect("idem-004: agent B publish MUST succeed");
+        assert_ne!(second.ctx_id, first.ctx_id, "idem-004: different ctx_id");
+        assert_ne!(second.lineage_id, first.lineage_id);
+    }
+
+    /// idem-005 — a registry WITHOUT idempotency support ignores the
+    /// header entirely: two publishes with the same key mint two
+    /// distinct contexts.
+    #[test]
+    fn idem_005_no_support_ignores_header() {
+        if !fixture_gate("idem-005-no-support-ignores-header.json") {
+            return;
+        }
+        let server = server(false);
+        let p = did_key_producer(16);
+        let first = server
+            .publish_verified_did_key(&request(&p, "no-idem"), Some("idem-key-AAAA"))
+            .expect("first publish");
+        let second = server
+            .publish_verified_did_key(&request(&p, "no-idem"), Some("idem-key-AAAA"))
+            .expect("second publish");
+        assert_ne!(
+            second.ctx_id, first.ctx_id,
+            "idem-005: without support, the header is ignored and a fresh ctx_id is minted"
+        );
+    }
+
+    /// idem-006 — serialized shadow of the race fixture: one request
+    /// wins, the replay observes the winner's exact response. The truly
+    /// concurrent variant runs in `tests/store_contract.rs`.
+    #[test]
+    fn idem_006_serialized_one_wins_other_replays() {
+        if !fixture_gate("idem-006-race-concurrent.json") {
+            return;
+        }
+        let server = server(true);
+        let p = did_key_producer(17);
+        let req = request(&p, "raced");
+        let winner = server
+            .publish_verified_did_key(&req, Some("idem-key-RACE"))
+            .expect("winner publish");
+        let replay = server
+            .publish_verified_did_key(&req, Some("idem-key-RACE"))
+            .expect("replay publish");
+        assert_eq!(
+            replay.ctx_id, winner.ctx_id,
+            "idem-006: replay observes the winner"
         );
     }
 }
