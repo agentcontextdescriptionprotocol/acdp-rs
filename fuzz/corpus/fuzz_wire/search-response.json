@@ -1,0 +1,1 @@
+{"matches":[{"ctx_id":"acdp://registry.example.com/12345678-1234-4321-8123-123456781234","lineage_id":"lin:sha256:1111111111111111111111111111111111111111111111111111111111111111","agent_id":"did:web:agents.example.com:test","title":"x","type":"data_snapshot","created_at":"2026-01-01T00:00:00.000Z","status":"active"}],"total_estimate":1}

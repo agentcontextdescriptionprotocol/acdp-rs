@@ -1,0 +1,67 @@
+[package]
+name = "acdp-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "cargo-fuzz harnesses for the ACDP crates (JCS, wire types, DID documents, SSRF policy)"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# Feature set must match what the library crates enable so canonical
+# floats round-trip identically (float_roundtrip) — see fuzz_jcs.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+url = "2"
+
+acdp-primitives = { path = "../crates/acdp-primitives", default-features = false }
+acdp-jcs = { path = "../crates/acdp-jcs", default-features = false }
+acdp-types = { path = "../crates/acdp-types", default-features = false }
+# No `client` feature: only the pure DID-document parsing / key
+# extraction and did:web string helpers — reqwest/tokio never build.
+acdp-did = { path = "../crates/acdp-did", default-features = false }
+acdp-safe-http = { path = "../crates/acdp-safe-http", default-features = false }
+
+[[bin]]
+name = "fuzz_jcs"
+path = "fuzz_targets/fuzz_jcs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wire"
+path = "fuzz_targets/fuzz_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_did_doc"
+path = "fuzz_targets/fuzz_did_doc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ssrf"
+path = "fuzz_targets/fuzz_ssrf.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+# Standalone workspace: keeps the root workspace (and its MSRV / lockfile /
+# release-plz surface) unaffected, mirroring bindings/acdp-py and
+# bindings/acdp-node.
+[workspace]
+members = ["."]
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,1 @@
+xn--caf-dma.example:8443/path?query=1#frag [fe80::1] 10.0.0.1 100.64.0.1

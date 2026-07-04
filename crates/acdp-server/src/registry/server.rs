@@ -255,6 +255,19 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
     /// Steps 7–8 require a [`acdp_did::WebResolver`], so this method
     /// is gated on the `client` feature.
     #[cfg(feature = "client")]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "acdp.publish_verified",
+            skip_all,
+            fields(
+                agent_id = req.agent_id.as_str(),
+                version = req.version,
+                idempotency_key = idempotency_key.is_some(),
+            ),
+            err(Display)
+        )
+    )]
     pub async fn publish_verified(
         &self,
         req: &PublishRequest,
@@ -279,7 +292,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         tenant: Option<&str>,
     ) -> Result<PublishResponse, AcdpError> {
         // Rate-limit gate runs before any expensive work — RFC-ACDP-0008 §4.3.
-        self.rate_limiter.check_publish(&req.agent_id)?;
+        self.check_publish_rate_limit(&req.agent_id)?;
 
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
@@ -333,13 +346,26 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
     /// the context row — the same contract as
     /// [`Self::publish_verified_in_tenant`]. `tenant = None` is identical
     /// to [`Self::publish_verified_did_key`].
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "acdp.publish_verified_did_key",
+            skip_all,
+            fields(
+                agent_id = req.agent_id.as_str(),
+                version = req.version,
+                idempotency_key = idempotency_key.is_some(),
+            ),
+            err(Display)
+        )
+    )]
     pub fn publish_verified_did_key_in_tenant(
         &self,
         req: &PublishRequest,
         idempotency_key: Option<&str>,
         tenant: Option<&str>,
     ) -> Result<PublishResponse, AcdpError> {
-        self.rate_limiter.check_publish(&req.agent_id)?;
+        self.check_publish_rate_limit(&req.agent_id)?;
 
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
@@ -376,7 +402,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // Rate-limit gate fires here too — the limiter is intentionally
         // wired BEFORE validation so it works as a defensive cap even
         // when the test path is used.
-        self.rate_limiter.check_publish(&req.agent_id)?;
+        self.check_publish_rate_limit(&req.agent_id)?;
 
         // RFC-ACDP-0010 §7: a receipts-advertising registry has no
         // degraded mode — every persisted context must carry a receipt,
@@ -395,6 +421,26 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
         let _validated = validator.validate_post_schema(req, raw_bytes)?;
         self.commit_via_store(req, None, None, None)
+    }
+
+    /// Rate-limit gate shared by every publish path (RFC-ACDP-0008 §4.3).
+    /// Under the `tracing` feature a rejection emits a structured warn
+    /// event so operators can see limiter hits per agent.
+    fn check_publish_rate_limit(
+        &self,
+        agent_id: &acdp_types::primitives::AgentDid,
+    ) -> Result<(), AcdpError> {
+        match self.rate_limiter.check_publish(agent_id) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    agent_id = agent_id.as_str(),
+                    "publish rejected by rate limiter"
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Drive `RegistryStore::commit_publish` from a validated request.
@@ -454,6 +500,14 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             crate::registry::store::PublishCommitOutcome::Inserted(r) => (r, false),
             crate::registry::store::PublishCommitOutcome::IdempotentReplay(r) => (r, true),
         };
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            ctx_id = %response.ctx_id.0,
+            lineage_id = %response.lineage_id.0,
+            version = response.version,
+            replayed,
+            "publish committed"
+        );
         // RFC-ACDP-0010 §7 belt-and-braces: a receipts-advertising
         // registry has no degraded mode. A store implementation that
         // ignores `receipt_minter` (e.g. compiled against the older
