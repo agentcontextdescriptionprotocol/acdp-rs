@@ -81,6 +81,7 @@ fn sample_body_json(ctx_id: &str) -> serde_json::Value {
 // ── Capabilities ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn capabilities_happy_path() {
     let server = MockServer::start().await;
 
@@ -114,6 +115,7 @@ async fn capabilities_happy_path() {
 // ── Publish ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn publish_returns_assigned_ids() {
     let server = MockServer::start().await;
 
@@ -139,6 +141,7 @@ async fn publish_returns_assigned_ids() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn publish_idempotent_sends_header() {
     let server = MockServer::start().await;
 
@@ -165,6 +168,7 @@ async fn publish_idempotent_sends_header() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn publish_error_surfaces_wire_error() {
     let server = MockServer::start().await;
 
@@ -191,6 +195,7 @@ async fn publish_error_surfaces_wire_error() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn publish_unknown_error_body_falls_back_to_unknown_code() {
     let server = MockServer::start().await;
 
@@ -211,6 +216,7 @@ async fn publish_unknown_error_body_falls_back_to_unknown_code() {
 // ── Retrieval ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn retrieve_full_context() {
     let server = MockServer::start().await;
     let ctx_id = "acdp://registry.example.com/uuid-1";
@@ -238,6 +244,7 @@ async fn retrieve_full_context() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn retrieve_body_only() {
     let server = MockServer::start().await;
     let ctx_id = "acdp://registry.example.com/uuid-1";
@@ -257,6 +264,7 @@ async fn retrieve_body_only() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn retrieve_not_found_maps_to_registry_error() {
     let server = MockServer::start().await;
     let ctx_id = "acdp://registry.example.com/missing";
@@ -278,6 +286,7 @@ async fn retrieve_not_found_maps_to_registry_error() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn rate_limited_maps_to_typed_variant() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -293,6 +302,7 @@ async fn rate_limited_maps_to_typed_variant() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn superseded_target_maps_with_reason() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -319,6 +329,7 @@ async fn superseded_target_maps_with_reason() {
 // ── Lineage ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn lineage_current_returns_latest() {
     let server = MockServer::start().await;
     let lineage = "lin:sha256:aabb";
@@ -344,6 +355,7 @@ async fn lineage_current_returns_latest() {
 // ── Search ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn search_passes_query_string() {
     let server = MockServer::start().await;
 
@@ -374,6 +386,7 @@ async fn search_passes_query_string() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn search_response_with_results_key_rejected() {
     // Conformance vis-003: a registry that emits `results` is non-conformant.
     // The schema is additionalProperties: false; the deserializer rejects it
@@ -398,6 +411,7 @@ async fn search_response_with_results_key_rejected() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn search_response_with_matches_and_full_summary() {
     // A match_summary with the full optional set deserializes correctly.
     let server = MockServer::start().await;
@@ -433,6 +447,7 @@ async fn search_response_with_matches_and_full_summary() {
 
 /// T5 — Cross-authority redirect MUST be rejected (RFC-ACDP-0006 §7.5).
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn cross_authority_redirect_rejected() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -450,6 +465,7 @@ async fn cross_authority_redirect_rejected() {
 
 /// T6 — Oversize body MUST be aborted before parse (§7.3 cap, ~1 MB).
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn oversize_response_body_aborted() {
     let server = MockServer::start().await;
     // 2 MB of JSON-shaped padding — well over the MAX_CONTEXT_BYTES cap.
@@ -470,6 +486,7 @@ async fn oversize_response_body_aborted() {
 }
 
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn trailing_slash_is_normalized() {
     let server = MockServer::start().await;
 
@@ -495,6 +512,7 @@ async fn trailing_slash_is_normalized() {
 /// and uses it as the cache TTL. A registry serving max-age=60 means
 /// the resolver MUST honor that hint and refetch after 60s.
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn capabilities_ttl_reflects_cache_control_max_age() {
     let server = MockServer::start().await;
     let caps_body = json!({
@@ -528,6 +546,7 @@ async fn capabilities_ttl_reflects_cache_control_max_age() {
 /// BUG-09 — absurdly large `max-age` is clamped to the 3600s ceiling
 /// per RFC-ACDP-0006 §4.2.
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn capabilities_ttl_clamps_to_3600_ceiling() {
     let server = MockServer::start().await;
     let caps_body = json!({
@@ -556,6 +575,7 @@ async fn capabilities_ttl_clamps_to_3600_ceiling() {
 /// (matches the prior resolver-wide TTL so behavior is unchanged on
 /// silent registries).
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn capabilities_ttl_default_when_cache_control_absent() {
     let server = MockServer::start().await;
     let caps_body = json!({

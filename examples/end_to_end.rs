@@ -31,6 +31,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::main]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn main() -> anyhow::Result<()> {
     // ── 1. Build and sign a publish request ─────────────────────────────────
     let key = SigningKey::generate();

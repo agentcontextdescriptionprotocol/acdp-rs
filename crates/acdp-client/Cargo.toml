@@ -14,6 +14,12 @@ rust-version = "1.86"
 
 [features]
 tracing = ["dep:tracing", "acdp-did/tracing"]
+# Opts into the SSRF-relaxed test-only constructors
+# (`RegistryClient::{with_root_cert_pem, with_test_transport,
+# with_test_endpoint}`). Without it those constructors are deprecated;
+# in 0.4.0 they will be compiled out entirely unless this feature is
+# enabled. Never enable in production builds.
+test-transport = ["acdp-safe-http/test-transport", "acdp-did/test-transport"]
 
 [dependencies]
 acdp-primitives = { path = "../acdp-primitives", version = "0.1.1", features = ["reqwest"] }

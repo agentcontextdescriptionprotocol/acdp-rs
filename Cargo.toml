@@ -37,6 +37,17 @@ default = ["client"]
 client  = ["dep:acdp-client", "acdp-primitives/reqwest", "acdp-server?/client"]
 server  = ["dep:acdp-server"]
 tracing = ["acdp-did/tracing", "acdp-client?/tracing"]
+# Opts into the SSRF-relaxed test-only constructors
+# (`SsrfPolicy::allow_test_loopback`, `RegistryClient::{with_root_cert_pem,
+# with_test_transport, with_test_endpoint}`, `WebResolver::with_test_endpoint`).
+# Without it those constructors are deprecated; in 0.4.0 they will be
+# compiled out entirely unless this feature is enabled. Never enable in
+# production builds.
+test-transport = [
+    "acdp-safe-http/test-transport",
+    "acdp-did/test-transport",
+    "acdp-client?/test-transport",
+]
 
 # TLS-backed fixture conformance tests need both the `client` (resolver,
 # RegistryClient, CrossRegistryResolver) and `server` (RegistryServer,
