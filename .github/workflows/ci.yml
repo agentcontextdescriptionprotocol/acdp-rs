@@ -131,6 +131,21 @@ jobs:
           # Mirrors the same ignore in deny.toml.
           ignore: RUSTSEC-2025-0134
 
+  semver:
+    name: cargo-semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-semver-checks
+      # Compares every published workspace crate's public API against its
+      # latest crates.io release and fails when a change requires a semver
+      # bump the current version numbers don't carry. release-plz derives
+      # the bump from Conventional Commits; this job catches the case
+      # where an API break rides a commit that wasn't marked breaking.
+      - run: cargo semver-checks --workspace
+
   coverage:
     name: coverage (llvm-cov)
     runs-on: ubuntu-latest
