@@ -36,7 +36,12 @@ default = ["client"]
 # combined client+server test harness gets RegistryServer::publish_verified.
 client  = ["dep:acdp-client", "acdp-primitives/reqwest", "acdp-server?/client"]
 server  = ["dep:acdp-server"]
-tracing = ["acdp-did/tracing", "acdp-client?/tracing"]
+tracing = [
+    "acdp-did/tracing",
+    "acdp-client?/tracing",
+    "acdp-verify/tracing",
+    "acdp-server?/tracing",
+]
 # Opts into the SSRF-relaxed test-only constructors
 # (`SsrfPolicy::allow_test_loopback`, `RegistryClient::{with_root_cert_pem,
 # with_test_transport, with_test_endpoint}`, `WebResolver::with_test_endpoint`).

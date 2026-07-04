@@ -16,11 +16,14 @@ rust-version = "1.86"
 # Enables the resolver-backed Verifier and publish-request verification
 # (did:web DID-document fetch). did:key offline verification works without it.
 client = ["acdp-did/client"]
+# Structured diagnostics on the verification pipeline (spans + stage events).
+tracing = ["dep:tracing", "acdp-did/tracing"]
 
 [dependencies]
 acdp-primitives = { path = "../acdp-primitives", version = "0.1.1" }
 acdp-types      = { path = "../acdp-types", version = "0.1.1" }
 acdp-crypto     = { path = "../acdp-crypto", version = "0.1.1" }
+tracing         = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
 acdp-did        = { path = "../acdp-did", version = "0.1.1" }
 acdp-validation = { path = "../acdp-validation", version = "0.1.0" }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

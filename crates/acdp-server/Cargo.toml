@@ -21,6 +21,8 @@ client = [
     "acdp-crypto/client",
     "acdp-safe-http/client",
 ]
+# Structured diagnostics on the publish pipeline (spans + commit events).
+tracing = ["dep:tracing", "acdp-verify/tracing"]
 
 [dependencies]
 acdp-primitives = { path = "../acdp-primitives", version = "0.1.1" }
@@ -29,6 +31,7 @@ acdp-crypto     = { path = "../acdp-crypto", version = "0.1.1" }
 acdp-did        = { path = "../acdp-did", version = "0.1.1" }
 acdp-validation = { path = "../acdp-validation", version = "0.1.0" }
 acdp-verify     = { path = "../acdp-verify", version = "0.1.0" }
+tracing         = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
 acdp-producer   = { path = "../acdp-producer", version = "0.1.0" }
 acdp-safe-http  = { path = "../acdp-safe-http", version = "0.1.1" }
 serde      = { version = "1", features = ["derive"] }

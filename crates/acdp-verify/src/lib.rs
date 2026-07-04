@@ -40,6 +40,15 @@ impl<'a> Verifier<'a> {
     ///  7. Verify the signature over the content_hash ASCII bytes.
     ///
     ///  (Hash recomputation is step 0, performed first.)
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "acdp.verify_body",
+            skip_all,
+            fields(ctx_id = %body.ctx_id.0, agent_id = body.agent_id.as_str()),
+            err(Display)
+        )
+    )]
     pub async fn verify_body(&self, body: &Body) -> Result<(), AcdpError> {
         // Step -1 (BUG-04): structural / runtime validation. A body may be
         // cryptographically correct but protocol-invalid (non-did:web
@@ -57,9 +66,26 @@ impl<'a> Verifier<'a> {
     /// `acdp::client::VerifiedContext::fetch_report` runs the
     /// structural part itself and records per-`DataRef` outcomes
     /// individually.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "acdp.verify_body_signed",
+            skip_all,
+            fields(ctx_id = %body.ctx_id.0),
+            err(Display)
+        )
+    )]
     pub async fn verify_body_signed(&self, body: &Body) -> Result<(), AcdpError> {
         self.verify_body_hash(body)?;
-        self.verify_body_signature(body).await
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            stage = "content_hash",
+            "content hash recomputed and matched"
+        );
+        self.verify_body_signature(body).await?;
+        #[cfg(feature = "tracing")]
+        tracing::debug!(stage = "signature", "producer signature verified");
+        Ok(())
     }
 
     /// Step 0 only — recompute the `content_hash` over ProducerContent
@@ -99,6 +125,15 @@ impl<'a> Verifier<'a> {
 /// verification on retrieval should prefer
 /// `acdp::client::VerifiedContext::fetch` which calls [`Verifier::verify_body`].
 #[cfg(feature = "client")]
+#[cfg_attr(
+    feature = "tracing",
+    tracing::instrument(
+        name = "acdp.verify_publish_request_signature",
+        skip_all,
+        fields(agent_id = req.agent_id.as_str(), key_id = %req.signature.key_id),
+        err(Display)
+    )
+)]
 pub async fn verify_publish_request_signature(
     req: &PublishRequest,
     resolver: &WebResolver,
