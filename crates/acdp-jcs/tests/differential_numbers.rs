@@ -35,6 +35,57 @@ use sha2::{Digest, Sha256};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// ECMAScript `Number::toString(x, 10)` for finite `x`.
+/// ECMA-262 §6.1.6.1.20 step 5 even-tie rule for the oracle. `x` is an
+/// exact decimal midpoint iff `x == t × 10^e / 2` with `t = 2s ∓ 1`; the
+/// comparison `m·2^(q+1−e) == t·5^e` is done in checked `u128` integer
+/// arithmetic (a genuine tie forces `5^|e|` to divide a ≤53-bit mantissa
+/// product, so both sides fit; overflow soundly means "not a tie").
+fn apply_even_tie_rule(x: f64, s: String, n: i64) -> String {
+    if s.len() > 17 {
+        return s;
+    }
+    let k = s.len() as i64;
+    let e = (n - k) as i32; // value = s_int × 10^e
+    let v: u128 = s.parse().expect("digit string parses as an integer");
+    if v % 2 == 0 {
+        return s; // even already wins any tie
+    }
+    for cand in [v - 1, v + 1] {
+        let t = v + cand; // 2v−1 (below) or 2v+1 (above), both odd
+        if oracle_exact_midpoint(x, t, e) {
+            let out = cand.to_string();
+            assert_eq!(out.len(), s.len(), "tie flip must preserve k");
+            assert!(
+                !out.ends_with('0'),
+                "tie flip must not create trailing zero"
+            );
+            return out;
+        }
+    }
+    s
+}
+
+fn oracle_exact_midpoint(x: f64, t: u128, e: i32) -> bool {
+    let bits = x.to_bits();
+    let frac = bits & ((1u64 << 52) - 1);
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let (m, q) = if biased == 0 {
+        (frac as u128, -1074i32)
+    } else {
+        ((frac | (1u64 << 52)) as u128, biased - 1075)
+    };
+    fn scale(v: u128, p2: u32, p5: u32) -> Option<u128> {
+        if p2 >= 128 || v.leading_zeros() < p2 {
+            return None;
+        }
+        (0..p5).try_fold(v << p2, |acc, _| acc.checked_mul(5))
+    }
+    let p2 = q + 1 - e;
+    let lhs = scale(m, p2.max(0) as u32, (-e).max(0) as u32);
+    let rhs = scale(t, (-p2).max(0) as u32, e.max(0) as u32);
+    lhs.is_some() && lhs == rhs
+}
+
 fn es_number_to_string(x: f64) -> String {
     assert!(x.is_finite(), "oracle is defined for finite numbers only");
 
@@ -74,8 +125,16 @@ fn es_number_to_string(x: f64) -> String {
         s.pop(); // enforce "s is not divisible by 10" (minimal k)
     }
     let s = String::from_utf8(s).expect("digits are ASCII");
-    let k = s.len() as i64;
     debug_assert!(s.as_bytes()[0] != b'0', "x != 0 ⇒ leading digit nonzero");
+    // Step 5 tie clause: "If there are two such possible values of s,
+    // choose the one that is even." The digit source above inherits
+    // Rust's tie-break, which may pick the odd candidate; detect an
+    // exact decimal midpoint with integer arithmetic and flip to the
+    // even neighbor. (Independently implements the same clause the
+    // production code applies; both sides stay anchored to engine
+    // ground truth by the V8-verified Appendix B pins below.)
+    let s = apply_even_tie_rule(x, s, n);
+    let k = s.len() as i64;
 
     if k <= n && n <= 21 {
         // Step 6: "If k ≤ n ≤ 21, return the String consisting of the
@@ -287,8 +346,10 @@ const RFC8785_APPENDIX_B: &[(u64, &str)] = &[
     (0x41b3de4355555556, "333333333.3333334"),
     (0x41b3de4355555557, "333333333.33333343"),
     (0xbecbf647612f3696, "-0.0000033333333333333333"),
-    // 0x43143ff3c1cb0959 ("round to even") intentionally absent — see
-    // rfc8785_appendix_b_round_to_even_divergence below.
+    // "Round to even": an exact shortest-digits tie; ECMA-262 step 5
+    // requires the even candidate. See the regression test below for the
+    // history of this vector.
+    (0x43143ff3c1cb0959, "1424953923781206.2"),
 ];
 
 #[test]
@@ -308,35 +369,31 @@ fn rfc8785_appendix_b_vectors() {
     }
 }
 
-/// KNOWN DIVERGENCE (found by this differential suite, 2026-07): the RFC
-/// 8785 Appendix B "Round to even" vector.
+/// REGRESSION (divergence found by this suite 2026-07, fixed same round):
+/// the RFC 8785 Appendix B "Round to even" vector.
 ///
-/// - Input bits:        0x43143ff3c1cb0959
-/// - Exact value:       1424953923781206.25 (a perfect shortest-digits tie:
+/// - Input bits:       0x43143ff3c1cb0959
+/// - Exact value:      1424953923781206.25 (a perfect shortest-digits tie:
 ///   both "…206.2" and "…206.3" round-trip to these bits, each 0.05 away)
-/// - ECMAScript / RFC:  "1424953923781206.2"  (ECMA-262 §6.1.6.1.20 step 5:
+/// - ECMAScript / RFC: "1424953923781206.2" (ECMA-262 §6.1.6.1.20 step 5:
 ///   "If there are two such possible values of s, choose the one that is
 ///   even" — verified against Node.js/V8)
-/// - `write_number`:    "1424953923781206.3"
+/// - Rust `{:e}` alone: "1424953923781206.3" (breaks the tie upward)
 ///
-/// The divergence lives in the *digit generation* layer: Rust's `{:e}`
-/// shortest-round-trip formatter breaks this tie toward "…3" instead of
-/// applying ECMAScript's round-half-to-even rule. The band/notation logic
-/// under test here is not at fault, and the reference oracle inherits the
-/// same digit source (per the suite's design), so it also emits "…3" —
-/// which is why only this engine-anchored Appendix B pin can catch it,
-/// never the oracle-differential proptests. Kept `#[ignore]`d so CI stays
-/// green while the finding is preserved; do not fix by patching the band
-/// logic — any fix belongs in digit generation and must keep sig-001 /
-/// can-001 passing.
+/// `write_number` now applies `round_half_even_correction` (exact-integer
+/// midpoint detection on the bit pattern) before band formatting, and the
+/// oracle applies its own independent `apply_even_tie_rule` — both anchored
+/// to engine ground truth here. If either regresses, this test fails.
 #[test]
-#[ignore = "known digit-tie divergence: Rust {:e} vs ECMAScript round-half-even \
-            for bits 0x43143ff3c1cb0959 (see doc comment)"]
-fn rfc8785_appendix_b_round_to_even_divergence() {
+fn rfc8785_appendix_b_round_to_even_regression() {
     let f = f64::from_bits(0x43143ff3c1cb0959);
-    // RFC 8785 Appendix B / ECMAScript ground truth:
-    assert_eq!(jcs_number_token(f), "1424953923781206.2");
-    // Current behavior (documented above): "1424953923781206.3".
+    assert_eq!(jcs_number_token(f), "1424953923781206.2", "production");
+    assert_eq!(es_number_to_string(f), "1424953923781206.2", "oracle");
+    // The negative twin exercises the sign-independent path.
+    assert_eq!(jcs_number_token(-f), "-1424953923781206.2", "negative");
+    // A neighboring non-tie value must be untouched by the correction.
+    let non_tie = f64::from_bits(0x43143ff3c1cb095a);
+    assert_eq!(jcs_number_token(non_tie), es_number_to_string(non_tie));
 }
 
 #[test]
