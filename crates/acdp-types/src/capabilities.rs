@@ -113,4 +113,17 @@ pub struct Limits {
         deserialize_with = "crate::serde_helpers::de_present"
     )]
     pub idempotency_key_ttl_seconds: Option<u32>,
+
+    /// *(0.3.0)* OPTIONAL nominal per-agent publish ceiling, in
+    /// publishes per minute (integer ≥ 1). Advisory: producers SHOULD
+    /// use it to pace publishes; its presence does NOT change the
+    /// RFC-ACDP-0008 §4.3 requirements (rate limiting stays REQUIRED,
+    /// `Retry-After` stays mandatory on 429). RFC-ACDP-0007 §3.2,
+    /// fixture `caps-007`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_helpers::de_present"
+    )]
+    pub max_publish_per_minute: Option<u64>,
 }
