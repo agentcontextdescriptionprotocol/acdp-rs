@@ -1,0 +1,1 @@
+registry.example.com/contexts/12345678-1234-4321-8123-123456781234
