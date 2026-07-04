@@ -53,15 +53,21 @@ fuzz_target!(|input: Input| {
             "127.0.0.1 classified safe"
         );
         assert!(
-            policy.classify_ip(IpAddr::V6(IMDS.to_ipv6_mapped())).is_err(),
+            policy
+                .classify_ip(IpAddr::V6(IMDS.to_ipv6_mapped()))
+                .is_err(),
             "IPv4-mapped IMDS classified safe"
         );
         assert!(
-            policy.classify_ip(IpAddr::V6(LOOPBACK.to_ipv6_mapped())).is_err(),
+            policy
+                .classify_ip(IpAddr::V6(LOOPBACK.to_ipv6_mapped()))
+                .is_err(),
             "IPv4-mapped loopback classified safe"
         );
         assert!(
-            policy.classify_url("https://169.254.169.254/latest/meta-data/").is_err(),
+            policy
+                .classify_url("https://169.254.169.254/latest/meta-data/")
+                .is_err(),
             "IMDS URL literal classified safe"
         );
         assert!(
