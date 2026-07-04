@@ -65,6 +65,13 @@ name              = "receipts"
 path              = "tests/receipts.rs"
 required-features = ["client", "server"]
 
+# Criterion benchmarks for the crypto / JCS / SSRF hot paths.
+# `harness = false` hands `main` to criterion instead of libtest.
+[[bench]]
+name    = "core"
+path    = "benches/core.rs"
+harness = false
+
 # The umbrella `acdp` crate is a thin facade: its library is pure
 # re-exports of the workspace crates below. The concrete third-party
 # crates live in `[dev-dependencies]` (used only by the integration
@@ -97,6 +104,7 @@ url           = "2"
 urlencoding   = "2"
 tokio    = { version = "1", features = ["full"] }
 anyhow   = "1"
+criterion = "0.5"
 wiremock = "0.6"
 proptest = "1"
 # TLS test harness — used to mock a `did:web` HTTPS endpoint and a
