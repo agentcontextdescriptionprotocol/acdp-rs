@@ -91,33 +91,6 @@ fn fixture_missing(path: &Path) -> bool {
     true
 }
 
-/// Existence gate for fixtures that only exist on an unpublished spec
-/// DRAFT branch — currently the ACDP 0.2.0 families (`sig-003`, `fp-*`,
-/// `rcpt-*`, `dk-*`, `can-012`, `rot-001`) on
-/// `spec/0.2.0-trust-hardening`.
-///
-/// These skip with a notice even under `ACDP_REQUIRE_CONFORMANCE`,
-/// because spec `main` does not carry them yet and the required CI job
-/// must stay green against the published spec. Setting
-/// `ACDP_REQUIRE_CONFORMANCE_DRAFT` additionally hard-fails on them
-/// (use when pointing `ACDP_SPEC_DIR` at the draft branch). Flip call
-/// sites to [`fixture_missing`] when the 0.2.0 spec merges to main.
-fn draft_fixture_missing(path: &Path) -> bool {
-    if path.exists() {
-        return false;
-    }
-    assert!(
-        std::env::var("ACDP_REQUIRE_CONFORMANCE_DRAFT").is_err(),
-        "ACDP_REQUIRE_CONFORMANCE_DRAFT is set but draft fixture {} is missing",
-        path.display()
-    );
-    eprintln!(
-        "draft (0.2.0) fixture {} not present in this spec checkout; skipping",
-        path.display()
-    );
-    true
-}
-
 #[test]
 fn all_conformance_fixtures_parse_as_valid_json() {
     let Some(root) = spec_root() else {
@@ -2047,7 +2020,7 @@ mod registry_behavior {
 fn sig_003_did_key_golden_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/sig-003-did-key-golden.json");
-    if draft_fixture_missing(&path) {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -2101,7 +2074,7 @@ fn sig_003_did_key_golden_fixture() {
 fn fp_001_fingerprint_vectors_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/fp-001-key-fingerprint-vectors.json");
-    if draft_fixture_missing(&path) {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -2127,7 +2100,7 @@ fn fp_001_fingerprint_vectors_fixture() {
 fn rcpt_001_receipt_golden_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/rcpt-001-receipt-golden.json");
-    if draft_fixture_missing(&path) {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
@@ -2206,7 +2179,7 @@ fn rcpt_001_receipt_golden_fixture() {
 fn can_012_divergence_corpus_fixture() {
     let Some(root) = spec_root() else { return };
     let path = root.join("schemas/conformance/can-012-divergence-corpus.json");
-    if draft_fixture_missing(&path) {
+    if fixture_missing(&path) {
         return;
     }
     let v = read_json(&path);
