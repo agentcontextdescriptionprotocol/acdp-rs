@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-safe-http"
-version     = "0.1.1"
+version     = "0.1.2"
 edition     = "2021"
 description = "SSRF defenses and HTTPS guards (RFC-ACDP-0006 §7) for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"

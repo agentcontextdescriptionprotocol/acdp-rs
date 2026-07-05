@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-jcs-v0.1.1...acdp-jcs-v0.1.2) - 2026-07-05
+
+### Fixed
+
+- *(jcs)* apply ECMA-262 round-half-even tie-break in number serialization
+
+### Other
+
+- *(jcs)* differential number-serialization suite vs ECMAScript oracle
+
 ## [0.1.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-jcs-v0.1.0...acdp-jcs-v0.1.1) - 2026-06-24
 
 ### Other

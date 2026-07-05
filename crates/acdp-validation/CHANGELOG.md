@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-validation-v0.1.0...acdp-validation-v0.2.0) - 2026-07-05
+
+### Added
+
+- feat!(types): 0.3.0 capabilities surface — limits.max_publish_per_minute + version-conditional idempotency rule
+
+### Other
+
+- release
+
 ## [0.1.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/releases/tag/acdp-validation-v0.1.0) - 2026-06-24
 
 ### Other
