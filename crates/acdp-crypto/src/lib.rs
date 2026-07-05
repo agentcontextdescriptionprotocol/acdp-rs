@@ -1,9 +1,10 @@
 //! # acdp-crypto — cryptographic primitives for the Agent Context Distribution Protocol
 //!
 //! Content-hashing ([`hash`]), signing ([`sign`]), byte-level signature
-//! verification ([`verify`]), and key fingerprinting ([`fingerprint`])
-//! per RFC-ACDP-0001/0003/0008. JCS canonicalization is re-exported from
-//! [`acdp-jcs`](https://docs.rs/acdp-jcs) as [`jcs`].
+//! verification ([`verify`]), key fingerprinting ([`fingerprint`]), and
+//! the transparency-log Merkle machinery ([`merkle`]) per
+//! RFC-ACDP-0001/0003/0008/0012. JCS canonicalization is re-exported
+//! from [`acdp-jcs`](https://docs.rs/acdp-jcs) as [`jcs`].
 //!
 //! The high-level, resolver-backed verification pipeline (`Verifier`,
 //! `verify_body`, …) lives in the separate `acdp-verify` crate — it
@@ -11,6 +12,7 @@
 
 pub mod fingerprint;
 pub mod hash;
+pub mod merkle;
 pub mod sign;
 pub mod verify;
 
@@ -27,5 +29,9 @@ pub use hash::{
     verify_content_hash,
 };
 pub use jcs::{canonicalize, canonicalize_value, try_canonicalize_value};
+pub use merkle::{
+    consistency_proof, inclusion_path, leaf_hash, merkle_tree_hash, node_hash, verify_consistency,
+    verify_inclusion,
+};
 pub use sign::{AcdpSigningKey, P256SigningKey, SigningKey};
 pub use verify::{verify_ecdsa_p256, verify_ed25519};

@@ -310,6 +310,20 @@ pub struct FullContext {
     /// when absent — non-advertising registries never emit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_head_receipt: Option<serde_json::Value>,
+    /// Optional transparency-log inclusion proof (ACDP 0.3,
+    /// RFC-ACDP-0012 §10): the RFC 6962 audit path plus signed
+    /// checkpoint proving this context is committed by the registry's
+    /// append-only log. MAY be carried on full retrieval by registries
+    /// advertising `acdp-registry-transparency-log`; never on the
+    /// body-only endpoint and never on the publish response. A
+    /// top-level **sibling** of `registry_receipt` — deliberately NOT a
+    /// member of it (the receipt is closed, fully signed, and
+    /// byte-immutable). Parse with
+    /// [`crate::log::LogInclusion::from_value`]; verify per
+    /// RFC-ACDP-0012 §9 — the log verdict is independent of the body
+    /// and receipt verdicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_inclusion: Option<serde_json::Value>,
 
     /// Unknown top-level context fields, preserved per
     /// `acdp-context.schema.json` `additionalProperties: true`. Retained

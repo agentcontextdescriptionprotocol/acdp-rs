@@ -497,6 +497,7 @@ async fn fetch_report_happy_path() {
         },
         registry_receipt: None,
         lineage_head_receipt: None,
+        log_inclusion: None,
         extensions: Default::default(),
     };
     let full_value = serde_json::to_value(&full).expect("FullContext serializes");
@@ -619,6 +620,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
         },
         registry_receipt: None,
         lineage_head_receipt: None,
+        log_inclusion: None,
         extensions: Default::default(),
     })
     .unwrap();
@@ -770,6 +772,7 @@ async fn fetch_report_records_embedded_hash_failure() {
         },
         registry_receipt: None,
         lineage_head_receipt: None,
+        log_inclusion: None,
         extensions: Default::default(),
     })
     .expect("serialize full context");
@@ -896,6 +899,7 @@ async fn fetch_report_diagnose_records_forged_signature() {
         },
         registry_receipt: None,
         lineage_head_receipt: None,
+        log_inclusion: None,
         extensions: Default::default(),
     })
     .unwrap();

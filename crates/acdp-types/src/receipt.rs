@@ -44,9 +44,10 @@ pub const LINEAGE_HEAD_RECEIPT_VERSION: &str = "acdp-lhr/1";
 
 /// Shared RFC-ACDP-0010 §5 preimage hash over an object map: remove the
 /// `signature` member, JCS-canonicalize, SHA-256. The one construction
-/// shared by both receipt kinds (RFC-ACDP-0011 §5) and lifecycle events
-/// (RFC-ACDP-0013 §5) — implementations MUST NOT introduce a second
-/// canonicalization or signing-input framing.
+/// shared by both receipt kinds (RFC-ACDP-0011 §5), log checkpoints
+/// (RFC-ACDP-0012 §6), and lifecycle events (RFC-ACDP-0013 §5) —
+/// implementations MUST NOT introduce a second canonicalization or
+/// signing-input framing.
 pub(crate) fn preimage_hash_of_map(
     mut map: serde_json::Map<String, serde_json::Value>,
 ) -> Result<ContentHash, AcdpError> {
@@ -56,52 +57,84 @@ pub(crate) fn preimage_hash_of_map(
     Ok(ContentHash(format!("sha256:{}", hex::encode(digest))))
 }
 
-/// Shared RFC-ACDP-0010 §5 / RFC-ACDP-0011 §5 preimage hash: the JSON
-/// object minus its `signature` member, JCS-canonicalized, SHA-256'd.
-fn preimage_hash_of_object(
-    value: &serde_json::Value,
+/// Preimage hash of a JSON value, with the verdict-appropriate error
+/// mapping for the not-an-object case (`InvalidReceipt` for receipts,
+/// `InvalidLogProof` for log checkpoints — the verdicts are independent
+/// per RFC-ACDP-0012 §9.3).
+pub(crate) fn preimage_hash_of_object_with(    value: &serde_json::Value,
     what: &str,
+    mk_err: fn(String) -> AcdpError,
 ) -> Result<ContentHash, AcdpError> {
     let map = value
         .as_object()
         .cloned()
-        .ok_or_else(|| AcdpError::InvalidReceipt(format!("{what} must be a JSON object")))?;
-    preimage_hash_of_map(map)
+        .ok_or_else(|| mk_err(format!("{what} must be a JSON object")))?;
+    preimage_hash_of_map(map)}
+
+/// RFC-ACDP-0010 §5 / RFC-ACDP-0011 §5 preimage hash with the
+/// receipt-verdict error mapping.
+fn preimage_hash_of_object(
+    value: &serde_json::Value,
+    what: &str,
+) -> Result<ContentHash, AcdpError> {
+    preimage_hash_of_object_with(value, what, AcdpError::InvalidReceipt)
 }
 
-/// Shared signature check over an already-computed receipt hash. Both
-/// receipt kinds use the identical RFC-ACDP-0010 §5 construction: the
+/// Shared signature check over an already-computed preimage hash. All
+/// registry-signed objects (context receipts, head receipts, log
+/// checkpoints) use the identical RFC-ACDP-0010 §5 construction: the
 /// signature is over the ASCII bytes of the full `"sha256:<hex>"`
-/// string.
+/// string. `mk_err` selects the verdict (`InvalidReceipt` vs
+/// `InvalidLogProof`); `what` names the object in messages.
+pub(crate) fn verify_signature_over_hash_with(
+    signature: &Signature,
+    hash: &ContentHash,
+    registry_pub_ed25519: Option<&[u8; 32]>,
+    registry_pub_p256_sec1: Option<&[u8]>,
+    what: &str,
+    mk_err: fn(String) -> AcdpError,
+) -> Result<(), AcdpError> {
+    match signature.algorithm.as_str() {
+        "ed25519" => {
+            let key = registry_pub_ed25519.ok_or_else(|| {
+                mk_err(format!(
+                    "{what} declares ed25519 but no ed25519 registry key was resolved"
+                ))
+            })?;
+            acdp_crypto::verify::verify_ed25519(key, &signature.value, hash.as_str())
+                .map_err(|e| mk_err(format!("{what} signature: {e}")))
+        }
+        "ecdsa-p256" => {
+            let key = registry_pub_p256_sec1.ok_or_else(|| {
+                mk_err(format!(
+                    "{what} declares ecdsa-p256 but no p256 registry key was resolved"
+                ))
+            })?;
+            acdp_crypto::verify::verify_ecdsa_p256(key, &signature.value, hash.as_str())
+                .map_err(|e| mk_err(format!("{what} signature: {e}")))
+        }
+        other => Err(mk_err(format!(
+            "{what} signature algorithm '{other}' is not supported"
+        ))),
+    }
+}
+
+/// Both receipt kinds' signature check, with the receipt-verdict error
+/// mapping.
 fn verify_receipt_signature_over_hash(
     signature: &Signature,
     hash: &ContentHash,
     registry_pub_ed25519: Option<&[u8; 32]>,
     registry_pub_p256_sec1: Option<&[u8]>,
 ) -> Result<(), AcdpError> {
-    match signature.algorithm.as_str() {
-        "ed25519" => {
-            let key = registry_pub_ed25519.ok_or_else(|| {
-                AcdpError::InvalidReceipt(
-                    "receipt declares ed25519 but no ed25519 registry key was resolved".into(),
-                )
-            })?;
-            acdp_crypto::verify::verify_ed25519(key, &signature.value, hash.as_str())
-                .map_err(|e| AcdpError::InvalidReceipt(format!("receipt signature: {e}")))
-        }
-        "ecdsa-p256" => {
-            let key = registry_pub_p256_sec1.ok_or_else(|| {
-                AcdpError::InvalidReceipt(
-                    "receipt declares ecdsa-p256 but no p256 registry key was resolved".into(),
-                )
-            })?;
-            acdp_crypto::verify::verify_ecdsa_p256(key, &signature.value, hash.as_str())
-                .map_err(|e| AcdpError::InvalidReceipt(format!("receipt signature: {e}")))
-        }
-        other => Err(AcdpError::InvalidReceipt(format!(
-            "receipt signature algorithm '{other}' is not supported"
-        ))),
-    }
+    verify_signature_over_hash_with(
+        signature,
+        hash,
+        registry_pub_ed25519,
+        registry_pub_p256_sec1,
+        "receipt",
+        AcdpError::InvalidReceipt,
+    )
 }
 
 /// True when `raw` is canonical millisecond-precision RFC 3339 UTC with
@@ -150,9 +183,10 @@ pub struct RegistryReceipt {
     pub signature: Signature,
 }
 
-/// Fixed three-digit-millisecond RFC 3339 serde for receipt
-/// `created_at` (RFC-ACDP-0010 §8 step 6: `…T…SS.mmmZ`).
-mod ms_rfc3339 {
+/// Fixed three-digit-millisecond RFC 3339 serde for registry-signed
+/// timestamps (`created_at`, `as_of`, log-checkpoint `timestamp`;
+/// RFC-ACDP-0010 §8 step 6: `…T…SS.mmmZ`).
+pub(crate) mod ms_rfc3339 {
     use chrono::{DateTime, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -713,6 +747,19 @@ impl ReceiptSigner {
     /// The registry DID this signer mints under.
     pub fn registry_did(&self) -> &str {
         &self.registry_did
+    }
+
+    /// The DID URL the signing key is published under (e.g.
+    /// `did:web:registry.example.com#receipt-key-1`).
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// The signing key — crate-internal so sibling modules (the
+    /// RFC-ACDP-0012 log-checkpoint minter) can sign with the same
+    /// receipt key without a second key role.
+    pub(crate) fn signing_key(&self) -> &acdp_crypto::sign::AcdpSigningKey {
+        &self.key
     }
 
     /// Mint a signed receipt for an accepted publication.
