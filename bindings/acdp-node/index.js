@@ -310,11 +310,12 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { AcdpDid, AcdpDidDocument, AcdpCanonicalizer, AcdpProducer, AcdpP256Producer, AcdpSsrfPolicy, AcdpVerifier } = nativeBinding
+const { AcdpDid, AcdpDidDocument, AcdpCanonicalizer, AcdpMerkle, AcdpProducer, AcdpP256Producer, AcdpSsrfPolicy, AcdpVerifier } = nativeBinding
 
 module.exports.AcdpDid = AcdpDid
 module.exports.AcdpDidDocument = AcdpDidDocument
 module.exports.AcdpCanonicalizer = AcdpCanonicalizer
+module.exports.AcdpMerkle = AcdpMerkle
 module.exports.AcdpProducer = AcdpProducer
 module.exports.AcdpP256Producer = AcdpP256Producer
 module.exports.AcdpSsrfPolicy = AcdpSsrfPolicy
