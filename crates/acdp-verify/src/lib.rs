@@ -10,11 +10,12 @@
 use acdp_crypto::{verify_content_hash, verify_ecdsa_p256, verify_ed25519};
 use acdp_primitives::error::AcdpError;
 use acdp_types::body::{Body, Signature};
-use acdp_types::primitives::ContentHash;
+use acdp_types::lifecycle::LifecycleEvent;
+use acdp_types::primitives::{AgentDid, ContentHash, CtxId};
 use acdp_types::publish::PublishRequest;
 
 #[cfg(feature = "client")]
-use {acdp_did::web::WebResolver, acdp_types::primitives::AgentDid};
+use acdp_did::web::WebResolver;
 
 /// Stateless verifier.  Requires a DID resolver to fetch producer keys.
 #[cfg(feature = "client")]
@@ -405,4 +406,116 @@ pub async fn verify_body_signature_historical(
             "verifier does not support signature algorithm '{other}'"
         ))),
     }
+}
+
+// ── Lifecycle events (ACDP 0.3, RFC-ACDP-0013 §5) ────────────────────────────
+
+/// The pure (offline) prefix of RFC-ACDP-0013 §5 lifecycle-event
+/// verification, shared by the resolver-backed and did:key paths:
+///
+/// 1. Recompute the preimage hash over the RAW wire JSON (minus
+///    `signature` — verifiers MUST NOT re-serialize a parsed struct).
+/// 2. Parse the closed event schema (§4 — an unknown member is
+///    malformed registry state).
+/// 3. **`ctx_id` binding**: the event's `ctx_id` MUST equal the
+///    retrieved context's — a signed event cannot be replayed against
+///    another context.
+/// 4. **Actor rule**: producer-initiated events carry
+///    `actor == body.agent_id`; registry-initiated events carry
+///    `actor == capabilities.registry_did`. Any other actor is refused
+///    — there is no third-party retraction (§12).
+/// 5. **Actor binding**: `signature.key_id`'s DID portion MUST equal
+///    `actor`, and the signature MUST be present (producer events MUST
+///    be signed; an unsigned registry event is attributable only as far
+///    as transport and cannot be *verified* — callers that tolerate it
+///    check `event.is_signed()` before calling here).
+fn lifecycle_event_prechecks(
+    raw_event: &serde_json::Value,
+    expected_ctx_id: &CtxId,
+    producer_did: &AgentDid,
+    registry_did: Option<&str>,
+) -> Result<(LifecycleEvent, ContentHash), AcdpError> {
+    let hash = LifecycleEvent::preimage_hash_of_value(raw_event)?;
+    let event = LifecycleEvent::from_value(raw_event)?;
+    if &event.ctx_id != expected_ctx_id {
+        return Err(AcdpError::SchemaViolation(format!(
+            "lifecycle event ctx_id '{}' ≠ the context's ctx_id '{expected_ctx_id}' \
+             (RFC-ACDP-0013 §4: an event binds to exactly one context)",
+            event.ctx_id
+        )));
+    }
+    let is_producer = event.actor.as_str() == producer_did.as_str();
+    let is_registry = registry_did.is_some_and(|did| event.actor.as_str() == did);
+    if !is_producer && !is_registry {
+        return Err(AcdpError::NotAuthorized(format!(
+            "lifecycle event actor '{}' is neither the producer '{producer_did}' nor the \
+             registry DID — only the producer and the serving registry can record \
+             lifecycle events (RFC-ACDP-0013 §4, §12)",
+            event.actor
+        )));
+    }
+    // Presence + §5 actor binding (key_id DID portion == actor).
+    event.actor_bound_signature()?;
+    Ok((event, hash))
+}
+
+/// Verify a lifecycle event per RFC-ACDP-0013 §5 — the helper both
+/// registries (at `/retract`/`/republish` submission time, §6 step 3)
+/// and consumers (before treating an event as attributable evidence)
+/// use.
+///
+/// **Producer-actor events** (`actor == producer_did`, i.e.
+/// `body.agent_id`) verify against the producer's DID through the full
+/// RFC-ACDP-0001 §5.11 pipeline — the same resolution, `assertionMethod`
+/// authorization, algorithm-downgrade rejection, and SSRF protections
+/// as a publish. **Registry-actor events** (`actor == registry_did`,
+/// i.e. `capabilities.registry_did`) verify against the registry's DID
+/// document through the same envelope path (RFC-ACDP-0010 §8 step 1
+/// resolution). In both cases the signature is over the ASCII bytes of
+/// the event hash recomputed from `raw_event` exactly as received.
+///
+/// Pass `registry_did: None` when validating a producer-initiated
+/// endpoint submission (only the producer may use the §6 endpoints).
+/// Returns the parsed event on success.
+#[cfg(feature = "client")]
+pub async fn verify_lifecycle_event(
+    raw_event: &serde_json::Value,
+    expected_ctx_id: &CtxId,
+    producer_did: &AgentDid,
+    registry_did: Option<&str>,
+    resolver: &WebResolver,
+) -> Result<LifecycleEvent, AcdpError> {
+    let (event, hash) =
+        lifecycle_event_prechecks(raw_event, expected_ctx_id, producer_did, registry_did)?;
+    // The envelope path re-checks key_id-DID == actor, resolves the
+    // actor's DID (did:web via the resolver; did:key purely), enforces
+    // assertionMethod + algorithm binding, and verifies over the ASCII
+    // bytes of the event hash — identical framing to a body signature.
+    let signature = event.actor_bound_signature()?.clone();
+    verify_signature_envelope(&event.actor, &signature, &hash, resolver).await?;
+    Ok(event)
+}
+
+/// Offline counterpart of [`verify_lifecycle_event`] for `did:key`
+/// actors — no resolver, no network, works with
+/// `--no-default-features`. A `did:web` actor is refused with
+/// [`AcdpError::KeyResolution`]; use the resolver-backed helper.
+pub fn verify_lifecycle_event_offline(
+    raw_event: &serde_json::Value,
+    expected_ctx_id: &CtxId,
+    producer_did: &AgentDid,
+    registry_did: Option<&str>,
+) -> Result<LifecycleEvent, AcdpError> {
+    let (event, hash) =
+        lifecycle_event_prechecks(raw_event, expected_ctx_id, producer_did, registry_did)?;
+    if !event.actor.as_str().starts_with("did:key:") {
+        return Err(AcdpError::KeyResolution(format!(
+            "offline lifecycle-event verification supports did:key actors only; '{}' \
+             requires the resolver-backed verify_lifecycle_event (client feature)",
+            event.actor
+        )));
+    }
+    let signature = event.actor_bound_signature()?;
+    verify_did_key_envelope(signature, &hash)?;
+    Ok(event)
 }

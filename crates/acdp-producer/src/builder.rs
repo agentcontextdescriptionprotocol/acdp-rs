@@ -804,6 +804,7 @@ mod tests {
         };
         let _state = RegistryState {
             status: Status::Active,
+            lifecycle_events: None,
             extensions: Default::default(),
         };
 

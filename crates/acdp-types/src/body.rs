@@ -206,7 +206,7 @@ pub struct DataPeriod {
 /// variants (proof chains, threshold attestations) require an explicit
 /// schema bump, not field-level extensibility, so `deny_unknown_fields`
 /// rejects an unknown field (RFC-ACDP-0007 §3.3.1, fixture schema-008).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Signature {
     /// Algorithm identifier.  Only `"ed25519"` is required in v0.1.0.
@@ -221,32 +221,63 @@ pub struct Signature {
 
 /// Mutable, registry-derived state returned alongside the Body on retrieval.
 ///
-/// In v0.1.0 this contains only `status`. Future versions add lifecycle
-/// events, relationships, and attestations here without modifying the
-/// Body. Unknown fields are preserved in [`Self::extensions`] so consumers
-/// can surface them to operators (RFC-ACDP-0004 §3 forward-compat).
+/// v0.1.0 contained only `status`; ACDP 0.3 adds the typed
+/// [`lifecycle_events`](Self::lifecycle_events) array (RFC-ACDP-0013,
+/// promoting the RFC-ACDP-0009 §2.1 reservation). Registry state is
+/// NEVER part of any hash or signature preimage — typing a formerly
+/// opaque member is safe — but individual lifecycle events carry their
+/// own signatures, so the event OBJECT parse is closed while unknown
+/// `event_type` VALUES are tolerated (RFC-ACDP-0013 §7.3). Other
+/// unknown fields are preserved verbatim in [`Self::extensions`] so
+/// consumers can surface them to operators (RFC-ACDP-0004 §3
+/// forward-compat) and re-serialize the state unchanged.
 ///
 /// # Reserved extension field names (RFC-ACDP-0009 §2.1)
 ///
-/// The following keys are reserved for future RFCs. Until the relevant
-/// RFC ships normative text, v0.1.0 consumers will see them in
-/// [`Self::extensions`] (the `#[serde(flatten)]` map below). v0.1.0
-/// producers MUST NOT emit them.
+/// The following keys remain reserved for future RFCs. Until the
+/// relevant RFC ships normative text, consumers see them in
+/// [`Self::extensions`] (the `#[serde(flatten)]` map below).
 ///
 /// | Name              | RFC                           | Purpose                                                       |
 /// |-------------------|-------------------------------|---------------------------------------------------------------|
-/// | `lifecycle_events`| RFC-ACDP-0009 §2.1 (reserved) | Retraction / republication / status-change audit trail.        |
 /// | `relationships`   | RFC-ACDP-0009 §2.1 (reserved) | Post-publication `builds_on` / `disputes` etc.                 |
 /// | `attestations`    | RFC-ACDP-0009 §2.1 (reserved) | Third-party `reproduced` / `audit` markers.                    |
 /// | `subscriptions`   | RFC-ACDP-0009 §2.1 (reserved) | Push-subscription receipts.                                    |
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryState {
     pub status: Status,
+    /// Append-only lifecycle event history (RFC-ACDP-0013 §4.1): events
+    /// in registry-accepted order; never removed, reordered, or
+    /// mutated. Omitted entirely (never `[]`) when no events exist, per
+    /// the absent-vs-null wire convention (RFC-ACDP-0005 §2.2.1).
+    /// Emitted only by registries advertising `acdp-registry-lifecycle`.
+    ///
+    /// The typed parse preserves round-trip fidelity: every event field
+    /// re-serializes byte-identically (strict canonical `occurred_at`,
+    /// verbatim unknown `event_type` values), so persisted registry
+    /// state — and the signed bytes inside each event — survive a parse
+    /// → re-serialize cycle unchanged. An event violating the closed
+    /// object schema is malformed registry state and fails the parse
+    /// (RFC-ACDP-0013 §7.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_events: Option<Vec<crate::lifecycle::LifecycleEvent>>,
     /// Forward-compatible passthrough for fields added in future versions
-    /// (e.g. v0.1's `lifecycle_events`, `relationships`, `attestations`,
+    /// (e.g. the reserved `relationships`, `attestations`,
     /// `subscriptions` — see the type docs for the reserved set).
     #[serde(flatten)]
     pub extensions: serde_json::Map<String, serde_json::Value>,
+}
+
+impl RegistryState {
+    /// The context's **retraction state** (RFC-ACDP-0013 §7.1), derived
+    /// from [`Self::lifecycle_events`]: retracted iff the last
+    /// `retracted`/`republished` event in array order is `retracted`.
+    /// Unknown event types have no effect (§7.3).
+    pub fn is_retracted(&self) -> bool {
+        self.lifecycle_events
+            .as_deref()
+            .is_some_and(crate::lifecycle::retraction_state)
+    }
 }
 
 // ── Full retrieval envelope ───────────────────────────────────────────────────
@@ -279,6 +310,20 @@ pub struct FullContext {
     /// when absent — non-advertising registries never emit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_head_receipt: Option<serde_json::Value>,
+    /// Optional transparency-log inclusion proof (ACDP 0.3,
+    /// RFC-ACDP-0012 §10): the RFC 6962 audit path plus signed
+    /// checkpoint proving this context is committed by the registry's
+    /// append-only log. MAY be carried on full retrieval by registries
+    /// advertising `acdp-registry-transparency-log`; never on the
+    /// body-only endpoint and never on the publish response. A
+    /// top-level **sibling** of `registry_receipt` — deliberately NOT a
+    /// member of it (the receipt is closed, fully signed, and
+    /// byte-immutable). Parse with
+    /// [`crate::log::LogInclusion::from_value`]; verify per
+    /// RFC-ACDP-0012 §9 — the log verdict is independent of the body
+    /// and receipt verdicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_inclusion: Option<serde_json::Value>,
 
     /// Unknown top-level context fields, preserved per
     /// `acdp-context.schema.json` `additionalProperties: true`. Retained

@@ -215,7 +215,8 @@ pub enum Visibility {
 /// Registered context types plus open-ended custom namespace.
 ///
 /// Wire form is a single string. Standard values (`data_snapshot`,
-/// `analysis`, `prediction`, `alert`) deserialize to the named variants;
+/// `analysis`, `prediction`, `alert`, and — since acdp/0.3.0 —
+/// `key-revocation`, RFC-ACDP-0014 §4) deserialize to the named variants;
 /// any other value MUST be a namespaced custom type matching
 /// `^[a-z][a-z0-9_]*:[a-z][a-z0-9_-]*$` (e.g. `finance:portfolio_snapshot`)
 /// per `acdp-common.schema.json#/$defs/context_type`. Inputs that match
@@ -231,9 +232,35 @@ pub enum ContextType {
     Prediction,
     /// `alert`.
     Alert,
+    /// `key-revocation` — a producer's time-scoped declaration that one
+    /// of its signing keys is compromised (RFC-ACDP-0014 §4; standard in
+    /// acdp/0.3.0). The interim form published on pre-0.3.0 registries
+    /// is the namespaced custom type `acdp:key-revocation`
+    /// ([`ContextType::Custom`]); use [`ContextType::is_key_revocation`]
+    /// to recognize both, as 0.3.0 consumers MUST (RFC-ACDP-0014 §10).
+    KeyRevocation,
     /// Namespaced custom type, e.g. `finance:portfolio_snapshot`.
     /// MUST match `^[a-z][a-z0-9_]*:[a-z][a-z0-9_-]*$`.
     Custom(String),
+}
+
+impl ContextType {
+    /// The interim namespaced form of `key-revocation` accepted from
+    /// pre-0.3.0 registries (RFC-ACDP-0014 §10).
+    pub const KEY_REVOCATION_INTERIM: &'static str = "acdp:key-revocation";
+
+    /// True when this type denotes an RFC-ACDP-0014 key-revocation
+    /// context: the standard `key-revocation` form or the interim
+    /// `acdp:key-revocation` custom form, which 0.3.0 consumers MUST
+    /// treat as equivalent when the body satisfies §4–§5
+    /// (RFC-ACDP-0014 §10).
+    pub fn is_key_revocation(&self) -> bool {
+        match self {
+            ContextType::KeyRevocation => true,
+            ContextType::Custom(s) => s == Self::KEY_REVOCATION_INTERIM,
+            _ => false,
+        }
+    }
 }
 
 impl Serialize for ContextType {
@@ -243,6 +270,7 @@ impl Serialize for ContextType {
             ContextType::Analysis => "analysis",
             ContextType::Prediction => "prediction",
             ContextType::Alert => "alert",
+            ContextType::KeyRevocation => "key-revocation",
             ContextType::Custom(s) => s.as_str(),
         };
         serializer.serialize_str(s)
@@ -257,6 +285,7 @@ impl<'de> Deserialize<'de> for ContextType {
             "analysis" => ContextType::Analysis,
             "prediction" => ContextType::Prediction,
             "alert" => ContextType::Alert,
+            "key-revocation" => ContextType::KeyRevocation,
             other => {
                 // Custom types MUST be namespaced
                 if !is_namespaced_context_type(other) {
@@ -298,11 +327,18 @@ fn is_namespaced_context_type(s: &str) -> bool {
 ///
 /// The schema (`acdp-common.schema.json#/$defs/status`) defines an open
 /// `^[a-z][a-z0-9_]*$` pattern, length 1..=64. v0.1.0 emits `active`,
-/// `superseded`, `expired`; future versions add `retracted`
-/// (RFC-ACDP-0009 §2.1) and possibly others. Consumers MUST tolerate
-/// unknown values matching the pattern; values that DO NOT match the
-/// pattern (uppercase, whitespace, empty) are rejected on
-/// deserialization as malformed registry state.
+/// `superseded`, `expired`; 0.3.0 activates `retracted` (RFC-ACDP-0013
+/// §7, promoting the RFC-ACDP-0009 §2.1 reservation); future versions
+/// may add others. Consumers MUST tolerate unknown values matching the
+/// pattern; values that DO NOT match the pattern (uppercase, whitespace,
+/// empty) are rejected on deserialization as malformed registry state.
+///
+/// Derivation precedence (RFC-ACDP-0004 §4 as amended by RFC-ACDP-0013
+/// §7.2): `retracted` > `superseded` > `expired` > `active`. The
+/// dominated facts remain independently visible (supersession via the
+/// lineage array, expiry via the body's signed `expires_at`, the
+/// withdrawal via `lifecycle_events`) — precedence collapses only this
+/// single derived summary field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     /// First-class, current version of its lineage.
@@ -311,6 +347,10 @@ pub enum Status {
     Superseded,
     /// Past `expires_at`.
     Expired,
+    /// Formally withdrawn from reliance via a `retracted` lifecycle
+    /// event (RFC-ACDP-0013 §7). Dominates `superseded` and `expired`.
+    /// The body remains retrievable — retraction is mark-not-delete.
+    Retracted,
     /// A status string this version of the library does not recognize.
     /// Per the spec, treat as `active` for read-side decisions until upgrade.
     Other(String),
@@ -332,6 +372,7 @@ impl Status {
             Status::Active => "active",
             Status::Superseded => "superseded",
             Status::Expired => "expired",
+            Status::Retracted => "retracted",
             Status::Other(s) => s,
         }
     }
@@ -342,6 +383,7 @@ impl Status {
             "active" => Ok(Status::Active),
             "superseded" => Ok(Status::Superseded),
             "expired" => Ok(Status::Expired),
+            "retracted" => Ok(Status::Retracted),
             other => {
                 if !Self::pattern_ok(other) {
                     return Err(AcdpError::SchemaViolation(format!(
@@ -382,6 +424,11 @@ impl Status {
     /// Returns `true` if status is `Expired`.
     pub fn is_expired(&self) -> bool {
         matches!(self, Status::Expired)
+    }
+
+    /// Returns `true` if status is `Retracted` (RFC-ACDP-0013 §7).
+    pub fn is_retracted(&self) -> bool {
+        matches!(self, Status::Retracted)
     }
 
     /// Returns the unrecognized status string, if any.
@@ -477,20 +524,25 @@ mod tests {
         assert!(s.is_superseded());
         let s: Status = serde_json::from_value(json!("expired")).unwrap();
         assert!(s.is_expired());
+        // 0.3.0: `retracted` is first-class (RFC-ACDP-0013 §7, activated
+        // from the RFC-ACDP-0009 §2.1 reservation).
+        let s: Status = serde_json::from_value(json!("retracted")).unwrap();
+        assert!(s.is_retracted());
+        assert_eq!(s, Status::Retracted);
+        assert!(!s.is_active());
+        assert!(!s.is_superseded());
+        assert!(!s.is_expired());
+        assert_eq!(s.as_other(), None);
     }
 
     #[test]
     fn unknown_status_value_falls_back_to_other() {
-        // RFC-ACDP-0009 §2.1 reserves `retracted` for v0.1+; v0.1.0 consumers
-        // MUST tolerate it without panicking.
-        let s: Status = serde_json::from_value(json!("retracted")).unwrap();
-        assert_eq!(s.as_other(), Some("retracted"));
-        assert!(!s.is_active());
-        assert!(!s.is_superseded());
-        assert!(!s.is_expired());
-
+        // Open-pattern forward compat: an unrecognized value matching
+        // ^[a-z][a-z0-9_]*$ MUST be tolerated (RFC-ACDP-0004 §4.1).
         let s: Status = serde_json::from_value(json!("archived")).unwrap();
         assert_eq!(s.as_other(), Some("archived"));
+        assert!(!s.is_active());
+        assert!(!s.is_retracted());
     }
 
     #[test]
@@ -602,11 +654,34 @@ mod tests {
             ("analysis", ContextType::Analysis),
             ("prediction", ContextType::Prediction),
             ("alert", ContextType::Alert),
+            ("key-revocation", ContextType::KeyRevocation),
         ] {
             let parsed: ContextType = serde_json::from_value(json!(s)).unwrap();
             assert_eq!(parsed, expect);
             assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(s));
         }
+    }
+
+    /// RFC-ACDP-0014 §10 — both the standard `key-revocation` form and
+    /// the interim `acdp:key-revocation` custom form MUST be
+    /// recognizable as key-revocation contexts; nothing else is.
+    #[test]
+    fn context_type_key_revocation_recognition() {
+        let standard: ContextType = serde_json::from_value(json!("key-revocation")).unwrap();
+        assert_eq!(standard, ContextType::KeyRevocation);
+        assert!(standard.is_key_revocation());
+
+        // The interim form is a plain namespaced custom type on the
+        // wire but MUST be treated as equivalent by 0.3.0 consumers.
+        let interim: ContextType = serde_json::from_value(json!("acdp:key-revocation")).unwrap();
+        assert_eq!(
+            interim,
+            ContextType::Custom(ContextType::KEY_REVOCATION_INTERIM.into())
+        );
+        assert!(interim.is_key_revocation());
+
+        assert!(!ContextType::DataSnapshot.is_key_revocation());
+        assert!(!ContextType::Custom("acdp:key-rotation".into()).is_key_revocation());
     }
 
     #[test]
@@ -671,11 +746,14 @@ mod tests {
     #[test]
     fn status_known_or_active_degrades_unknown() {
         // Unknown ⇒ Active for read-side decisions (RFC-ACDP-0004 §4.1).
-        let other = Status::Other("retracted".into());
+        let other = Status::Other("archived".into());
         assert_eq!(other.known_or_active(), Status::Active);
-        // Known statuses are preserved unchanged.
+        // Known statuses are preserved unchanged — including `retracted`,
+        // which as of 0.3.0 is a KNOWN non-reliance signal and MUST NOT
+        // degrade to active (RFC-ACDP-0001 §9 consumer rule 3, amended).
         assert_eq!(Status::Superseded.known_or_active(), Status::Superseded);
         assert_eq!(Status::Expired.known_or_active(), Status::Expired);
+        assert_eq!(Status::Retracted.known_or_active(), Status::Retracted);
     }
 
     #[test]
@@ -683,6 +761,7 @@ mod tests {
         assert_eq!(Status::Active.as_str(), "active");
         assert_eq!(Status::Superseded.as_str(), "superseded");
         assert_eq!(Status::Expired.as_str(), "expired");
+        assert_eq!(Status::Retracted.as_str(), "retracted");
         assert_eq!(Status::Other("custom".into()).as_str(), "custom");
     }
 

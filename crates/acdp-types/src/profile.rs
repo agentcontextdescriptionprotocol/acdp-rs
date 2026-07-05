@@ -31,6 +31,15 @@ pub enum Profile {
     /// Prerequisite: `acdp-registry-receipts` (same signing key, same
     /// DID-document plumbing, same key lifecycle).
     RegistryHeadReceipts,
+    /// `acdp-registry-lifecycle` — lifecycle events & retraction (ACDP
+    /// 0.3, RFC-ACDP-0013): the `/retract` + `/republish` endpoints,
+    /// §7 status derivation (`retracted` dominating), §8
+    /// retrieval/search/`/current` semantics, and the §4.1 append-only
+    /// `lifecycle_events` discipline. Prerequisite:
+    /// `acdp-registry-core`. Registries NOT advertising it MUST return
+    /// `not_implemented` on both endpoints and never emit
+    /// `lifecycle_events` or the `retracted` status.
+    RegistryLifecycle,
     /// `acdp-consumer` — a consumer of contexts (not a registry).
     Consumer,
 }
@@ -45,6 +54,7 @@ impl Profile {
             Profile::RegistryFederated => "acdp-registry-federated",
             Profile::RegistryReceipts => "acdp-registry-receipts",
             Profile::RegistryHeadReceipts => "acdp-registry-head-receipts",
+            Profile::RegistryLifecycle => "acdp-registry-lifecycle",
             Profile::Consumer => "acdp-consumer",
         }
     }
