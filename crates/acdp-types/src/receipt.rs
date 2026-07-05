@@ -61,7 +61,8 @@ pub(crate) fn preimage_hash_of_map(
 /// mapping for the not-an-object case (`InvalidReceipt` for receipts,
 /// `InvalidLogProof` for log checkpoints — the verdicts are independent
 /// per RFC-ACDP-0012 §9.3).
-pub(crate) fn preimage_hash_of_object_with(    value: &serde_json::Value,
+pub(crate) fn preimage_hash_of_object_with(
+    value: &serde_json::Value,
     what: &str,
     mk_err: fn(String) -> AcdpError,
 ) -> Result<ContentHash, AcdpError> {
@@ -69,7 +70,8 @@ pub(crate) fn preimage_hash_of_object_with(    value: &serde_json::Value,
         .as_object()
         .cloned()
         .ok_or_else(|| mk_err(format!("{what} must be a JSON object")))?;
-    preimage_hash_of_map(map)}
+    preimage_hash_of_map(map)
+}
 
 /// RFC-ACDP-0010 §5 / RFC-ACDP-0011 §5 preimage hash with the
 /// receipt-verdict error mapping.

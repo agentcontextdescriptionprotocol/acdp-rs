@@ -114,4 +114,5 @@ pub use types::{
     FullContext, KeyRevocation, LifecycleEvent, LifecycleEventType, LineageId, Location,
     LogCheckpoint, LogConsistencyProof, LogInclusion, LogLeaf, PublishRequest, PublishResponse,
     RegistryState, RevocationTrustClass, SearchParams, SearchResponse, Status, Visibility,
-    WireError,};
+    WireError,
+};
