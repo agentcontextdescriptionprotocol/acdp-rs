@@ -16,9 +16,9 @@ pub use cross_registry::{CrossRegistryResolver, ResolverOptions};
 pub use data_ref::{
     fetch_and_verify_data_ref, DataRefFetcher, HttpsDataRefFetcher, DEFAULT_MAX_BYTES,
 };
-pub use receipt::verify_receipt_value;
+pub use receipt::{verify_lineage_head_receipt_value, verify_receipt_value};
 pub use registry::RegistryClient;
 pub use verified::{
-    HistoricalKeyPolicy, KeyAuthorization, ReceiptPolicy, VerificationPolicy, VerificationReport,
-    VerifiedContext,
+    HistoricalKeyPolicy, KeyAuthorization, LineageHeadPolicy, ReceiptPolicy, VerificationPolicy,
+    VerificationReport, VerifiedContext,
 };
