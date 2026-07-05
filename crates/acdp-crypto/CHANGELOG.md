@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-crypto-v0.1.2...acdp-crypto-v0.1.3) - 2026-07-05
+
+### Added
+
+- *(log)* RFC-ACDP-0012 registry transparency log SDK surface
+
 ## [0.1.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-crypto-v0.1.1...acdp-crypto-v0.1.2) - 2026-07-05
 
 ### Other

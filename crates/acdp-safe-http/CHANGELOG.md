@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-safe-http-v0.1.2...acdp-safe-http-v0.1.3) - 2026-07-05
+
+### Added
+
+- feat!(client): hard-gate SSRF-relaxed test constructors behind test-transport
+
 ## [0.1.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-safe-http-v0.1.1...acdp-safe-http-v0.1.2) - 2026-07-05
 
 ### Added

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-primitives-v0.1.1...acdp-primitives-v0.2.0) - 2026-07-05
+
+### Added
+
+- [**breaking**] lifecycle events & retraction — RFC-ACDP-0013 (acdp/0.3.0 draft)
+- *(error)* typed wire codes for the 0.3.0 RFCs — invalid_log_proof, immutable_field, invalid_lifecycle_transition
+
+### Other
+
+- Merge feature/rfc-0014-revocation: RFC-ACDP-0014 SDK surface
+
 ## [0.1.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-primitives-v0.1.0...acdp-primitives-v0.1.1) - 2026-06-24
 
 ### Other
