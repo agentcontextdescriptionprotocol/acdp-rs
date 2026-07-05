@@ -88,6 +88,14 @@ name              = "lineage_head_receipts"
 path              = "tests/lineage_head_receipts.rs"
 required-features = ["client", "server"]
 
+# Key-revocation fixture bindings (RFC-ACDP-0014, rev-001/rev-002):
+# golden-vector arithmetic plus the §7 boundary matrix through the same
+# in-process TLS registry harness as `receipts`.
+[[test]]
+name              = "key_revocation"
+path              = "tests/key_revocation.rs"
+required-features = ["client", "server"]
+
 # Criterion benchmarks for the crypto / JCS / SSRF hot paths.
 # `harness = false` hands `main` to criterion instead of libtest.
 [[bench]]

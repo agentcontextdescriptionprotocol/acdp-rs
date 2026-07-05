@@ -10,6 +10,7 @@ pub mod cross_registry;
 pub mod data_ref;
 pub mod receipt;
 pub mod registry;
+pub mod revocation;
 pub mod verified;
 
 pub use cross_registry::{CrossRegistryResolver, ResolverOptions};
@@ -18,7 +19,8 @@ pub use data_ref::{
 };
 pub use receipt::{verify_lineage_head_receipt_value, verify_receipt_value};
 pub use registry::RegistryClient;
+pub use revocation::{classify_under_revocation, find_revocations, verify_revocation_body};
 pub use verified::{
-    HistoricalKeyPolicy, KeyAuthorization, LineageHeadPolicy, ReceiptPolicy, VerificationPolicy,
-    VerificationReport, VerifiedContext,
+    HistoricalKeyPolicy, KeyAuthorization, LineageHeadPolicy, ReceiptPolicy, RevocationPolicy,
+    VerificationPolicy, VerificationReport, VerifiedContext,
 };
