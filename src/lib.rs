@@ -111,6 +111,7 @@ pub use acdp_primitives::{ACDP_SCHEMA_NAMESPACE, ACDP_VERSION};
 pub use error::{AcdpError, SupersessionReason};
 pub use types::{
     AgentDid, Body, CapabilitiesDocument, ContentHash, ContextType, CtxId, DataRef, DataRefType,
-    FullContext, LineageId, Location, PublishRequest, PublishResponse, RegistryState, SearchParams,
-    SearchResponse, Status, Visibility, WireError,
+    FullContext, LineageId, Location, LogCheckpoint, LogConsistencyProof, LogInclusion, LogLeaf,
+    PublishRequest, PublishResponse, RegistryState, SearchParams, SearchResponse, Status,
+    Visibility, WireError,
 };

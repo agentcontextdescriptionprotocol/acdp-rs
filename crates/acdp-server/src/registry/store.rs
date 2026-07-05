@@ -353,6 +353,7 @@ impl RegistryStore for InMemoryStore {
             },
             registry_receipt: None,
             lineage_head_receipt: None,
+            log_inclusion: None,
             extensions: Default::default(),
         };
         let mut g = self.lock();
@@ -632,6 +633,7 @@ impl RegistryStore for InMemoryStore {
             // never persisted; `RegistryServer::current` mints per
             // response (RFC-ACDP-0011 §6).
             lineage_head_receipt: None,
+            log_inclusion: None,
             extensions: Default::default(),
         };
         g.by_ctx.insert(ctx_id_str.clone(), stored);
