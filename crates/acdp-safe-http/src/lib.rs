@@ -432,7 +432,7 @@ fn check_safe_ip(ip: IpAddr) -> Result<(), AcdpError> {
 
 /// Reject the **entire** resolution if ANY candidate address is in a
 /// forbidden range (RFC-ACDP-0006 §7.1 / RFC-ACDP-0008 §4.8). Shared by
-/// [`SsrfPolicy::pin_resolved_ip`] and [`SafeDnsResolver::resolve`] so
+/// [`SsrfPolicy::pin_resolved_ip`] and [`SafeDnsResolver`]'s resolve hook so
 /// both apply identical reject-all semantics — never silent filtering.
 ///
 /// Public because it is the canonical enforcement point the

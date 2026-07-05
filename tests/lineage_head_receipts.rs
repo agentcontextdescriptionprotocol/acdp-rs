@@ -492,7 +492,7 @@ fn each_current_response_mints_fresh_as_of() {
     let second = server.current(&lineage_id, None).unwrap().unwrap();
     let r2 = LineageHeadReceipt::from_value(second.lineage_head_receipt.as_ref().unwrap()).unwrap();
     assert!(
-        r2.as_of >= r1.as_of && r2.as_of != r1.as_of,
+        r2.as_of > r1.as_of,
         "a later /current response must carry a fresh as_of ({} vs {})",
         r1.as_of,
         r2.as_of
