@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-client-v0.1.0...acdp-client-v0.2.0) - 2026-07-05
+
+### Added
+
+- *(client)* verify lineage-head receipts on /current (RFC-ACDP-0011 §7)
+- *(client)* fallible WebResolver constructors; feature-gate SSRF-relaxed test constructors behind test-transport
+
 ## [0.1.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/releases/tag/acdp-client-v0.1.0) - 2026-06-24
 
 ### Other

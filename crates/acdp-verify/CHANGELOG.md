@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-verify-v0.1.0...acdp-verify-v0.1.1) - 2026-07-05
+
+### Added
+
+- *(tracing)* instrument verify pipeline and server publish path
+
 ## [0.1.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/releases/tag/acdp-verify-v0.1.0) - 2026-06-24
 
 ### Other
