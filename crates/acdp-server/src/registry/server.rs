@@ -54,6 +54,13 @@ pub struct RegistryServer<S: RegistryStore, L: RateLimiter = NoopRateLimiter> {
     /// [`Self::with_receipt_signer`], which also advertises the
     /// `acdp-registry-receipts` profile.
     receipt_signer: Option<acdp_types::receipt::ReceiptSigner>,
+    /// Lineage-head receipt minting (ACDP 0.3, RFC-ACDP-0011). Enabled
+    /// via [`Self::with_lineage_head_receipts`], which also advertises
+    /// the `acdp-registry-head-receipts` profile. When enabled,
+    /// [`Self::current`] mints a fresh head receipt per response with
+    /// the RFC-ACDP-0010 receipt signing key. Never true without
+    /// `receipt_signer` (the profile's prerequisite).
+    mint_head_receipts: bool,
 }
 
 impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
@@ -68,6 +75,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             authority: authority.into(),
             rate_limiter: NoopRateLimiter,
             receipt_signer: None,
+            mint_head_receipts: false,
         }
     }
 
@@ -116,6 +124,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             authority,
             rate_limiter: NoopRateLimiter,
             receipt_signer: None,
+            mint_head_receipts: false,
         })
     }
 
@@ -149,6 +158,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             authority,
             rate_limiter: NoopRateLimiter,
             receipt_signer: None,
+            mint_head_receipts: false,
         })
     }
 }
@@ -162,6 +172,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             authority: self.authority,
             rate_limiter: limiter,
             receipt_signer: self.receipt_signer,
+            mint_head_receipts: self.mint_head_receipts,
         }
     }
 
@@ -192,10 +203,51 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             )));
         }
         // RFC-ACDP-0010 §11: registries advertising the receipts
-        // profile MUST advertise acdp_version >= 0.2.0. The version
-        // string must be exactly the `^\d+\.\d+\.\d+$` form the
-        // capabilities schema mandates — malformed input is an error,
-        // never coerced.
+        // profile MUST advertise acdp_version >= 0.2.0.
+        self.require_min_acdp_version((0, 2, 0), "acdp-registry-receipts")?;
+        let profile = acdp_types::profile::Profile::RegistryReceipts.as_str();
+        if !self.caps.profiles.iter().any(|p| p == profile) {
+            self.caps.profiles.push(profile.to_string());
+        }
+        self.receipt_signer = Some(signer);
+        Ok(self)
+    }
+
+    /// Enable lineage-head receipt minting (ACDP 0.3, RFC-ACDP-0011).
+    /// Every subsequent [`Self::current`] response carries a freshly
+    /// minted head receipt (`as_of` = the registry clock at response
+    /// time, ms-truncated), signed with the RFC-ACDP-0010 receipt
+    /// signing key — head receipts introduce no new key role (§5, §8).
+    ///
+    /// Also advertises the `acdp-registry-head-receipts` profile. The
+    /// profile's prerequisite is `acdp-registry-receipts` (§9): this
+    /// method fails unless [`Self::with_receipt_signer`] was configured
+    /// first — a registry with no receipt key has nothing to sign head
+    /// receipts with, and MUST NOT advertise the profile (§6: no
+    /// degraded mode on `/current`). Registries advertising the profile
+    /// MUST advertise `acdp_version` >= 0.3.0 (§9).
+    pub fn with_lineage_head_receipts(mut self) -> Result<Self, AcdpError> {
+        if self.receipt_signer.is_none() {
+            return Err(AcdpError::SchemaViolation(
+                "acdp-registry-head-receipts requires the acdp-registry-receipts profile \
+                 (RFC-ACDP-0011 §9): call with_receipt_signer first"
+                    .into(),
+            ));
+        }
+        self.require_min_acdp_version((0, 3, 0), "acdp-registry-head-receipts")?;
+        let profile = acdp_types::profile::Profile::RegistryHeadReceipts.as_str();
+        if !self.caps.profiles.iter().any(|p| p == profile) {
+            self.caps.profiles.push(profile.to_string());
+        }
+        self.mint_head_receipts = true;
+        Ok(self)
+    }
+
+    /// Profile version gate: `capabilities.acdp_version` must be a plain
+    /// `MAJOR.MINOR.PATCH` version (the capabilities schema's
+    /// `^\d+\.\d+\.\d+$` form — malformed input is an error, never
+    /// coerced) and at least `min`.
+    fn require_min_acdp_version(&self, min: (u64, u64, u64), what: &str) -> Result<(), AcdpError> {
         let parts: Vec<u64> = self
             .caps
             .acdp_version
@@ -214,18 +266,13 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
                 self.caps.acdp_version
             )));
         };
-        if (*major, *minor, *patch) < (0, 2, 0) {
+        if (*major, *minor, *patch) < min {
             return Err(AcdpError::SchemaViolation(format!(
-                "acdp-registry-receipts requires capabilities.acdp_version >= 0.2.0, got '{}'",
-                self.caps.acdp_version
+                "{what} requires capabilities.acdp_version >= {}.{}.{}, got '{}'",
+                min.0, min.1, min.2, self.caps.acdp_version
             )));
         }
-        let profile = acdp_types::profile::Profile::RegistryReceipts.as_str();
-        if !self.caps.profiles.iter().any(|p| p == profile) {
-            self.caps.profiles.push(profile.to_string());
-        }
-        self.receipt_signer = Some(signer);
-        Ok(self)
+        Ok(())
     }
 
     /// Borrow the underlying store. Useful for tests that want to
@@ -591,6 +638,13 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
     /// visible to the requester. `None` when the lineage is unknown,
     /// when every version is superseded (RFC-ACDP-0004 §5), or when no
     /// visible version exists.
+    ///
+    /// When the registry advertises `acdp-registry-head-receipts`
+    /// ([`Self::with_lineage_head_receipts`]), the response carries a
+    /// freshly minted lineage-head receipt (RFC-ACDP-0011 §6 rule 1:
+    /// REQUIRED on `/current`, no degraded mode). Because the head is
+    /// resolved *after* visibility filtering, the receipt attests the
+    /// head as visible to this requester (§4: never an existence leak).
     pub fn current(
         &self,
         lineage_id: &LineageId,
@@ -602,10 +656,31 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // and `Expired` both qualify as valid current heads (a body
         // that expired without being superseded is still the latest
         // and the consumer needs to see it to know it has lapsed).
-        for ctx in all.into_iter().rev() {
+        for mut ctx in all.into_iter().rev() {
             if !matches!(ctx.registry_state.status, Status::Superseded)
                 && can_retrieve(&ctx.body, requester, &self.caps)
             {
+                if self.mint_head_receipts {
+                    // RFC-ACDP-0011 §6: as_of is the registry's clock at
+                    // response time (ms-truncated by the signer); the
+                    // head fields are exactly the served response's, so
+                    // the §7 step 5 byte-match holds by construction.
+                    let signer = self.receipt_signer.as_ref().ok_or_else(|| {
+                        AcdpError::RegistryInternal(
+                            "head-receipt minting enabled without a receipt signer \
+                             (RFC-ACDP-0011 §9 prerequisite violated)"
+                                .into(),
+                        )
+                    })?;
+                    let receipt = signer.mint_lineage_head(
+                        lineage_id,
+                        &ctx.body.ctx_id,
+                        ctx.body.version,
+                        &ctx.registry_state.status,
+                        chrono::Utc::now(),
+                    )?;
+                    ctx.lineage_head_receipt = Some(serde_json::to_value(receipt)?);
+                }
                 return Ok(Some(ctx));
             }
         }
