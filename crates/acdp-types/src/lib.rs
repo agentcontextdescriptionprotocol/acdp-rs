@@ -11,6 +11,7 @@
 pub mod body;
 pub mod capabilities;
 pub mod data_ref;
+pub mod lifecycle;
 pub mod profile;
 pub mod publish;
 pub mod receipt;
@@ -26,6 +27,7 @@ pub use acdp_primitives::wire_error::{WireError, WireErrorBody};
 pub use body::{Body, DataPeriod, FullContext, RegistryState, Signature};
 pub use capabilities::{CapabilitiesDocument, Limits};
 pub use data_ref::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding, Location};
+pub use lifecycle::{LifecycleEvent, LifecycleEventType};
 pub use primitives::{AgentDid, ContentHash, ContextType, CtxId, LineageId, Status, Visibility};
 pub use publish::{PublishRequest, PublishResponse};
 pub use receipt::{ReceiptSigner, RegistryReceipt};

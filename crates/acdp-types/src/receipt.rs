@@ -42,20 +42,31 @@ use sha2::{Digest, Sha256};
 /// whose preimage carries no such member.
 pub const LINEAGE_HEAD_RECEIPT_VERSION: &str = "acdp-lhr/1";
 
+/// Shared RFC-ACDP-0010 §5 preimage hash over an object map: remove the
+/// `signature` member, JCS-canonicalize, SHA-256. The one construction
+/// shared by both receipt kinds (RFC-ACDP-0011 §5) and lifecycle events
+/// (RFC-ACDP-0013 §5) — implementations MUST NOT introduce a second
+/// canonicalization or signing-input framing.
+pub(crate) fn preimage_hash_of_map(
+    mut map: serde_json::Map<String, serde_json::Value>,
+) -> Result<ContentHash, AcdpError> {
+    map.remove("signature");
+    let canonical = try_canonicalize_value(&serde_json::Value::Object(map))?;
+    let digest = Sha256::digest(&canonical);
+    Ok(ContentHash(format!("sha256:{}", hex::encode(digest))))
+}
+
 /// Shared RFC-ACDP-0010 §5 / RFC-ACDP-0011 §5 preimage hash: the JSON
 /// object minus its `signature` member, JCS-canonicalized, SHA-256'd.
 fn preimage_hash_of_object(
     value: &serde_json::Value,
     what: &str,
 ) -> Result<ContentHash, AcdpError> {
-    let mut map = value
+    let map = value
         .as_object()
         .cloned()
         .ok_or_else(|| AcdpError::InvalidReceipt(format!("{what} must be a JSON object")))?;
-    map.remove("signature");
-    let canonical = try_canonicalize_value(&serde_json::Value::Object(map))?;
-    let digest = Sha256::digest(&canonical);
-    Ok(ContentHash(format!("sha256:{}", hex::encode(digest))))
+    preimage_hash_of_map(map)
 }
 
 /// Shared signature check over an already-computed receipt hash. Both
@@ -96,7 +107,7 @@ fn verify_receipt_signature_over_hash(
 /// True when `raw` is canonical millisecond-precision RFC 3339 UTC with
 /// exactly three fractional digits and a literal `Z`
 /// (`YYYY-MM-DDTHH:MM:SS.mmmZ`, RFC-ACDP-0001 §5.3).
-fn is_canonical_ms_utc(raw: &str) -> bool {
+pub(crate) fn is_canonical_ms_utc(raw: &str) -> bool {
     let b = raw.as_bytes();
     b.len() == 24
         && b[10] == b'T'
@@ -397,7 +408,7 @@ impl LineageHeadReceipt {
         let status = Status::parse(&receipt.head_status).map_err(|e| {
             AcdpError::InvalidReceipt(format!("lineage_head_receipt head_status: {e}"))
         })?;
-        if matches!(status, Status::Superseded) || receipt.head_status == "retracted" {
+        if matches!(status, Status::Superseded | Status::Retracted) {
             return Err(AcdpError::InvalidReceipt(format!(
                 "lineage_head_receipt head_status must never be '{}' \
                  (RFC-ACDP-0011 §4: a superseded version is never the head; \
@@ -597,8 +608,7 @@ impl LineageHeadReceipt {
                 self.head_ctx_id, self.head_version
             )));
         }
-        let non_head_served =
-            matches!(served_status, Status::Superseded) || served_status.as_str() == "retracted";
+        let non_head_served = matches!(served_status, Status::Superseded | Status::Retracted);
         if !non_head_served {
             return Err(AcdpError::InvalidReceipt(format!(
                 "lineage_head_receipt names a different head '{}' but the served context's \
@@ -763,7 +773,7 @@ impl ReceiptSigner {
         head_status: &Status,
         as_of: DateTime<Utc>,
     ) -> Result<LineageHeadReceipt, AcdpError> {
-        if matches!(head_status, Status::Superseded) || head_status.as_str() == "retracted" {
+        if matches!(head_status, Status::Superseded | Status::Retracted) {
             return Err(AcdpError::SchemaViolation(format!(
                 "cannot mint a lineage-head receipt with head_status '{}' — a superseded \
                  version is never the head (RFC-ACDP-0011 §4) and a retracted version is \

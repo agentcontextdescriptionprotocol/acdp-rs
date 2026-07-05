@@ -88,6 +88,15 @@ name              = "lineage_head_receipts"
 path              = "tests/lineage_head_receipts.rs"
 required-features = ["client", "server"]
 
+# Lifecycle-event / retraction tests (RFC-ACDP-0013) bind the lc-001..003
+# fixtures at the RegistryServer API level. did:key producers keep the
+# full signature-verification pipeline offline, so only `server` is
+# needed — no TLS harness, no `client` feature.
+[[test]]
+name              = "lifecycle"
+path              = "tests/lifecycle.rs"
+required-features = ["server"]
+
 # Criterion benchmarks for the crypto / JCS / SSRF hot paths.
 # `harness = false` hands `main` to criterion instead of libtest.
 [[bench]]
