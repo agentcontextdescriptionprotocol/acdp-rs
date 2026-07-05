@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-validation-v0.2.0...acdp-validation-v0.3.0) - 2026-07-05
+
+### Other
+
+- updated the following local packages: acdp-primitives, acdp-did, acdp-crypto, acdp-types
+
 ## [0.2.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-validation-v0.1.0...acdp-validation-v0.2.0) - 2026-07-05
 
 ### Added

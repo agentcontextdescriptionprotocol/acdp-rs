@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
+## [0.5.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.4.0...acdp-v0.5.0) - 2026-07-05
+
+### Added
+
+- feat!(client): hard-gate SSRF-relaxed test constructors behind test-transport
+- [**breaking**] lifecycle events & retraction — RFC-ACDP-0013 (acdp/0.3.0 draft)
+
+### Other
+
+- rustfmt after integration merges
+- Merge feature/rfc-0014-revocation: RFC-ACDP-0014 SDK surface
+- Merge feature/rfc-0012-log-verification: RFC-ACDP-0012 SDK surface
+
 ## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.3.0...acdp-v0.3.1) - 2026-07-05
 
 ### Added

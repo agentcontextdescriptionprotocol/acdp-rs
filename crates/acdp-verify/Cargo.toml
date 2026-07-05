@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-verify"
-version     = "0.2.0"
+version     = "0.3.0"
 edition     = "2021"
 description = "High-level body/publish-request verification (DID resolution + signature) for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"
@@ -20,12 +20,12 @@ client = ["acdp-did/client"]
 tracing = ["dep:tracing", "acdp-did/tracing"]
 
 [dependencies]
-acdp-primitives = { path = "../acdp-primitives", version = "0.1.1" }
-acdp-types      = { path = "../acdp-types", version = "0.2.0" }
-acdp-crypto     = { path = "../acdp-crypto", version = "0.1.2" }
+acdp-primitives = { path = "../acdp-primitives", version = "0.2.0" }
+acdp-types      = { path = "../acdp-types", version = "0.3.0" }
+acdp-crypto     = { path = "../acdp-crypto", version = "0.1.3" }
 tracing         = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
-acdp-did        = { path = "../acdp-did", version = "0.1.2" }
-acdp-validation = { path = "../acdp-validation", version = "0.2.0" }
+acdp-did        = { path = "../acdp-did", version = "0.2.0" }
+acdp-validation = { path = "../acdp-validation", version = "0.3.0" }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [lints.rust]
