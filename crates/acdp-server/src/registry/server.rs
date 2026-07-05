@@ -61,6 +61,13 @@ pub struct RegistryServer<S: RegistryStore, L: RateLimiter = NoopRateLimiter> {
     /// the RFC-ACDP-0010 receipt signing key. Never true without
     /// `receipt_signer` (the profile's prerequisite).
     mint_head_receipts: bool,
+    /// Lifecycle events & retraction (ACDP 0.3, RFC-ACDP-0013). Enabled
+    /// via [`Self::with_lifecycle`], which also advertises the
+    /// `acdp-registry-lifecycle` profile. When disabled, the lifecycle
+    /// operations return [`AcdpError::NotImplemented`] (the §6 rule for
+    /// non-advertising registries: HTTP 501) and the registry never
+    /// emits `lifecycle_events` or the `retracted` status.
+    lifecycle_enabled: bool,
 }
 
 impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
@@ -76,6 +83,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             rate_limiter: NoopRateLimiter,
             receipt_signer: None,
             mint_head_receipts: false,
+            lifecycle_enabled: false,
         }
     }
 
@@ -125,6 +133,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             rate_limiter: NoopRateLimiter,
             receipt_signer: None,
             mint_head_receipts: false,
+            lifecycle_enabled: false,
         })
     }
 
@@ -159,6 +168,7 @@ impl<S: RegistryStore> RegistryServer<S, NoopRateLimiter> {
             rate_limiter: NoopRateLimiter,
             receipt_signer: None,
             mint_head_receipts: false,
+            lifecycle_enabled: false,
         })
     }
 }
@@ -173,6 +183,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             rate_limiter: limiter,
             receipt_signer: self.receipt_signer,
             mint_head_receipts: self.mint_head_receipts,
+            lifecycle_enabled: self.lifecycle_enabled,
         }
     }
 
@@ -240,6 +251,30 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             self.caps.profiles.push(profile.to_string());
         }
         self.mint_head_receipts = true;
+        Ok(self)
+    }
+
+    /// Enable lifecycle events & retraction (ACDP 0.3, RFC-ACDP-0013).
+    /// Advertises the `acdp-registry-lifecycle` profile (prerequisite:
+    /// `acdp-registry-core`) and activates the
+    /// [`Self::retract_verified`] / [`Self::republish_verified`]
+    /// operation surface, the §7 status derivation (`retracted`
+    /// dominating `superseded` and `expired`), the §8.2 default-search
+    /// exclusion, and the §8.3 `/current` head exclusion.
+    ///
+    /// Registries advertising the profile MUST advertise `acdp_version`
+    /// ≥ 0.3.0 (§10). The paired [`RegistryStore`] must implement
+    /// [`RegistryStore::commit_lifecycle_event`] — the default trait
+    /// impl fails with `not_implemented`, so a mispaired backend fails
+    /// loudly on the first lifecycle write rather than silently
+    /// dropping a retraction.
+    pub fn with_lifecycle(mut self) -> Result<Self, AcdpError> {
+        self.require_min_acdp_version((0, 3, 0), "acdp-registry-lifecycle")?;
+        let profile = acdp_types::profile::Profile::RegistryLifecycle.as_str();
+        if !self.caps.profiles.iter().any(|p| p == profile) {
+            self.caps.profiles.push(profile.to_string());
+        }
+        self.lifecycle_enabled = true;
         Ok(self)
     }
 
@@ -634,10 +669,16 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
 
     /// `GET /lineages/{lineage_id}/current`.
     ///
-    /// BUG-03 + BUG-04: returns the newest non-`Superseded` version
-    /// visible to the requester. `None` when the lineage is unknown,
-    /// when every version is superseded (RFC-ACDP-0004 §5), or when no
-    /// visible version exists.
+    /// BUG-03 + BUG-04: returns the newest version visible to the
+    /// requester that is neither `Superseded` nor `Retracted` (a
+    /// retracted version is NEVER a head — RFC-ACDP-0013 §8.3, fixture
+    /// `lc-003`; contrast `Expired`, which remains a servable head).
+    /// `None` when the lineage is unknown, when every version is
+    /// superseded or retracted (RFC-ACDP-0004 §5 as amended), or when
+    /// no visible version exists. Because head selection excludes
+    /// retracted versions, a lineage-head receipt can never name a
+    /// retracted head (RFC-ACDP-0011 §4 as amended; the signer's mint
+    /// refusal is the backstop).
     ///
     /// When the registry advertises `acdp-registry-head-receipts`
     /// ([`Self::with_lineage_head_receipts`]), the response carries a
@@ -657,8 +698,10 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // that expired without being superseded is still the latest
         // and the consumer needs to see it to know it has lapsed).
         for mut ctx in all.into_iter().rev() {
-            if !matches!(ctx.registry_state.status, Status::Superseded)
-                && can_retrieve(&ctx.body, requester, &self.caps)
+            if !matches!(
+                ctx.registry_state.status,
+                Status::Superseded | Status::Retracted
+            ) && can_retrieve(&ctx.body, requester, &self.caps)
             {
                 if self.mint_head_receipts {
                     // RFC-ACDP-0011 §6: as_of is the registry's clock at
@@ -721,6 +764,300 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // endpoints (RFC-ACDP-0008 §4.5).
         self.store
             .search(params, requester, self.caps.anonymous_public_reads)
+    }
+
+    // ── Lifecycle events & retraction (ACDP 0.3, RFC-ACDP-0013 §6) ──────
+    //
+    // The logical handlers behind `POST /contexts/{ctx_id}/retract` and
+    // `POST /contexts/{ctx_id}/republish`. An HTTP binding layer should
+    // first run the raw request body through
+    // [`crate::registry::lifecycle::parse_lifecycle_request`] (the
+    // closed-envelope / `immutable_field` check of §6 step 2, fixture
+    // `lc-002`), then hand the parsed event here. The typed
+    // [`acdp_types::lifecycle::LifecycleEvent`] round-trips
+    // byte-identically, so signature verification over its
+    // re-serialization equals verification over the received bytes.
+
+    /// §6 steps 1–3, shared by both endpoints and all verification
+    /// modes (signature *verification* itself is the caller's step —
+    /// it differs by DID method):
+    ///
+    /// 1. **Visibility first** (RFC-ACDP-0008 §4.5): a context the
+    ///    requester could not retrieve yields `not_found` — lifecycle
+    ///    endpoints never leak existence, and error ordering never lets
+    ///    an unauthorized caller distinguish "exists but not yours".
+    /// 2. **Event validation**: closed §4 semantics, the
+    ///    endpoint-binding rule (`retracted` on `/retract`,
+    ///    `republished` on `/republish` — which also excludes every
+    ///    unregistered `event_type`, §7.3), and the future-`occurred_at`
+    ///    rejection (120 s skew allowance, §4).
+    /// 3. **Actor authentication**: `actor` MUST equal `body.agent_id`
+    ///    (`not_authorized` — the supersession rule of RFC-ACDP-0003
+    ///    §3.1 step 3; delegation remains out of scope) and the event
+    ///    MUST be signed (`schema_violation` when missing, §5).
+    ///
+    /// Returns the resolved context for the caller's verification step.
+    fn lifecycle_precheck(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        expected_type: &acdp_types::lifecycle::LifecycleEventType,
+        requester: Option<&AgentDid>,
+    ) -> Result<FullContext, AcdpError> {
+        if !self.lifecycle_enabled {
+            return Err(AcdpError::NotImplemented(
+                "this registry does not advertise acdp-registry-lifecycle \
+                 (RFC-ACDP-0013 §6: lifecycle endpoints are not implemented)"
+                    .into(),
+            ));
+        }
+        // Step 1 — resolve + visibility before ANY other check.
+        let ctx = self
+            .retrieve(&event.ctx_id, requester)?
+            .ok_or_else(|| AcdpError::NotFound(format!("context '{}' not found", event.ctx_id)))?;
+        // Step 2 — event validation.
+        event.validate()?;
+        if &event.event_type != expected_type {
+            return Err(AcdpError::SchemaViolation(format!(
+                "event_type '{}' does not match this endpoint (expected '{}', \
+                 RFC-ACDP-0013 §6 step 2)",
+                event.event_type, expected_type
+            )));
+        }
+        let now = chrono::Utc::now();
+        if event.occurred_at > now + chrono::Duration::seconds(120) {
+            return Err(AcdpError::SchemaViolation(format!(
+                "event occurred_at '{}' is in the future beyond the 120s skew allowance \
+                 (RFC-ACDP-0013 §4)",
+                event.occurred_at.format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            )));
+        }
+        // Step 3 — actor authentication.
+        if event.actor != ctx.body.agent_id {
+            return Err(AcdpError::NotAuthorized(format!(
+                "event actor '{}' is not the context's producer — only the producer \
+                 (agent_id) may use the lifecycle endpoints (RFC-ACDP-0013 §6 step 3)",
+                event.actor
+            )));
+        }
+        // Producer-initiated events MUST be signed (§5); presence and
+        // the key_id-DID == actor binding are checked here, the
+        // cryptographic verification by the caller.
+        event.actor_bound_signature()?;
+        Ok(ctx)
+    }
+
+    /// §6 steps 4–5: atomic transition + append via the store, mapping
+    /// both outcomes (fresh append, byte-identical idempotent retry) to
+    /// the post-transition full-retrieval envelope.
+    fn lifecycle_commit(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+    ) -> Result<FullContext, AcdpError> {
+        Ok(self.store.commit_lifecycle_event(event)?.into_context())
+    }
+
+    /// Shared verified pipeline for both endpoints (resolver-backed).
+    #[cfg(feature = "client")]
+    async fn lifecycle_transition_verified(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        expected_type: acdp_types::lifecycle::LifecycleEventType,
+        requester: Option<&AgentDid>,
+        resolver: &acdp_did::WebResolver,
+    ) -> Result<FullContext, AcdpError> {
+        let ctx = self.lifecycle_precheck(event, &expected_type, requester)?;
+        // Full RFC-ACDP-0001 §5.11 pipeline over the event hash
+        // (RFC-ACDP-0013 §5): resolution, assertionMethod, algorithm
+        // binding, SSRF protections — the same pipeline as a publish.
+        acdp_verify::verify_lifecycle_event(
+            &serde_json::to_value(event)?,
+            &event.ctx_id,
+            &ctx.body.agent_id,
+            None, // producer-only: registry events do not use the endpoints
+            resolver,
+        )
+        .await?;
+        self.lifecycle_commit(event)
+    }
+
+    /// Shared verified pipeline for did:key producers — no resolver.
+    fn lifecycle_transition_verified_did_key(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        expected_type: acdp_types::lifecycle::LifecycleEventType,
+        requester: Option<&AgentDid>,
+    ) -> Result<FullContext, AcdpError> {
+        let ctx = self.lifecycle_precheck(event, &expected_type, requester)?;
+        acdp_verify::verify_lifecycle_event_offline(
+            &serde_json::to_value(event)?,
+            &event.ctx_id,
+            &ctx.body.agent_id,
+            None,
+        )?;
+        self.lifecycle_commit(event)
+    }
+
+    /// **RFC-conformant retraction** — `POST /contexts/{ctx_id}/retract`
+    /// (RFC-ACDP-0013 §6). Runs the full §6 pipeline: visibility, event
+    /// validation (`retracted` on this endpoint), actor authentication,
+    /// signature verification through the RFC-ACDP-0001 §5.11 resolver
+    /// pipeline, strict-alternation transition validation, and the
+    /// atomic append. Returns the post-transition full-retrieval
+    /// envelope (`status: retracted`, event appended) — or the current
+    /// state unchanged on a byte-identical `event_id` retry.
+    ///
+    /// Retraction is **mark-not-delete**: the body remains retrievable
+    /// (§8.1), falls out of default searches (§8.2), and is never
+    /// served from `/current` (§8.3).
+    #[cfg(feature = "client")]
+    pub async fn retract_verified(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        requester: Option<&AgentDid>,
+        resolver: &acdp_did::WebResolver,
+    ) -> Result<FullContext, AcdpError> {
+        self.lifecycle_transition_verified(
+            event,
+            acdp_types::lifecycle::LifecycleEventType::Retracted,
+            requester,
+            resolver,
+        )
+        .await
+    }
+
+    /// **RFC-conformant republication** — `POST
+    /// /contexts/{ctx_id}/republish` (RFC-ACDP-0013 §6): reverses a
+    /// prior retraction. `status` re-derives per RFC-ACDP-0004 §4 as
+    /// though the retraction had not occurred; both events remain in
+    /// the append-only history. Same pipeline as
+    /// [`Self::retract_verified`].
+    #[cfg(feature = "client")]
+    pub async fn republish_verified(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        requester: Option<&AgentDid>,
+        resolver: &acdp_did::WebResolver,
+    ) -> Result<FullContext, AcdpError> {
+        self.lifecycle_transition_verified(
+            event,
+            acdp_types::lifecycle::LifecycleEventType::Republished,
+            requester,
+            resolver,
+        )
+        .await
+    }
+
+    /// [`Self::retract_verified`] for `did:key` producers — the §5
+    /// signature verification is pure (the DID is the key), so this is
+    /// available without the `client` feature. Rejects `did:web` (and
+    /// any other method) actors with `key_resolution_failed`.
+    pub fn retract_verified_did_key(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        requester: Option<&AgentDid>,
+    ) -> Result<FullContext, AcdpError> {
+        self.lifecycle_transition_verified_did_key(
+            event,
+            acdp_types::lifecycle::LifecycleEventType::Retracted,
+            requester,
+        )
+    }
+
+    /// [`Self::republish_verified`] for `did:key` producers.
+    pub fn republish_verified_did_key(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        requester: Option<&AgentDid>,
+    ) -> Result<FullContext, AcdpError> {
+        self.lifecycle_transition_verified_did_key(
+            event,
+            acdp_types::lifecycle::LifecycleEventType::Republished,
+            requester,
+        )
+    }
+
+    /// **NOT RFC-conformant.** Skips signature verification (the §6
+    /// step 3 cryptographic half; presence and actor binding are still
+    /// enforced). Test-only, mirroring
+    /// [`Self::publish_unverified_for_tests`].
+    #[doc(hidden)]
+    pub fn retract_unverified_for_tests(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        requester: Option<&AgentDid>,
+    ) -> Result<FullContext, AcdpError> {
+        self.lifecycle_precheck(
+            event,
+            &acdp_types::lifecycle::LifecycleEventType::Retracted,
+            requester,
+        )?;
+        self.lifecycle_commit(event)
+    }
+
+    /// **NOT RFC-conformant.** See [`Self::retract_unverified_for_tests`].
+    #[doc(hidden)]
+    pub fn republish_unverified_for_tests(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+        requester: Option<&AgentDid>,
+    ) -> Result<FullContext, AcdpError> {
+        self.lifecycle_precheck(
+            event,
+            &acdp_types::lifecycle::LifecycleEventType::Republished,
+            requester,
+        )?;
+        self.lifecycle_commit(event)
+    }
+
+    /// Record a **registry-initiated** lifecycle event (RFC-ACDP-0013
+    /// §6: deployment policy, legal compulsion). Does NOT use the
+    /// producer endpoints or their actor rule: `actor` MUST equal the
+    /// registry's own DID (`capabilities.registry_did`). Subject to the
+    /// same append-only, uniqueness, transition, and shape rules; the
+    /// event SHOULD be signed under a key in the registry's DID
+    /// document (a registry advertising `acdp-registry-receipts` MUST
+    /// sign — enforced here when a receipt signer is configured, per
+    /// the §5 same-key precedent). This is the protocol-visible form of
+    /// "removed by policy": the body stays served, the withdrawal is
+    /// explicit and attributed.
+    pub fn record_registry_lifecycle_event(
+        &self,
+        event: &acdp_types::lifecycle::LifecycleEvent,
+    ) -> Result<FullContext, AcdpError> {
+        if !self.lifecycle_enabled {
+            return Err(AcdpError::NotImplemented(
+                "this registry does not advertise acdp-registry-lifecycle \
+                 (RFC-ACDP-0013 §6)"
+                    .into(),
+            ));
+        }
+        event.validate()?;
+        if !event.event_type.is_registered() {
+            return Err(AcdpError::SchemaViolation(format!(
+                "event_type '{}' is not registered for acceptance in 0.3.0 \
+                 (RFC-ACDP-0013 §7.3)",
+                event.event_type
+            )));
+        }
+        if event.actor.as_str() != self.caps.registry_did {
+            return Err(AcdpError::NotAuthorized(format!(
+                "registry-initiated event actor '{}' ≠ this registry's DID '{}' \
+                 (RFC-ACDP-0013 §6)",
+                event.actor, self.caps.registry_did
+            )));
+        }
+        if self.receipt_signer.is_some() && !event.is_signed() {
+            return Err(AcdpError::SchemaViolation(
+                "a registry advertising acdp-registry-receipts MUST sign its lifecycle \
+                 events (RFC-ACDP-0013 §5)"
+                    .into(),
+            ));
+        }
+        if event.is_signed() {
+            // §5 actor binding for the registry key.
+            event.actor_bound_signature()?;
+        }
+        self.lifecycle_commit(event)
     }
 }
 

@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use acdp_primitives::error::AcdpError;
 use acdp_types::{
     body::{Body, FullContext, RegistryState},
+    lifecycle::{LifecycleEvent, LifecycleEventType},
     primitives::{AgentDid, CtxId, LineageId, Status, Visibility},
     publish::{PublishRequest, PublishResponse},
     search::{SearchParams, SearchResponse, SearchResult},
@@ -37,16 +38,18 @@ pub trait RegistryStore: Send + Sync {
     /// All contexts in a lineage, oldest first.
     fn lineage(&self, lineage_id: &LineageId) -> Result<Vec<FullContext>, AcdpError>;
 
-    /// Returns the newest non-[`Status::Superseded`] version of a lineage
-    /// — either [`Status::Active`] or [`Status::Expired`] (an
+    /// Returns the newest version of a lineage that is **neither
+    /// [`Status::Superseded`] nor [`Status::Retracted`]** — either
+    /// [`Status::Active`] or [`Status::Expired`] (an
     /// expired-but-unreplaced body is still the latest version, and
-    /// callers need to see it to know it has lapsed).
+    /// callers need to see it to know it has lapsed; a retracted one is
+    /// never a head, RFC-ACDP-0013 §8.3).
     ///
     /// Returns `Ok(None)` when the lineage is unknown or every version is
-    /// `Superseded` (RFC-ACDP-0004 §5.2: "if no such version exists,
-    /// returns not_found" — fixture `ret-002`). Visibility rules are NOT
-    /// applied here — filter at the server layer via
-    /// [`crate::registry::server::RegistryServer::current`].
+    /// superseded or retracted (RFC-ACDP-0004 §5.2: "if no such version
+    /// exists, returns not_found" — fixtures `ret-002` / `lc-003`).
+    /// Visibility rules are NOT applied here — filter at the server
+    /// layer via [`crate::registry::server::RegistryServer::current`].
     fn current(&self, lineage_id: &LineageId) -> Result<Option<FullContext>, AcdpError>;
 
     /// Mark `ctx_id`'s registry state as `superseded`. Idempotent.
@@ -172,6 +175,82 @@ pub trait RegistryStore: Send + Sync {
     /// collision with a different `content_hash` returns
     /// `AcdpError::DuplicatePublish` (idem-003).
     fn commit_publish(&self, commit: PublishCommit<'_>) -> Result<PublishCommitOutcome, AcdpError>;
+
+    // ── Lifecycle events (ACDP 0.3, RFC-ACDP-0013) ─────────────────────
+
+    /// Atomically append a lifecycle event and apply its status effect
+    /// (RFC-ACDP-0013 §6 steps 4–5).
+    ///
+    /// CONTRACT — an implementation MUST, under one critical section /
+    /// transaction:
+    ///
+    /// 1. Resolve `event.ctx_id`; unknown → [`AcdpError::NotFound`]
+    ///    (visibility filtering is the server's job, before this call).
+    /// 2. **Retry idempotency** (§6): if an already-appended event has
+    ///    the same `event_id` *and identical content*, append nothing
+    ///    and return [`LifecycleCommitOutcome::IdempotentReplay`] with
+    ///    the current projected context; same `event_id` with
+    ///    *different* content → [`AcdpError::SchemaViolation`].
+    /// 3. **Strict alternation** (§6 step 4, §7.1): `retracted` is
+    ///    accepted only when the context's retraction state is *not
+    ///    retracted*; `republished` only when it *is*. A violation
+    ///    (double retract, spurious republish) →
+    ///    [`AcdpError::InvalidLifecycleTransition`], with **no state
+    ///    change**. An unregistered `event_type` →
+    ///    [`AcdpError::SchemaViolation`] (§7.3).
+    /// 4. Append the event at the END of `lifecycle_events` (append-only
+    ///    — never remove, reorder, or mutate, §4.1) atomically with the
+    ///    status effect, and return
+    ///    [`LifecycleCommitOutcome::Applied`] with the post-transition
+    ///    context (`status` reflecting the §7.2 precedence:
+    ///    `retracted` > `superseded` > `expired` > `active`).
+    ///
+    /// The default returns [`AcdpError::NotImplemented`] — deliberately
+    /// NOT a benign no-op like the idempotency defaults: silently
+    /// dropping a retraction would defeat the withdrawal the producer
+    /// signed, whereas a missing idempotency record only costs a
+    /// replay. A `RegistryServer` enabled with
+    /// [`with_lifecycle`](crate::registry::server::RegistryServer::with_lifecycle)
+    /// MUST be paired with a store that implements this method; a
+    /// registry not advertising `acdp-registry-lifecycle` never calls
+    /// it (and its wire layer maps the error to `not_implemented` /
+    /// HTTP 501, the §6 rule).
+    fn commit_lifecycle_event(
+        &self,
+        event: &LifecycleEvent,
+    ) -> Result<LifecycleCommitOutcome, AcdpError> {
+        let _ = event;
+        Err(AcdpError::NotImplemented(
+            "this RegistryStore backend does not implement lifecycle events \
+             (RFC-ACDP-0013): commit_lifecycle_event is not available"
+                .into(),
+        ))
+    }
+}
+
+/// Outcome of an atomic [`RegistryStore::commit_lifecycle_event`].
+#[derive(Debug)]
+pub enum LifecycleCommitOutcome {
+    /// The event was appended and the status effect applied; carries
+    /// the post-transition full context (RFC-ACDP-0013 §6 step 5: the
+    /// caller sees the new state in the shape it already knows).
+    Applied(FullContext),
+    /// The event's `event_id` matched an already-appended event with
+    /// identical content — nothing was appended; carries the current
+    /// state (§6 retry idempotency: a producer whose POST timed out
+    /// after the append must not receive a spurious
+    /// `invalid_lifecycle_transition`).
+    IdempotentReplay(FullContext),
+}
+
+impl LifecycleCommitOutcome {
+    /// The post-transition (or current, on replay) full context.
+    pub fn into_context(self) -> FullContext {
+        match self {
+            LifecycleCommitOutcome::Applied(ctx)
+            | LifecycleCommitOutcome::IdempotentReplay(ctx) => ctx,
+        }
+    }
 }
 
 /// Single-shot atomic publish input (FEAT-01).
@@ -277,19 +356,26 @@ impl InMemoryStore {
     }
 }
 
-/// RFC-ACDP-0004 §4 — derive `Status::Expired` from `body.expires_at` at
-/// read time so a registry that does not run a janitor still surfaces the
-/// correct lifecycle status.
+/// RFC-ACDP-0004 §4 (as amended by RFC-ACDP-0013 §7.2) — derive the
+/// served `status` at read time from the stored state, the lifecycle
+/// event history, and the clock, so a registry that does not run a
+/// janitor still surfaces the correct lifecycle status.
 ///
-/// `Superseded` outranks `Expired` (consistent with the lifecycle precedence
-/// in RFC-ACDP-0004 §4.1 — once a successor replaces a context, expiry of
-/// the predecessor is irrelevant to the lineage's current view).
+/// Precedence: `retracted` > `superseded` > `expired` > `active`.
+/// Retraction state is derived from `lifecycle_events` (§7.1) and
+/// dominates everything — including a stored `Superseded` and a lapsed
+/// `expires_at`; republication removes the retraction from the
+/// derivation (not the history) and the status re-derives as though
+/// never retracted.
 pub(crate) fn project_status(
-    stored: &Status,
+    state: &RegistryState,
     body: &Body,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Status {
-    match stored {
+    if state.is_retracted() {
+        return Status::Retracted;
+    }
+    match &state.status {
         Status::Active => match body.expires_at {
             Some(exp) if exp <= now => Status::Expired,
             _ => Status::Active,
@@ -299,12 +385,13 @@ pub(crate) fn project_status(
 }
 
 /// Materialize the effective view of a stored context: applies
-/// [`project_status`] to override the stored status when expired.
+/// [`project_status`] to override the stored status when retracted or
+/// expired.
 pub(crate) fn project_context(
     mut ctx: FullContext,
     now: chrono::DateTime<chrono::Utc>,
 ) -> FullContext {
-    ctx.registry_state.status = project_status(&ctx.registry_state.status, &ctx.body, now);
+    ctx.registry_state.status = project_status(&ctx.registry_state, &ctx.body, now);
     ctx
 }
 
@@ -349,6 +436,7 @@ impl RegistryStore for InMemoryStore {
             body,
             registry_state: RegistryState {
                 status: Status::Active,
+                lifecycle_events: None,
                 extensions: Default::default(),
             },
             registry_receipt: None,
@@ -396,11 +484,16 @@ impl RegistryStore for InMemoryStore {
         };
         // RFC-ACDP-0004 §5: "Returns the unique version that has no
         // successor. If no such version exists, returns not_found."
-        // Walk newest-to-oldest and return the first non-`Superseded`
-        // version. Both `Active` and `Expired` count — an expired
-        // body that hasn't been replaced is still the latest, and the
-        // consumer needs to see it (with status=Expired) to know it
-        // has lapsed.
+        // Walk newest-to-oldest and return the first version that is
+        // neither `Superseded` nor `Retracted`. Both `Active` and
+        // `Expired` count — an expired body that hasn't been replaced
+        // is still the latest, and the consumer needs to see it (with
+        // status=Expired) to know it has lapsed. A retracted version is
+        // NEVER a head (RFC-ACDP-0013 §8.3): it has been explicitly
+        // withdrawn from reliance, and falling back to a superseded
+        // predecessor would silently serve a replaced context — so
+        // retracting a linear lineage's head yields `None` (fixture
+        // `lc-003`).
         //
         // BUG-04: an earlier fallback returned the last entry even when
         // every version was `Superseded`; that's a protocol violation.
@@ -408,12 +501,91 @@ impl RegistryStore for InMemoryStore {
         for id in ids.iter().rev() {
             if let Some(ctx) = g.by_ctx.get(id) {
                 let projected = project_context(ctx.clone(), now);
-                if !matches!(projected.registry_state.status, Status::Superseded) {
+                if !matches!(
+                    projected.registry_state.status,
+                    Status::Superseded | Status::Retracted
+                ) {
                     return Ok(Some(projected));
                 }
             }
         }
         Ok(None)
+    }
+
+    fn commit_lifecycle_event(
+        &self,
+        event: &LifecycleEvent,
+    ) -> Result<LifecycleCommitOutcome, AcdpError> {
+        let now = chrono::Utc::now();
+        let mut g = self.lock();
+        let ctx = g.by_ctx.get_mut(event.ctx_id.as_str()).ok_or_else(|| {
+            AcdpError::NotFound(format!(
+                "context '{}' not found in this registry",
+                event.ctx_id
+            ))
+        })?;
+        let events = ctx
+            .registry_state
+            .lifecycle_events
+            .as_deref()
+            .unwrap_or(&[]);
+
+        // §6 retry idempotency / duplicate event_id (step 2).
+        if let Some(prior) = events.iter().find(|e| e.event_id == event.event_id) {
+            if prior == event {
+                return Ok(LifecycleCommitOutcome::IdempotentReplay(project_context(
+                    ctx.clone(),
+                    now,
+                )));
+            }
+            return Err(AcdpError::SchemaViolation(format!(
+                "event_id '{}' was already appended with different content \
+                 (RFC-ACDP-0013 §4: event_id MUST be unique within lifecycle_events)",
+                event.event_id
+            )));
+        }
+
+        // §6 step 4 — strict retracted/republished alternation against
+        // the §7.1 retraction state, under the same lock as the append.
+        let currently_retracted = acdp_types::lifecycle::retraction_state(events);
+        match &event.event_type {
+            LifecycleEventType::Retracted if currently_retracted => {
+                return Err(AcdpError::InvalidLifecycleTransition(format!(
+                    "context '{}' is already retracted — double retract violates the \
+                     strict alternation rule (RFC-ACDP-0013 §6 step 4)",
+                    event.ctx_id
+                )));
+            }
+            LifecycleEventType::Republished if !currently_retracted => {
+                return Err(AcdpError::InvalidLifecycleTransition(format!(
+                    "context '{}' is not retracted — republish requires a prior \
+                     retraction (RFC-ACDP-0013 §6 step 4)",
+                    event.ctx_id
+                )));
+            }
+            LifecycleEventType::Other(other) => {
+                return Err(AcdpError::SchemaViolation(format!(
+                    "event_type '{other}' is not registered for acceptance in 0.3.0 — \
+                     only 'retracted' and 'republished' transition state \
+                     (RFC-ACDP-0013 §7.3)"
+                )));
+            }
+            LifecycleEventType::Retracted | LifecycleEventType::Republished => {}
+        }
+
+        // §6 step 5 — append atomically with the status effect. The
+        // served status is DERIVED from this same array (§7.2
+        // precedence, applied by `project_status`), so appending the
+        // event IS the status change; the stored status keeps tracking
+        // the supersession fact only.
+        ctx.registry_state
+            .lifecycle_events
+            .get_or_insert_with(Vec::new)
+            .push(event.clone());
+        Ok(LifecycleCommitOutcome::Applied(project_context(
+            ctx.clone(),
+            now,
+        )))
     }
 
     fn mark_superseded(&self, ctx_id: &CtxId) -> Result<(), AcdpError> {
@@ -625,6 +797,7 @@ impl RegistryStore for InMemoryStore {
             body,
             registry_state: RegistryState {
                 status: Status::Active,
+                lifecycle_events: None,
                 extensions: Default::default(),
             },
             registry_receipt: registry_receipt.clone(),
@@ -802,9 +975,13 @@ impl RegistryStore for InMemoryStore {
                 }
                 // Status filter — registry default is `active`. Compare
                 // against PROJECTED status so a stored-Active body whose
-                // expires_at has passed is filtered out (RFC-ACDP-0004 §4).
+                // expires_at has passed is filtered out (RFC-ACDP-0004 §4)
+                // and a retracted context falls out of default searches —
+                // and out of status=superseded / status=expired even where
+                // those facts also hold (RFC-ACDP-0013 §8.2: the §7.2
+                // precedence applies to the filter).
                 let want_status = params.status.as_deref().unwrap_or("active");
-                let effective = project_status(&ctx.registry_state.status, body, now);
+                let effective = project_status(&ctx.registry_state, body, now);
                 if effective.as_str() != want_status {
                     return false;
                 }
@@ -869,7 +1046,7 @@ impl RegistryStore for InMemoryStore {
                 context_type: ctx.body.context_type.clone(),
                 domain: ctx.body.domain.clone(),
                 created_at: ctx.body.created_at,
-                status: project_status(&ctx.registry_state.status, &ctx.body, now),
+                status: project_status(&ctx.registry_state, &ctx.body, now),
                 // RFC-ACDP-0008 §4.5: only disclose visibility when the
                 // requester is authorized for it. Public is always safe.
                 // For restricted/private, the search filter above guarantees

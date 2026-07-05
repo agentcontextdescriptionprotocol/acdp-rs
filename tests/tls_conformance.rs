@@ -492,6 +492,7 @@ async fn fetch_report_happy_path() {
         body,
         registry_state: RegistryState {
             status: Status::Active,
+            lifecycle_events: None,
             extensions: Default::default(),
         },
         registry_receipt: None,
@@ -613,6 +614,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
         body,
         registry_state: RegistryState {
             status: Status::Active,
+            lifecycle_events: None,
             extensions: Default::default(),
         },
         registry_receipt: None,
@@ -763,6 +765,7 @@ async fn fetch_report_records_embedded_hash_failure() {
         body,
         registry_state: RegistryState {
             status: Status::Active,
+            lifecycle_events: None,
             extensions: Default::default(),
         },
         registry_receipt: None,
@@ -888,6 +891,7 @@ async fn fetch_report_diagnose_records_forged_signature() {
         body,
         registry_state: RegistryState {
             status: Status::Active,
+            lifecycle_events: None,
             extensions: Default::default(),
         },
         registry_receipt: None,
