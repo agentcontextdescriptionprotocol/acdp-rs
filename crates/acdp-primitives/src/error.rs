@@ -153,6 +153,33 @@ pub enum AcdpError {
     #[error("invalid registry receipt: {0}")]
     InvalidReceipt(String),
 
+    /// Wire code: `invalid_log_proof` (RFC-ACDP-0012 §9, §11 — 0.3.0).
+    /// A transparency-log artifact failed verification: an inclusion
+    /// proof that does not fold to the checkpoint's root, a failed
+    /// consistency proof between tree sizes, or a checkpoint whose
+    /// signature does not verify. Permanent — a bad proof will not
+    /// verify on retry (HTTP 502 on the wire: the upstream log is at
+    /// fault when a federated resolver emits it).
+    #[error("invalid transparency-log proof: {0}")]
+    InvalidLogProof(String),
+
+    /// Wire code: `immutable_field` (RFC-ACDP-0013 §6, §10 — 0.3.0;
+    /// activated from the v0.1.0 reservation). A lifecycle (or future
+    /// mutation) endpoint request attempted to supply or alter
+    /// immutable body content. Bodies are immutable; lifecycle
+    /// endpoints mutate registry state only. Permanent (HTTP 400).
+    #[error("immutable field: {0}")]
+    ImmutableField(String),
+
+    /// Wire code: `invalid_lifecycle_transition` (RFC-ACDP-0013 §6
+    /// step 4, §10 — 0.3.0). The requested lifecycle transition
+    /// conflicts with the context's current retraction state (retract
+    /// of an already-retracted context; republish of a never-retracted
+    /// one). A state conflict like the 409 arm of `superseded_target`;
+    /// retryable only after the state changes (HTTP 409).
+    #[error("invalid lifecycle transition: {0}")]
+    InvalidLifecycleTransition(String),
+
     // ── Wire / transport ─────────────────────────────────────────────────
     /// Wire code: `internal_error`.
     #[error("registry internal error: {0}")]
@@ -160,7 +187,7 @@ pub enum AcdpError {
 
     /// Catch-all for `WireError` codes that have no typed variant in this
     /// version of the library. Forward-compatible: registries may emit
-    /// reserved codes (`immutable_field`, `unsupported_embedding_model`)
+    /// reserved codes (`unsupported_embedding_model`)
     /// that future ACDP versions add.
     #[error("registry returned error: {0:?}")]
     Registry(crate::wire_error::WireError),
@@ -254,6 +281,9 @@ impl AcdpError {
             "duplicate_publish" => AcdpError::DuplicatePublish(msg),
             "cross_registry_resolution_failed" => AcdpError::CrossRegistryResolutionFailed(msg),
             "invalid_receipt" => AcdpError::InvalidReceipt(msg),
+            "invalid_log_proof" => AcdpError::InvalidLogProof(msg),
+            "immutable_field" => AcdpError::ImmutableField(msg),
+            "invalid_lifecycle_transition" => AcdpError::InvalidLifecycleTransition(msg),
             "internal_error" => AcdpError::RegistryInternal(msg),
             "superseded_target" => {
                 let reason = wire
@@ -314,8 +344,8 @@ mod tests {
     }
 
     #[test]
-    fn all_21_wire_codes_round_trip() {
-        // Test-coverage matrix entry: "All 21 error codes parse from WireError".
+    fn all_24_wire_codes_round_trip() {
+        // Test-coverage matrix entry: "All 24 error codes parse from WireError".
         // Every code enumerated by acdp-error.schema.json's enum MUST map to a
         // typed AcdpError variant (or, for `superseded_target` with details,
         // produce the right SupersessionReason).
@@ -375,13 +405,24 @@ mod tests {
             ("invalid_receipt", |e| {
                 matches!(e, AcdpError::InvalidReceipt(_))
             }),
+            ("invalid_log_proof", |e| {
+                matches!(e, AcdpError::InvalidLogProof(_))
+            }),
+            ("immutable_field", |e| {
+                matches!(e, AcdpError::ImmutableField(_))
+            }),
+            ("invalid_lifecycle_transition", |e| {
+                matches!(e, AcdpError::InvalidLifecycleTransition(_))
+            }),
             ("internal_error", |e| {
                 matches!(e, AcdpError::RegistryInternal(_))
             }),
         ];
-        // Schema enumerates exactly 21 codes (RFC-ACDP-0007 §5 + the
-        // RFC-ACDP-0010 `invalid_receipt` addition).
-        assert_eq!(cases.len(), 21);
+        // Schema enumerates exactly 24 codes (RFC-ACDP-0007 §5 + the
+        // RFC-ACDP-0010 `invalid_receipt` addition + the 0.3.0 codes:
+        // `invalid_log_proof` (RFC-0012), `immutable_field` and
+        // `invalid_lifecycle_transition` (RFC-0013)).
+        assert_eq!(cases.len(), 24);
         for (code, expected) in cases {
             let err = AcdpError::from_wire_error(wire(code, "msg", None));
             assert!(
@@ -419,7 +460,7 @@ mod tests {
 
     #[test]
     fn unknown_code_passes_through_as_registry() {
-        let w = wire("immutable_field", "reserved future code", None);
+        let w = wire("unsupported_embedding_model", "reserved future code", None);
         assert!(matches!(
             AcdpError::from_wire_error(w),
             AcdpError::Registry(_)
@@ -464,5 +505,8 @@ mod tests {
         assert!(!AcdpError::DataRefHashMismatch("x".into()).is_transient());
         // RFC-ACDP-0010: a failed receipt will not verify on retry.
         assert!(!AcdpError::InvalidReceipt("x".into()).is_transient());
+        assert!(!AcdpError::InvalidLogProof("x".into()).is_transient());
+        assert!(!AcdpError::ImmutableField("x".into()).is_transient());
+        assert!(!AcdpError::InvalidLifecycleTransition("x".into()).is_transient());
     }
 }
