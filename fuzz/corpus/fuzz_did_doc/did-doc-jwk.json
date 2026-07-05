@@ -1,0 +1,1 @@
+{"id":"did:web:agents.example.com:test","verificationMethod":[{"id":"did:web:agents.example.com:test#key-1","type":"JsonWebKey2020","controller":"did:web:agents.example.com:test","publicKeyJwk":{"kty":"OKP","crv":"Ed25519","x":"O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik"}}],"assertionMethod":["did:web:agents.example.com:test#key-1"]}

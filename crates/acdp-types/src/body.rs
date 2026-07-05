@@ -105,6 +105,76 @@ pub struct Body {
     pub extensions: serde_json::Map<String, serde_json::Value>,
 }
 
+impl Body {
+    /// Materialize the stored [`Body`] from a **validated**
+    /// [`PublishRequest`](crate::publish::PublishRequest) plus the four
+    /// registry-assigned identity fields (RFC-ACDP-0003 §2.1 step 8;
+    /// the RFC-ACDP-0001 §5.7 exclusion set).
+    ///
+    /// This is the single `PublishRequest → Body` materialization point.
+    /// Store backends MUST use it instead of hand-copying fields: three
+    /// independent copies existed before this constructor (the
+    /// in-memory store plus both SQL backends), and a producer field
+    /// added to `PublishRequest` but missed in one copy is a silent
+    /// data-loss bug that changes the recomputed `content_hash` of the
+    /// stored body. The field-transfer guard test at
+    /// `tests/body_materialization.rs` fails if a new `PublishRequest`
+    /// field is not mapped here.
+    ///
+    /// `created_at` is millisecond-truncated internally (RFC-ACDP-0001
+    /// §5.3) — callers may pass an untruncated `now`.
+    ///
+    /// The caller is responsible for having validated the request
+    /// (schema, hash recomputation, signature) and for deriving
+    /// `ctx_id` / `lineage_id` per RFC-ACDP-0003; this constructor only
+    /// transfers fields.
+    pub fn from_publish_request(
+        req: &crate::publish::PublishRequest,
+        ctx_id: CtxId,
+        lineage_id: LineageId,
+        origin_registry: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Body {
+            // Registry-assigned (the §5.7 exclusion set, minus the two
+            // integrity fields echoed from the request below).
+            ctx_id,
+            lineage_id,
+            origin_registry: origin_registry.into(),
+            created_at: acdp_primitives::time::trunc_ms(created_at),
+            // Integrity fields — echoed verbatim from the validated
+            // request.
+            content_hash: req.content_hash.clone(),
+            signature: req.signature.clone(),
+            // Producer-controlled content — copied verbatim, one line
+            // per field so a missed mapping is visible in review and
+            // caught by the guard test.
+            version: req.version,
+            supersedes: req.supersedes.clone(),
+            agent_id: req.agent_id.clone(),
+            contributors: req.contributors.clone(),
+            title: req.title.clone(),
+            context_type: req.context_type.clone(),
+            data_refs: req.data_refs.clone(),
+            derived_from: req.derived_from.clone(),
+            visibility: req.visibility.clone(),
+            audience: req.audience.clone(),
+            acdp_version: req.acdp_version.clone(),
+            description: req.description.clone(),
+            summary: req.summary.clone(),
+            tags: req.tags.clone(),
+            domain: req.domain.clone(),
+            expires_at: req.expires_at,
+            data_period: req.data_period.clone(),
+            metadata: req.metadata.clone(),
+            schema_uri: req.schema_uri.clone(),
+            // The publish schema is CLOSED (deny_unknown_fields), so a
+            // fresh body starts with no extension fields.
+            extensions: Default::default(),
+        }
+    }
+}
+
 /// Time window the underlying data covers.
 ///
 /// Per `acdp-common.schema.json#/$defs/data_period`, both `start` and `end`
@@ -201,6 +271,14 @@ pub struct FullContext {
     /// to the library; preserved verbatim if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_receipt: Option<serde_json::Value>,
+    /// Optional lineage-head receipt (ACDP 0.3, RFC-ACDP-0011): the
+    /// registry's signed serve-time attestation of the current head of
+    /// the lineage. REQUIRED on `GET /lineages/{id}/current` responses
+    /// from registries advertising `acdp-registry-head-receipts`; MAY
+    /// appear on full retrieval; tolerated (and preserved verbatim)
+    /// when absent — non-advertising registries never emit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_head_receipt: Option<serde_json::Value>,
 
     /// Unknown top-level context fields, preserved per
     /// `acdp-context.schema.json` `additionalProperties: true`. Retained

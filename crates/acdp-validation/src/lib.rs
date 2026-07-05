@@ -52,6 +52,17 @@ const ECDSA_P256_SIG_B64_LEN: usize = 88;
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
 
+/// True when a `major.minor.patch` version string is >= the given
+/// major.minor (version-conditional capability checks; malformed
+/// versions are rejected by `validate_semver_pattern` first).
+fn version_at_least(v: &str, major: u64, minor: u64) -> bool {
+    let mut it = v.split('.').filter_map(|p| p.parse::<u64>().ok());
+    match (it.next(), it.next()) {
+        (Some(ma), Some(mi)) => ma > major || (ma == major && mi >= minor),
+        _ => false,
+    }
+}
+
 /// Validate a [`acdp_types::CapabilitiesDocument`] against the
 /// runtime constraints listed in RFC-ACDP-0007 §3.
 ///
@@ -73,6 +84,31 @@ const ECDSA_P256_SIG_B64_LEN: usize = 88;
 /// `acdp::client::CrossRegistryResolver::resolve`.
 pub fn validate_capabilities(caps: &acdp_types::CapabilitiesDocument) -> Result<(), AcdpError> {
     validate_semver_pattern("acdp_version", &caps.acdp_version)?;
+
+    // §3.5 item 11 *(0.3.0)*: limits.max_publish_per_minute, when
+    // present, MUST be an integer >= 1 (schema minimum).
+    if let Some(mppm) = caps.limits.max_publish_per_minute {
+        if mppm < 1 {
+            return Err(AcdpError::SchemaViolation(
+                "capabilities.limits.max_publish_per_minute MUST be >= 1 \
+                 (RFC-ACDP-0007 \u{a7}3.5 item 11)"
+                    .into(),
+            ));
+        }
+    }
+
+    // §3.5 item 10 *(0.3.0)* / RFC-ACDP-0003 §6.4: a registry
+    // advertising acdp_version >= 0.3.0 MUST support Idempotency-Key;
+    // supports_idempotency_key absent-or-false alongside such a version
+    // makes the document self-contradictory (fixture idem-007).
+    if version_at_least(&caps.acdp_version, 0, 3) && !caps.supports_idempotency_key {
+        return Err(AcdpError::SchemaViolation(
+            "capabilities advertising acdp_version >= 0.3.0 MUST set \
+             supports_idempotency_key: true (RFC-ACDP-0003 \u{a7}6.4, \
+             RFC-ACDP-0007 \u{a7}3.5 item 10)"
+                .into(),
+        ));
+    }
 
     AgentDid::parse_web(caps.registry_did.as_str()).map_err(|e| {
         AcdpError::SchemaViolation(format!(
@@ -1495,5 +1531,58 @@ mod tests {
         }
         assert!(json_depth(&v) > MAX_METADATA_DEPTH);
         assert!(acdp_crypto::try_canonicalize_value(&v).is_err());
+    }
+}
+
+#[cfg(test)]
+mod capabilities_0_3_0_tests {
+    use super::*;
+    use acdp_types::capabilities::{CapabilitiesDocument, Limits};
+
+    fn caps(version: &str, supports_idem: bool, mppm: Option<u64>) -> CapabilitiesDocument {
+        CapabilitiesDocument {
+            acdp_version: version.into(),
+            registry_did: "did:web:registry.example.com".into(),
+            supported_signature_algorithms: vec!["ed25519".into()],
+            supported_did_methods: vec!["did:web".into()],
+            profiles: vec!["acdp-registry-core".into()],
+            limits: Limits {
+                max_payload_bytes: 1_048_576,
+                max_embedded_bytes: 65_536,
+                idempotency_key_ttl_seconds: if supports_idem { Some(86_400) } else { None },
+                max_publish_per_minute: mppm,
+            },
+            read_authentication_methods: vec![],
+            anonymous_public_reads: false,
+            supports_idempotency_key: supports_idem,
+            extensions: Default::default(),
+        }
+    }
+
+    /// RFC-ACDP-0007 §3.5 item 11 *(0.3.0)* — caps-007's reject variants:
+    /// zero is rejected at validation; the ≥1 accept case passes.
+    #[test]
+    fn max_publish_per_minute_bounds() {
+        assert!(validate_capabilities(&caps("0.1.0", false, Some(600))).is_ok());
+        let err = validate_capabilities(&caps("0.1.0", false, Some(0)))
+            .expect_err("zero MUST be rejected");
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    /// RFC-ACDP-0003 §6.4 / RFC-ACDP-0007 §3.5 item 10 *(0.3.0)* — the
+    /// idem-007 rule: acdp_version ≥ 0.3.0 without idempotency support
+    /// is self-contradictory and MUST be rejected; 0.1.0/0.2.0 without
+    /// support stay valid; 0.3.0 with support is valid.
+    #[test]
+    fn idempotency_required_at_0_3_0() {
+        assert!(validate_capabilities(&caps("0.1.0", false, None)).is_ok());
+        assert!(validate_capabilities(&caps("0.2.0", false, None)).is_ok());
+        assert!(validate_capabilities(&caps("0.3.0", true, None)).is_ok());
+        assert!(validate_capabilities(&caps("0.4.0", true, None)).is_ok());
+        for v in ["0.3.0", "0.4.0", "1.0.0"] {
+            let err = validate_capabilities(&caps(v, false, None))
+                .expect_err("version >= 0.3.0 without idempotency MUST be rejected");
+            assert!(matches!(err, AcdpError::SchemaViolation(_)), "{v}: {err:?}");
+        }
     }
 }

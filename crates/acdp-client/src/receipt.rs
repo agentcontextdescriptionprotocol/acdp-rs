@@ -8,8 +8,8 @@
 
 use acdp_did::web::WebResolver;
 use acdp_primitives::error::AcdpError;
-use acdp_types::primitives::{ContentHash, CtxId};
-use acdp_types::receipt::RegistryReceipt;
+use acdp_types::primitives::{ContentHash, CtxId, LineageId};
+use acdp_types::receipt::{LineageHeadReceipt, RegistryReceipt};
 
 /// Verify a `registry_receipt` value end-to-end:
 ///
@@ -109,6 +109,114 @@ pub async fn verify_receipt_value(
             )));
         }
     }
+
+    Ok(receipt)
+}
+
+/// Verify a `lineage_head_receipt` value end-to-end per the
+/// RFC-ACDP-0011 §7 procedure (ACDP 0.3):
+///
+/// 1. **Closed parse** — the schema is CLOSED and `receipt_version`
+///    MUST be exactly `"acdp-lhr/1"`; unknown or missing members fail
+///    with `invalid_receipt`. The raw `as_of` byte form is checked
+///    before any parsing normalization.
+/// 2. **Registry binding** — `registry_did` equals
+///    `did:web:<serving_authority>` (the authority the response was
+///    actually fetched from) AND equals `capabilities.registry_did`;
+///    `signature.key_id` is a DID URL under `registry_did`; the
+///    `head_ctx_id` authority equals the registry's (fixture `lhr-003`).
+/// 3. **Lineage binding** — `lineage_id` equals the lineage the
+///    consumer requested (byte-for-byte).
+/// 4. **Head binding** — the receipt's head fields byte-match the
+///    accompanying response (`on_current_endpoint = true` for
+///    `/current`, where the receipt MUST describe the very head being
+///    served; fixture `lhr-002`). On full retrieval of a non-head
+///    version the §7 step 5b consistency rule applies.
+/// 5. **Signature** — JCS-recompute the preimage from the RAW wire
+///    JSON, resolve `signature.key_id` from the registry's DID document
+///    and verify. Like RFC-ACDP-0010 receipts, the key is looked up in
+///    `verificationMethod` WITHOUT requiring `assertionMethod`
+///    membership (retired receipt keys keep persisted head receipts
+///    verifiable, RFC-ACDP-0011 §8).
+/// 6. **`as_of` skew** — not in the future beyond `max_clock_skew`
+///    (RFC recommends 120 s; fixture `lhr-004`).
+///
+/// Staleness (an old but honest `as_of`) is deliberately NOT checked
+/// here — it is consumer freshness policy (§6), evaluated separately
+/// via [`LineageHeadReceipt::age_at`] and reported distinctly from
+/// these verification failures.
+///
+/// All failures map to [`AcdpError::InvalidReceipt`] except transport-
+/// level DID-resolution failures, which keep their transient/permanent
+/// classification so retry logic still works.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_lineage_head_receipt_value(
+    value: &serde_json::Value,
+    requested_lineage: &LineageId,
+    served_ctx_id: &CtxId,
+    served_version: u32,
+    served_status: &acdp_types::primitives::Status,
+    on_current_endpoint: bool,
+    serving_authority: &str,
+    capabilities_registry_did: &str,
+    max_clock_skew: chrono::Duration,
+    resolver: &WebResolver,
+) -> Result<LineageHeadReceipt, AcdpError> {
+    // §7 step 1: closed parse + semantic invariants + raw as_of form.
+    let receipt = LineageHeadReceipt::from_value(value)?;
+
+    // §7 steps 3–5 cross-checks (pure) — the security value; run before
+    // the network round-trip for the signature, exactly like
+    // `verify_receipt_value`.
+    receipt.cross_check_registry_binding(serving_authority, capabilities_registry_did)?;
+    receipt.cross_check_lineage(requested_lineage)?;
+    receipt.cross_check_head(
+        served_ctx_id,
+        served_version,
+        served_status,
+        on_current_endpoint,
+    )?;
+
+    // §7 step 2: resolve the registry's receipt key and verify the
+    // signature over the RAW wire preimage (re-serializing the parsed
+    // struct could normalize byte details and falsely reject an honest
+    // receipt).
+    let key_id = &receipt.signature.key_id;
+    let (did_part, fragment) = key_id.split_once('#').ok_or_else(|| {
+        AcdpError::InvalidReceipt(format!(
+            "lineage_head_receipt signature.key_id '{key_id}' has no fragment"
+        ))
+    })?;
+    let doc = resolver.resolve(did_part).await?;
+    let method = doc.find_by_fragment(fragment).ok_or_else(|| {
+        AcdpError::InvalidReceipt(format!(
+            "registry DID document has no verification method '#{fragment}' — \
+             receipt keys (including retired ones) must remain in verificationMethod"
+        ))
+    })?;
+    let raw_hash = LineageHeadReceipt::preimage_hash_of_value(value)?;
+    match receipt.signature.algorithm.as_str() {
+        "ed25519" => {
+            let key = method
+                .ed25519_public_key_bytes()
+                .map_err(|e| AcdpError::InvalidReceipt(format!("receipt key extraction: {e}")))?;
+            receipt.verify_signature_against_hash(&raw_hash, Some(&key), None)?;
+        }
+        "ecdsa-p256" => {
+            let key = method
+                .ecdsa_p256_public_key_sec1()
+                .map_err(|e| AcdpError::InvalidReceipt(format!("receipt key extraction: {e}")))?;
+            receipt.verify_signature_against_hash(&raw_hash, None, Some(&key))?;
+        }
+        other => {
+            return Err(AcdpError::InvalidReceipt(format!(
+                "receipt signature algorithm '{other}' is not supported"
+            )));
+        }
+    }
+
+    // §7 step 6: forged-freshness rejection against the consumer clock.
+    receipt.check_as_of_skew(chrono::Utc::now(), max_clock_skew)?;
 
     Ok(receipt)
 }

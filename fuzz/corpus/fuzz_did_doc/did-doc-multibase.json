@@ -1,0 +1,1 @@
+{"id":"did:web:example.com","verificationMethod":[{"id":"did:web:example.com#key-1","type":"Ed25519VerificationKey2020","controller":"did:web:example.com","publicKeyMultibase":"z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"}],"assertionMethod":["#key-1"]}

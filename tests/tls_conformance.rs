@@ -21,6 +21,7 @@ use acdp::AcdpError;
 /// root and opts the SsrfPolicy into loopback so `did:web:localhost…`
 /// resolves against `127.0.0.1`. Default policy still rejects every
 /// other forbidden range — only loopback is permitted.
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 fn test_resolver(root_cert_pem: &[u8]) -> WebResolver {
     WebResolver::with_root_cert_pem(root_cert_pem)
         .expect("resolver")
@@ -183,6 +184,7 @@ fn pub_003_supersession_lineage_mismatch() {
             max_payload_bytes: 1_048_576,
             max_embedded_bytes: 65_536,
             idempotency_key_ttl_seconds: None,
+            max_publish_per_minute: None,
         },
         read_authentication_methods: vec![],
         anonymous_public_reads: true,
@@ -419,6 +421,7 @@ async fn sec_01_cross_registry_pins_authority_dns() {
 /// must be `true` on the happy path; per-DataRef slots reflect the
 /// declared refs (empty here because the test body has no data_refs).
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn fetch_report_happy_path() {
     use acdp::client::{RegistryClient, VerificationPolicy, VerifiedContext};
     use acdp::types::body::{Body, FullContext, RegistryState, Signature};
@@ -492,6 +495,7 @@ async fn fetch_report_happy_path() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        lineage_head_receipt: None,
         extensions: Default::default(),
     };
     let full_value = serde_json::to_value(&full).expect("FullContext serializes");
@@ -542,6 +546,7 @@ async fn fetch_report_happy_path() {
 /// flag off, `fetch_with_policy` MUST succeed; with it on (the
 /// default), the same body MUST fail with `SchemaViolation`.
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn verification_policy_validate_body_schema_off_skips_structural_check() {
     use acdp::client::{RegistryClient, VerificationPolicy, VerifiedContext};
     use acdp::crypto::{compute_content_hash, derive_lineage_id};
@@ -611,6 +616,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        lineage_head_receipt: None,
         extensions: Default::default(),
     })
     .unwrap();
@@ -662,6 +668,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
 /// This is the key behavioral promise of `fetch_report` that the
 /// happy-path test alone doesn't exercise.
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn fetch_report_records_embedded_hash_failure() {
     use acdp::client::{RegistryClient, VerificationPolicy, VerifiedContext};
     use acdp::crypto::{compute_content_hash, derive_lineage_id};
@@ -759,6 +766,7 @@ async fn fetch_report_records_embedded_hash_failure() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        lineage_head_receipt: None,
         extensions: Default::default(),
     })
     .expect("serialize full context");
@@ -813,6 +821,7 @@ async fn fetch_report_records_embedded_hash_failure() {
 /// `fetch_report` would have returned `Err(InvalidSignature)` with no
 /// report.
 #[tokio::test]
+#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn fetch_report_diagnose_records_forged_signature() {
     use acdp::client::{RegistryClient, VerificationPolicy, VerifiedContext};
     use acdp::crypto::{compute_content_hash, derive_lineage_id};
@@ -882,6 +891,7 @@ async fn fetch_report_diagnose_records_forged_signature() {
             extensions: Default::default(),
         },
         registry_receipt: None,
+        lineage_head_receipt: None,
         extensions: Default::default(),
     })
     .unwrap();

@@ -13,7 +13,8 @@
 
 use crate::capabilities::CapabilitiesDocument;
 
-/// One of the four conformance profiles defined by RFC-ACDP-0001 §9.1.
+/// A conformance profile: the RFC-ACDP-0001 §9.1 set plus the receipt
+/// profiles added by RFC-ACDP-0010 (0.2.0) and RFC-ACDP-0011 (0.3.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Profile {
     /// `acdp-registry-core` — minimum profile for any registry.
@@ -25,6 +26,11 @@ pub enum Profile {
     /// `acdp-registry-receipts` — mints registry-signed publication
     /// receipts (ACDP 0.2, RFC-ACDP-0010).
     RegistryReceipts,
+    /// `acdp-registry-head-receipts` — mints registry-signed
+    /// lineage-head receipts on `/current` (ACDP 0.3, RFC-ACDP-0011).
+    /// Prerequisite: `acdp-registry-receipts` (same signing key, same
+    /// DID-document plumbing, same key lifecycle).
+    RegistryHeadReceipts,
     /// `acdp-consumer` — a consumer of contexts (not a registry).
     Consumer,
 }
@@ -38,6 +44,7 @@ impl Profile {
             Profile::RegistryDiscovery => "acdp-registry-discovery",
             Profile::RegistryFederated => "acdp-registry-federated",
             Profile::RegistryReceipts => "acdp-registry-receipts",
+            Profile::RegistryHeadReceipts => "acdp-registry-head-receipts",
             Profile::Consumer => "acdp-consumer",
         }
     }
@@ -91,6 +98,7 @@ mod tests {
                 max_payload_bytes: 1_048_576,
                 max_embedded_bytes: 65_536,
                 idempotency_key_ttl_seconds: None,
+                max_publish_per_minute: None,
             },
             read_authentication_methods: vec![],
             anonymous_public_reads: true,

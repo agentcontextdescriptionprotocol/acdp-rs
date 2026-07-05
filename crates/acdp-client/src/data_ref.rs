@@ -452,6 +452,7 @@ mod tests {
     /// only on the connection itself (nothing is listening) rather than
     /// on policy — i.e. it is no longer an SSRF refusal.
     #[tokio::test]
+    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
     async fn https_fetcher_allow_test_loopback_permits_localhost_dns() {
         let f = HttpsDataRefFetcher::new()
             .with_ssrf_policy(acdp_safe_http::SsrfPolicy::allow_test_loopback());

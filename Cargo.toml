@@ -36,7 +36,23 @@ default = ["client"]
 # combined client+server test harness gets RegistryServer::publish_verified.
 client  = ["dep:acdp-client", "acdp-primitives/reqwest", "acdp-server?/client"]
 server  = ["dep:acdp-server"]
-tracing = ["acdp-did/tracing", "acdp-client?/tracing"]
+tracing = [
+    "acdp-did/tracing",
+    "acdp-client?/tracing",
+    "acdp-verify/tracing",
+    "acdp-server?/tracing",
+]
+# Opts into the SSRF-relaxed test-only constructors
+# (`SsrfPolicy::allow_test_loopback`, `RegistryClient::{with_root_cert_pem,
+# with_test_transport, with_test_endpoint}`, `WebResolver::with_test_endpoint`).
+# Without it those constructors are deprecated; in 0.4.0 they will be
+# compiled out entirely unless this feature is enabled. Never enable in
+# production builds.
+test-transport = [
+    "acdp-safe-http/test-transport",
+    "acdp-did/test-transport",
+    "acdp-client?/test-transport",
+]
 
 # TLS-backed fixture conformance tests need both the `client` (resolver,
 # RegistryClient, CrossRegistryResolver) and `server` (RegistryServer,
@@ -64,6 +80,20 @@ required-features = ["client"]
 name              = "receipts"
 path              = "tests/receipts.rs"
 required-features = ["client", "server"]
+
+# Lineage-head receipt end-to-end tests (RFC-ACDP-0011) drive the same
+# in-process TLS registry harness as `receipts`.
+[[test]]
+name              = "lineage_head_receipts"
+path              = "tests/lineage_head_receipts.rs"
+required-features = ["client", "server"]
+
+# Criterion benchmarks for the crypto / JCS / SSRF hot paths.
+# `harness = false` hands `main` to criterion instead of libtest.
+[[bench]]
+name    = "core"
+path    = "benches/core.rs"
+harness = false
 
 # The umbrella `acdp` crate is a thin facade: its library is pure
 # re-exports of the workspace crates below. The concrete third-party
@@ -97,6 +127,7 @@ url           = "2"
 urlencoding   = "2"
 tokio    = { version = "1", features = ["full"] }
 anyhow   = "1"
+criterion = "0.5"
 wiremock = "0.6"
 proptest = "1"
 # TLS test harness — used to mock a `did:web` HTTPS endpoint and a

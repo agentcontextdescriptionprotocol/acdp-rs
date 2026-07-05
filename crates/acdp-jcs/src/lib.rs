@@ -153,6 +153,13 @@ fn ecma_number_string(f: f64) -> String {
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
     let digits = digits.trim_end_matches('0');
     let digits = if digits.is_empty() { "0" } else { digits };
+    // ECMA-262 step 5 tie-break: when the value sits EXACTLY halfway
+    // between two shortest decimal candidates, ECMAScript requires the
+    // even one; Rust's `{:e}` can pick the odd one. Correct the digit
+    // string before band formatting so RFC 8785 output matches every
+    // ECMAScript engine byte-for-byte.
+    let corrected = round_half_even_correction(f.abs(), digits, e10);
+    let digits: &str = corrected.as_deref().unwrap_or(digits);
     let k = digits.len() as i32; // count of significant digits
     let n = e10 + 1; // value = digits × 10^(n − k)
 
@@ -184,6 +191,104 @@ fn ecma_number_string(f: f64) -> String {
     } else {
         body
     }
+}
+
+/// ECMA-262 §6.1.6.1.20 (Number::toString) step 5 tie-break: among the
+/// shortest round-tripping digit strings, "if there are two such possible
+/// values of s, choose the one that is even".
+///
+/// Rust's `{:e}` emits shortest round-tripping digits but is free to break
+/// an exact tie either way, and it can pick the odd candidate. Concretely
+/// `f64::from_bits(0x43143ff3c1cb0959)` (= 1424953923781206.25 exactly)
+/// formats as `1424953923781206.3` in Rust, while every ECMAScript engine
+/// emits `1424953923781206.2` — and RFC 8785 §3.2.2.3 requires the
+/// ECMAScript output. Without this correction, two conformant JCS
+/// implementations produce different canonical bytes (hence different
+/// `content_hash` values) for the same body.
+///
+/// Returns `Some(corrected_digits)` only when `abs` is an exact decimal
+/// midpoint and Rust chose the odd candidate; `None` otherwise (the
+/// overwhelmingly common case — detection is a handful of integer ops).
+///
+/// A genuine tie means `abs == (2s ∓ 1) × 10^e / 2` exactly, which forces
+/// `5^|e|` to divide a ≤53-bit mantissa product — so `|e| ≤ 25` in every
+/// real tie and the exact test fits in checked `u128` arithmetic
+/// (overflow soundly means "not a tie").
+fn round_half_even_correction(abs: f64, digits: &str, e10: i32) -> Option<String> {
+    // Shortest f64 digit strings are at most 17 significant digits.
+    if digits.len() > 17 {
+        return None;
+    }
+    let s: u128 = digits.parse().ok()?;
+    if s % 2 == 0 {
+        // Already even: in any tie, ECMAScript would pick this candidate.
+        return None;
+    }
+    // Exponent of the LAST digit: value = s × 10^e_last.
+    let e_last = e10 - (digits.len() as i32 - 1);
+
+    // Tie with the candidate below (s−1, even) or above (s+1, even).
+    let corrected = if is_exact_decimal_midpoint(abs, 2 * s - 1, e_last) {
+        s - 1
+    } else if is_exact_decimal_midpoint(abs, 2 * s + 1, e_last) {
+        s + 1
+    } else {
+        return None;
+    };
+
+    let out = corrected.to_string();
+    // In a genuine tie under minimal digit count, the even candidate can
+    // neither change length nor gain a trailing zero — either would mean
+    // a shorter round-tripping representation existed, contradicting the
+    // formatter having emitted `digits.len()` significant digits.
+    debug_assert_eq!(out.len(), digits.len(), "tie candidate changed digit count");
+    debug_assert!(!out.ends_with('0'), "tie candidate has a shorter form");
+    Some(out)
+}
+
+/// True iff `abs == t × 10^e / 2` EXACTLY (with `t` odd) — i.e. the binary
+/// value sits precisely on the midpoint between two consecutive decimal
+/// candidates. Pure integer arithmetic on the f64 bit pattern:
+///
+/// ```text
+/// m × 2^q == t × 10^e / 2   ⇔   m × 2^(q+1−e) == t × 5^e
+/// ```
+///
+/// with every power moved to whichever side keeps it non-negative. Any
+/// `u128` overflow returns `false`, which is sound: both sides of a
+/// genuine tie are bounded well under 2^128 (see caller).
+fn is_exact_decimal_midpoint(abs: f64, t: u128, e: i32) -> bool {
+    let bits = abs.to_bits();
+    let frac = bits & ((1u64 << 52) - 1);
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    // abs = m × 2^q exactly (subnormals have no implicit bit).
+    let (m, q) = if biased == 0 {
+        (frac as u128, -1074i32)
+    } else {
+        ((frac | (1u64 << 52)) as u128, biased - 1075)
+    };
+    if m == 0 {
+        return false;
+    }
+    let two = q + 1 - e;
+    // lhs = m × 2^max(two,0) × 5^max(−e,0)
+    // rhs = t × 2^max(−two,0) × 5^max(e,0)
+    let lhs = checked_scale(m, two.max(0) as u32, (-e).max(0) as u32);
+    let rhs = checked_scale(t, (-two).max(0) as u32, e.max(0) as u32);
+    matches!((lhs, rhs), (Some(a), Some(b)) if a == b)
+}
+
+/// `v × 2^p2 × 5^p5` in `u128`, `None` on overflow. `<<` alone discards
+/// high bits silently, so the shift is guarded by `leading_zeros`.
+fn checked_scale(v: u128, p2: u32, p5: u32) -> Option<u128> {
+    if p2 >= 128 || v.leading_zeros() < p2 {
+        return None;
+    }
+    let mut acc = v << p2;
+    for _ in 0..p5 {
+        acc = acc.checked_mul(5)?;
+    }
+    Some(acc)
 }
 
 /// `'+'` for a non-negative ECMAScript exponent, `'-'` otherwise. RFC 8785

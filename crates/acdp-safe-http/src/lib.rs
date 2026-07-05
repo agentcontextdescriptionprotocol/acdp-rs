@@ -168,6 +168,12 @@ impl SsrfPolicy {
     /// `#[doc(hidden)]` because production must never use this — see
     /// [`Self::allow_loopback_resolved`].
     #[doc(hidden)]
+    #[cfg_attr(
+        not(feature = "test-transport"),
+        deprecated(
+            note = "SSRF-relaxed test-only constructor: enable the `test-transport` feature to use it without this warning; the ungated fallback is removed in 0.4.0"
+        )
+    )]
     pub fn allow_test_loopback() -> Self {
         Self {
             allow_loopback_resolved: true,
@@ -428,8 +434,14 @@ fn check_safe_ip(ip: IpAddr) -> Result<(), AcdpError> {
 /// forbidden range (RFC-ACDP-0006 §7.1 / RFC-ACDP-0008 §4.8). Shared by
 /// [`SsrfPolicy::pin_resolved_ip`] and [`SafeDnsResolver::resolve`] so
 /// both apply identical reject-all semantics — never silent filtering.
+///
+/// Public because it is the canonical enforcement point the
+/// mixed-answer conformance fixtures pin (`did-ssrf-004`,
+/// `data-ref-ssrf-004`, `fed-007`), and so implementations that resolve
+/// DNS themselves can reuse the reject-all rule instead of
+/// re-implementing it (filter-and-proceed is explicitly non-conformant).
 #[cfg(feature = "client")]
-fn reject_if_any_forbidden(
+pub fn reject_if_any_forbidden(
     policy: &SsrfPolicy,
     host: &str,
     candidates: &[SocketAddr],
@@ -644,6 +656,7 @@ mod tests {
     /// listener.
     #[cfg(feature = "client")]
     #[test]
+    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
     fn safe_client_builds_with_loopback_policy() {
         assert!(safe_client(
             &SsrfPolicy::allow_test_loopback(),

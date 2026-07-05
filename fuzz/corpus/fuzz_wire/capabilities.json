@@ -1,0 +1,1 @@
+{"acdp_version":"0.1.0","registry_did":"did:web:registry.example.com","supported_signature_algorithms":["ed25519"],"supported_did_methods":["did:web"],"profiles":["acdp-registry-core","acdp-registry-discovery"],"limits":{"max_payload_bytes":1048576,"max_embedded_bytes":65536,"idempotency_key_ttl_seconds":86400},"anonymous_public_reads":true,"supports_idempotency_key":true}

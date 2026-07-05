@@ -352,6 +352,7 @@ impl RegistryStore for InMemoryStore {
                 extensions: Default::default(),
             },
             registry_receipt: None,
+            lineage_head_receipt: None,
             extensions: Default::default(),
         };
         let mut g = self.lock();
@@ -596,35 +597,13 @@ impl RegistryStore for InMemoryStore {
             assign_identifiers(authority, &req.supersedes, first_v1.as_ref(), &validated)?;
 
         // ── 4. Build the stored Body ────────────────────────────────
-        let created_at = acdp_primitives::time::trunc_ms(now);
-        let body = Body {
-            ctx_id: ctx_id.clone(),
-            lineage_id: lineage_id.clone(),
-            origin_registry: authority.to_string(),
-            created_at,
-            content_hash: req.content_hash.clone(),
-            signature: req.signature.clone(),
-            version: req.version,
-            supersedes: req.supersedes.clone(),
-            agent_id: req.agent_id.clone(),
-            contributors: req.contributors.clone(),
-            title: req.title.clone(),
-            context_type: req.context_type.clone(),
-            data_refs: req.data_refs.clone(),
-            derived_from: req.derived_from.clone(),
-            visibility: req.visibility.clone(),
-            audience: req.audience.clone(),
-            acdp_version: req.acdp_version.clone(),
-            description: req.description.clone(),
-            summary: req.summary.clone(),
-            tags: req.tags.clone(),
-            domain: req.domain.clone(),
-            expires_at: req.expires_at,
-            data_period: req.data_period.clone(),
-            metadata: req.metadata.clone(),
-            schema_uri: req.schema_uri.clone(),
-            extensions: Default::default(),
-        };
+        // Single materialization point (IMP-02): the constructor copies
+        // every producer field and ms-truncates `created_at`, so this
+        // backend cannot drift from the SQL backends when a producer
+        // field is added.
+        let body =
+            Body::from_publish_request(req, ctx_id.clone(), lineage_id.clone(), authority, now);
+        let created_at = body.created_at;
 
         // ── 5. Insert (mirrors `put` but inline so we keep the lock) ─
         let ctx_id_str = body.ctx_id.0.clone();
@@ -649,6 +628,10 @@ impl RegistryStore for InMemoryStore {
                 extensions: Default::default(),
             },
             registry_receipt: registry_receipt.clone(),
+            // Head receipts are ephemeral serve-time attestations —
+            // never persisted; `RegistryServer::current` mints per
+            // response (RFC-ACDP-0011 §6).
+            lineage_head_receipt: None,
             extensions: Default::default(),
         };
         g.by_ctx.insert(ctx_id_str.clone(), stored);
@@ -1402,6 +1385,7 @@ mod tests {
                 max_payload_bytes: 1_048_576,
                 max_embedded_bytes: 65_536,
                 idempotency_key_ttl_seconds: None,
+                max_publish_per_minute: None,
             },
             read_authentication_methods: vec![],
             anonymous_public_reads: true,

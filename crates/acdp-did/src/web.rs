@@ -54,19 +54,46 @@ pub struct WebResolver {
 #[cfg(feature = "client")]
 impl WebResolver {
     /// Build a resolver with the default LRU capacity (1000 entries).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying HTTP client cannot be built (e.g. the
+    /// TLS backend fails to initialize). Use [`Self::try_new`] to
+    /// handle that failure as a `Result` instead.
     pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_CACHE_CAPACITY)
+        Self::try_new().expect("failed to build HTTP client for DID resolver")
+    }
+
+    /// Fallible variant of [`Self::new`]: builds a resolver with the
+    /// default LRU capacity (1000 entries), returning an error instead
+    /// of panicking if the underlying HTTP client cannot be built.
+    pub fn try_new() -> Result<Self, AcdpError> {
+        Self::try_with_capacity(DEFAULT_CACHE_CAPACITY)
     }
 
     /// Build a resolver with a custom LRU capacity.
     ///
     /// # Panics
     ///
-    /// Panics if `capacity == 0`. Use a positive capacity; the LRU
-    /// model has no semantically valid empty configuration.
+    /// Panics if `capacity == 0` — use a positive capacity; the LRU
+    /// model has no semantically valid empty configuration — or if the
+    /// underlying HTTP client cannot be built. Use
+    /// [`Self::try_with_capacity`] to handle the HTTP-client failure
+    /// as a `Result` instead.
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::try_with_capacity(capacity).expect("failed to build HTTP client for DID resolver")
+    }
+
+    /// Fallible variant of [`Self::with_capacity`]: returns an error
+    /// instead of panicking if the underlying HTTP client cannot be
+    /// built.
+    ///
+    /// # Panics
+    ///
+    /// Still panics if `capacity == 0`; that is a programmer error, not
+    /// a runtime condition.
+    pub fn try_with_capacity(capacity: usize) -> Result<Self, AcdpError> {
         Self::from_parts(capacity, SsrfPolicy::default(), None)
-            .expect("failed to build HTTP client for DID resolver")
     }
 
     /// Build a resolver that trusts the given PEM-encoded root certificate
@@ -99,6 +126,13 @@ impl WebResolver {
     /// port appearing in the DID. Uses the loopback-permitting SSRF
     /// policy. Use only in tests.
     #[doc(hidden)]
+    #[cfg_attr(
+        not(feature = "test-transport"),
+        deprecated(
+            note = "SSRF-relaxed test-only constructor: enable the `test-transport` feature to use it without this warning; the ungated fallback is removed in 0.4.0"
+        )
+    )]
+    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
     pub fn with_test_endpoint(
         pem: &[u8],
         host: &str,
@@ -142,15 +176,28 @@ impl WebResolver {
     /// Relax the policy **only** in a test harness that resolves
     /// `did:web:localhost…` against an in-process loopback server.
     /// Production callers MUST keep the default.
-    pub fn with_ssrf_policy(mut self, policy: SsrfPolicy) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the underlying HTTP client cannot be rebuilt. Use
+    /// [`Self::try_with_ssrf_policy`] to handle that failure as a
+    /// `Result` instead.
+    pub fn with_ssrf_policy(self, policy: SsrfPolicy) -> Self {
+        self.try_with_ssrf_policy(policy)
+            .expect("rebuild HTTP client for DID resolver")
+    }
+
+    /// Fallible variant of [`Self::with_ssrf_policy`]: returns an error
+    /// instead of panicking if the underlying HTTP client cannot be
+    /// rebuilt.
+    pub fn try_with_ssrf_policy(mut self, policy: SsrfPolicy) -> Result<Self, AcdpError> {
         // Rebuild the HTTP client so the DNS resolver hook carries the
         // new policy. `build_http_client` is fallible only on bad cert
         // PEM input; we already validated it at construction time.
-        let http = build_http_client(self.root_cert_pem.as_deref(), &policy)
-            .expect("rebuild HTTP client for DID resolver");
+        let http = build_http_client(self.root_cert_pem.as_deref(), &policy)?;
         self.http = http;
         self.ssrf_policy = policy;
-        self
+        Ok(self)
     }
 
     /// Resolve a `did:web:…` DID to a DID document.
