@@ -275,9 +275,9 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "arc-swap"
@@ -515,9 +515,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
-version = "0.4.44"
+version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "js-sys",
@@ -2074,9 +2074,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -2209,9 +2209,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "indexmap",
  "itoa",
@@ -2465,9 +2465,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.1"
+version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
+checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
  "bytes",
  "libc",
@@ -2652,9 +2652,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.23.1"
+version = "1.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
+checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -3259,18 +3259,18 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.8.2"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
  "zeroize_derive",
 ]
 
 [[package]]
 name = "zeroize_derive"
-version = "1.4.3"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
 dependencies = [
  "proc-macro2",
  "quote",
