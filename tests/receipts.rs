@@ -60,8 +60,6 @@ struct Harness {
     capabilities_json: Arc<RwLock<serde_json::Value>>,
     resolver: WebResolver,
 }
-
-#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn start_harness(registry_receipt_pub: &[u8; 32], producer_pub: &[u8; 32]) -> Harness {
     let registry_doc = ed25519_did_doc(REGISTRY_DID, "receipt-key-1", registry_receipt_pub);
     let producer_doc = Arc::new(RwLock::new(ed25519_did_doc(
@@ -131,7 +129,6 @@ async fn start_harness(registry_receipt_pub: &[u8; 32], producer_pub: &[u8; 32])
 }
 
 impl Harness {
-    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
     fn client(&self) -> RegistryClient {
         RegistryClient::with_test_endpoint(
             &format!("https://{REGISTRY_AUTHORITY}"),
@@ -462,7 +459,6 @@ const RCPT_001_SIGNATURE: &str =
 /// does not advertise the profile resolves receipt-lessly under the
 /// v0.1.0 trust model.
 #[tokio::test]
-#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn fed_009_missing_receipt_from_advertising_upstream_fails() {
     use acdp::client::CrossRegistryResolver;
 

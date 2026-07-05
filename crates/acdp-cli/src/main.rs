@@ -192,13 +192,12 @@ fn classify(e: &AcdpError) -> &'static str {
 /// the crate's subprocess integration tests can drive an in-process HTTP
 /// mock registry. It is intentionally undocumented in `--help`; never set
 /// it outside tests.
-#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 fn registry_client(url: &str) -> Result<RegistryClient, AcdpError> {
+    #[cfg(feature = "test-transport")]
     if std::env::var_os("ACDP_INSECURE_TRANSPORT").is_some() {
-        RegistryClient::with_test_transport(url)
-    } else {
-        RegistryClient::new(url)
+        return RegistryClient::with_test_transport(url);
     }
+    RegistryClient::new(url)
 }
 
 async fn cmd_capabilities(rest: &[String]) -> Result<(), CliError> {

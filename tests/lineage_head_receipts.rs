@@ -123,8 +123,6 @@ struct Harness {
     current_json: Arc<RwLock<Option<serde_json::Value>>>,
     resolver: WebResolver,
 }
-
-#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn start_harness(caps_json: serde_json::Value) -> Harness {
     let registry_pub = SigningKey::from_bytes(&RECEIPT_SEED).verifying_key_bytes();
     let registry_doc = ed25519_did_doc(REGISTRY_DID, "receipt-key-1", &registry_pub);
@@ -169,7 +167,6 @@ async fn start_harness(caps_json: serde_json::Value) -> Harness {
 }
 
 impl Harness {
-    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
     fn client(&self) -> RegistryClient {
         RegistryClient::with_test_endpoint(
             &format!("https://{REGISTRY_AUTHORITY}"),

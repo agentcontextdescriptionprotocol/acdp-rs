@@ -126,13 +126,7 @@ impl WebResolver {
     /// port appearing in the DID. Uses the loopback-permitting SSRF
     /// policy. Use only in tests.
     #[doc(hidden)]
-    #[cfg_attr(
-        not(feature = "test-transport"),
-        deprecated(
-            note = "SSRF-relaxed test-only constructor: enable the `test-transport` feature to use it without this warning; the ungated fallback is removed in 0.4.0"
-        )
-    )]
-    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
+    #[cfg(feature = "test-transport")]
     pub fn with_test_endpoint(
         pem: &[u8],
         host: &str,

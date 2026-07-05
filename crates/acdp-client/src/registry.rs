@@ -74,13 +74,7 @@ impl RegistryClient {
     /// crate's `tests/helpers/tls_did_server.rs` harness so the spec
     /// fixtures `fed-001..006` can drive `CrossRegistryResolver`
     /// end-to-end without going over the network.
-    #[cfg_attr(
-        not(feature = "test-transport"),
-        deprecated(
-            note = "SSRF-relaxed test-only constructor: enable the `test-transport` feature to use it without this warning; the ungated fallback is removed in 0.4.0"
-        )
-    )]
-    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
+    #[cfg(feature = "test-transport")]
     pub fn with_root_cert_pem(base_url: &str, pem: &[u8]) -> Result<Self, AcdpError> {
         // Drives an in-process HTTPS server on loopback, so the SSRF
         // policy must permit a loopback-resolved answer. All other
@@ -97,12 +91,7 @@ impl RegistryClient {
     /// posture. This constructor exists solely to keep the test harness on
     /// loopback HTTP.
     #[doc(hidden)]
-    #[cfg_attr(
-        not(feature = "test-transport"),
-        deprecated(
-            note = "SSRF-relaxed test-only constructor: enable the `test-transport` feature to use it without this warning; the ungated fallback is removed in 0.4.0"
-        )
-    )]
+    #[cfg(feature = "test-transport")]
     pub fn with_test_transport(base_url: &str) -> Result<Self, AcdpError> {
         let policy = SsrfPolicy {
             reject_ip_literals: false,
@@ -124,13 +113,7 @@ impl RegistryClient {
     /// `localhost`) and pins it to the test server's actual
     /// `127.0.0.1:<port>` via reqwest's `.resolve()` hook.
     #[doc(hidden)]
-    #[cfg_attr(
-        not(feature = "test-transport"),
-        deprecated(
-            note = "SSRF-relaxed test-only constructor: enable the `test-transport` feature to use it without this warning; the ungated fallback is removed in 0.4.0"
-        )
-    )]
-    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
+    #[cfg(feature = "test-transport")]
     pub fn with_test_endpoint(
         base_url: &str,
         target: std::net::SocketAddr,
