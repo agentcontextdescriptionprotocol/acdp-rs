@@ -2363,6 +2363,295 @@ fn rcpt_negative_fixtures() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// lhr-* — lineage-head receipts (ACDP 0.3, RFC-ACDP-0011)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// lhr-001 — lineage-head receipt golden vector (RFC-ACDP-0011 §5):
+/// canonical preimage bytes, receipt hash, Ed25519 signature — via
+/// raw-JSON verification AND a deterministic re-mint from the fixture's
+/// registry test seed (shared with rcpt-001) — plus the fixture's §7
+/// cross-checks (registry binding, v1 lineage derivation, `as_of` form).
+#[test]
+fn lhr_001_lineage_head_receipt_golden_fixture() {
+    use acdp::types::receipt::{LineageHeadReceipt, ReceiptSigner};
+
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/lhr-001-lineage-head-receipt-golden.json");
+    if fixture_missing(&path) {
+        return;
+    }
+    let v = read_json(&path);
+    let vector = &v["vectors"][0];
+    let unsigned = &vector["receipt_unsigned"];
+    let expected = &vector["expected"];
+    let wire = &expected["lineage_head_receipt"];
+
+    // Step 1: JCS canonical form of the unsigned receipt, byte-for-byte.
+    let canonical = acdp::crypto::try_canonicalize_value(unsigned).unwrap();
+    assert_eq!(
+        std::str::from_utf8(&canonical).unwrap(),
+        expected["canonical_form"].as_str().unwrap(),
+        "lhr-001: canonical preimage bytes"
+    );
+
+    // Step 2: preimage hash.
+    let hash = LineageHeadReceipt::preimage_hash_of_value(unsigned).unwrap();
+    assert_eq!(hash.as_str(), expected["receipt_hash"].as_str().unwrap());
+
+    // Step 3: deterministic Ed25519 re-mint reproduces the signature.
+    let seed: [u8; 32] = hex::decode(
+        v["registry_test_keypair"]["private_seed_hex"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    let signer = ReceiptSigner::new(
+        acdp::crypto::SigningKey::from_bytes(&seed),
+        unsigned["registry_did"].as_str().unwrap(),
+        v["registry_test_keypair"]["key_id"].as_str().unwrap(),
+    )
+    .unwrap();
+    let minted = signer
+        .mint_lineage_head(
+            &acdp::types::LineageId(unsigned["lineage_id"].as_str().unwrap().into()),
+            &acdp::types::CtxId(unsigned["head_ctx_id"].as_str().unwrap().into()),
+            u32::try_from(unsigned["head_version"].as_u64().unwrap()).unwrap(),
+            &acdp::types::Status::parse(unsigned["head_status"].as_str().unwrap()).unwrap(),
+            chrono::DateTime::parse_from_rfc3339(unsigned["as_of"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+        .unwrap();
+    assert_eq!(
+        minted.signature.value,
+        expected["signature_value_base64"].as_str().unwrap(),
+        "lhr-001: deterministic Ed25519 re-mint must reproduce the fixture signature"
+    );
+    assert_eq!(
+        serde_json::to_value(&minted).unwrap(),
+        *wire,
+        "lhr-001: minted wire form must equal the fixture receipt"
+    );
+
+    // Step 4: wire receipt round-trips the closed parse and verifies
+    // against the registry test public key over the RAW wire preimage.
+    let pub_bytes: [u8; 32] = hex::decode(
+        v["registry_test_keypair"]["public_key_hex"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
+    let receipt = LineageHeadReceipt::from_value(wire).unwrap();
+    let raw_hash = LineageHeadReceipt::preimage_hash_of_value(wire).unwrap();
+    assert_eq!(raw_hash, hash, "raw wire preimage equals unsigned preimage");
+    receipt
+        .verify_signature_against_hash(&raw_hash, Some(&pub_bytes), None)
+        .unwrap();
+
+    // Step 5 cross-checks (RFC-ACDP-0011 §7): registry binding against
+    // the golden authority, v1 lineage derivation, `as_of` byte form.
+    receipt
+        .cross_check_registry_binding("registry.example.com", "did:web:registry.example.com")
+        .unwrap();
+    assert_eq!(receipt.head_version, 1);
+    assert_eq!(
+        acdp::crypto::derive_lineage_id(&receipt.head_ctx_id),
+        receipt.lineage_id,
+        "lhr-001: v1 head means lineage_id = lin:sha256:SHA-256(head_ctx_id)"
+    );
+    assert_eq!(receipt.head_status, "active");
+    LineageHeadReceipt::validate_as_of_form(wire).unwrap();
+}
+
+/// lhr-002/003/004 — lineage-head receipt verification rejections,
+/// data-driven from the fixtures (full client behavior in
+/// `tests/lineage_head_receipts.rs`).
+#[test]
+fn lhr_negative_fixtures() {
+    use acdp::types::receipt::{LineageHeadReceipt, ReceiptSigner};
+    use acdp::types::{CtxId, Status};
+
+    let Some(root) = spec_root() else { return };
+    let dir = root.join("schemas/conformance");
+
+    // lhr-002: stale head — the receipt is genuinely signed (steps 1–4
+    // pass) but attests v1 while /current serves v2 → §7 step 5 head
+    // binding MUST fail with invalid_receipt.
+    let p = dir.join("lhr-002-stale-head-mismatch.json");
+    if !fixture_missing(&p) {
+        let v = read_json(&p);
+        let served = &v["input"]["served_response"];
+        let wire = &served["lineage_head_receipt"];
+        let pub_bytes: [u8; 32] =
+            hex::decode(v["input"]["registry_public_key_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+
+        let receipt = LineageHeadReceipt::from_value(wire).unwrap();
+        // Premise: the cryptography is NOT the failure.
+        let raw_hash = LineageHeadReceipt::preimage_hash_of_value(wire).unwrap();
+        receipt
+            .verify_signature_against_hash(&raw_hash, Some(&pub_bytes), None)
+            .expect("lhr-002 premise: the stale receipt's signature verifies");
+        receipt
+            .cross_check_registry_binding("registry.example.com", "did:web:registry.example.com")
+            .expect("lhr-002 premise: registry binding holds");
+        receipt
+            .cross_check_lineage(&acdp::types::LineageId(
+                served["body_excerpt"]["lineage_id"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+            ))
+            .expect("lhr-002 premise: lineage binding holds");
+
+        // §7 step 5: on /current the receipt MUST describe the very head
+        // being served.
+        let served_ctx = CtxId(served["body_excerpt"]["ctx_id"].as_str().unwrap().into());
+        let served_version =
+            u32::try_from(served["body_excerpt"]["version"].as_u64().unwrap()).unwrap();
+        let served_status =
+            Status::parse(served["registry_state"]["status"].as_str().unwrap()).unwrap();
+        let err = receipt
+            .cross_check_head(&served_ctx, served_version, &served_status, true)
+            .expect_err("lhr-002: stale head binding must fail");
+        assert!(
+            matches!(err, acdp::AcdpError::InvalidReceipt(_)),
+            "got {err:?}"
+        );
+    }
+
+    // lhr-003: registry_did ≠ serving authority / capabilities.registry_did
+    // → §7 step 3 MUST fail regardless of the signature.
+    let p = dir.join("lhr-003-registry-did-mismatch.json");
+    if !fixture_missing(&p) {
+        let v = read_json(&p);
+        let serving = v["input"]["serving_authority"].as_str().unwrap();
+        let caps_did = v["input"]["capabilities_registry_did"].as_str().unwrap();
+        let excerpt = &v["input"]["receipt_excerpt"];
+        assert_ne!(
+            acdp::did::authority_to_did_web(serving),
+            excerpt["registry_did"].as_str().unwrap(),
+            "lhr-003 premise: the claimed registry_did must not match the serving authority"
+        );
+
+        // Materialize the excerpt as a full receipt (the fixture replays
+        // the lhr-001 golden receipt verbatim; signature value is
+        // irrelevant to step 3, which runs before signature checking).
+        let receipt = LineageHeadReceipt::from_value(&serde_json::json!({
+            "receipt_version": excerpt["receipt_version"],
+            "registry_did": excerpt["registry_did"],
+            "lineage_id":
+                "lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a",
+            "head_ctx_id": excerpt["head_ctx_id"],
+            "head_version": 1,
+            "head_status": "active",
+            "as_of": "2026-07-04T09:00:00.000Z",
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": excerpt["signature_key_id"],
+                "value": "AA=="
+            }
+        }))
+        .unwrap();
+        let err = receipt
+            .cross_check_registry_binding(serving, caps_did)
+            .expect_err("lhr-003: foreign registry_did must fail the registry binding");
+        assert!(
+            matches!(err, acdp::AcdpError::InvalidReceipt(_)),
+            "got {err:?}"
+        );
+
+        // Additional failure cases enumerated by the fixture:
+        // (a) non-did:web registry_did fails the closed parse.
+        let mut did_key = serde_json::to_value(&receipt).unwrap();
+        did_key["registry_did"] = serde_json::json!("did:key:zNotWeb");
+        assert!(matches!(
+            LineageHeadReceipt::from_value(&did_key).unwrap_err(),
+            acdp::AcdpError::InvalidReceipt(_)
+        ));
+        // (b) signature.key_id DID portion ≠ registry_did.
+        let mut foreign_key = receipt.clone();
+        foreign_key.signature.key_id = "did:web:other.example#receipt-key-1".into();
+        assert!(foreign_key
+            .cross_check_registry_binding("registry.example.com", "did:web:registry.example.com")
+            .is_err());
+        // (c) head_ctx_id authority ≠ registry_did method-specific id.
+        let mut foreign_head = receipt.clone();
+        foreign_head.registry_did = "did:web:hostile.example".into();
+        foreign_head.signature.key_id = "did:web:hostile.example#receipt-key-1".into();
+        assert!(foreign_head
+            .cross_check_registry_binding("hostile.example", "did:web:hostile.example")
+            .is_err());
+    }
+
+    // lhr-004: future as_of beyond the skew allowance → §7 step 6 MUST
+    // fail. The receipt is VALIDLY SIGNED — the failure is the forged
+    // freshness claim, not the cryptography.
+    let p = dir.join("lhr-004-future-as-of.json");
+    if !fixture_missing(&p) {
+        let v = read_json(&p);
+        let wire = &v["input"]["lineage_head_receipt"];
+        let pub_bytes: [u8; 32] =
+            hex::decode(v["input"]["registry_public_key_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let consumer_clock =
+            chrono::DateTime::parse_from_rfc3339(v["input"]["consumer_clock"].as_str().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+        let skew =
+            chrono::Duration::seconds(v["input"]["skew_allowance_seconds"].as_i64().unwrap());
+
+        let receipt = LineageHeadReceipt::from_value(wire).unwrap();
+        // Genuinely-signed premise: steps 1–5 pass.
+        let raw_hash = LineageHeadReceipt::preimage_hash_of_value(wire).unwrap();
+        receipt
+            .verify_signature_against_hash(&raw_hash, Some(&pub_bytes), None)
+            .expect("lhr-004 premise: the future-dated receipt's signature verifies");
+        receipt
+            .cross_check_registry_binding("registry.example.com", "did:web:registry.example.com")
+            .expect("lhr-004 premise: registry binding holds");
+
+        // Step 6: forged freshness rejection.
+        let err = receipt
+            .check_as_of_skew(consumer_clock, skew)
+            .expect_err("lhr-004: future as_of beyond skew must fail");
+        assert!(
+            matches!(err, acdp::AcdpError::InvalidReceipt(_)),
+            "got {err:?}"
+        );
+
+        // Boundary from the fixture: an as_of within the allowance
+        // (consumer_clock + 60s) MUST NOT fail step 6.
+        let signer = ReceiptSigner::new(
+            acdp::crypto::SigningKey::from_bytes(&[0x11u8; 32]),
+            "did:web:registry.example.com",
+            "did:web:registry.example.com#receipt-key-1",
+        )
+        .unwrap();
+        let near_future = signer
+            .mint_lineage_head(
+                &receipt.lineage_id,
+                &receipt.head_ctx_id,
+                receipt.head_version,
+                &Status::Active,
+                consumer_clock + chrono::Duration::seconds(60),
+            )
+            .unwrap();
+        near_future
+            .check_as_of_skew(consumer_clock, skew)
+            .expect("lhr-004 boundary: honest clock skew within the allowance must pass");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // cur-* — cursor pagination failure modes (RFC-ACDP-0005 §2.5.4)
 // ═══════════════════════════════════════════════════════════════════════
 

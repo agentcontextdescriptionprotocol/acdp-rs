@@ -41,6 +41,13 @@ pub struct VerificationPolicy {
     /// Historical-key handling (ACDP 0.2, WS-B). Default
     /// [`HistoricalKeyPolicy::AcceptWithReceipt`].
     pub historical_keys: HistoricalKeyPolicy,
+
+    /// Lineage-head receipt handling on `/current` fetches (ACDP 0.3,
+    /// RFC-ACDP-0011). Only consulted by
+    /// [`VerifiedContext::fetch_current_with_policy`]; plain retrieval
+    /// preserves any `lineage_head_receipt` verbatim without verifying
+    /// it. Default [`LineageHeadPolicy::default`].
+    pub lineage_head: LineageHeadPolicy,
 }
 
 impl Default for VerificationPolicy {
@@ -50,6 +57,7 @@ impl Default for VerificationPolicy {
             allow_unknown_status: true,
             receipts: ReceiptPolicy::VerifyIfPresent,
             historical_keys: HistoricalKeyPolicy::AcceptWithReceipt,
+            lineage_head: LineageHeadPolicy::default(),
         }
     }
 }
@@ -70,6 +78,47 @@ pub enum ReceiptPolicy {
     /// claims (`ctx_id`, `created_at`, `origin_registry`) are
     /// assertions, not proofs, without a receipt.
     Require,
+}
+
+/// How to treat the optional `lineage_head_receipt` on
+/// `GET /lineages/{id}/current` responses (ACDP 0.3, RFC-ACDP-0011).
+///
+/// The presence handling reuses the [`ReceiptPolicy`] vocabulary; the
+/// two numeric knobs are the RFC's consumer-side parameters:
+///
+/// - `max_clock_skew_seconds` — §7 step 6's forward-skew allowance. A
+///   receipt whose `as_of` is further in the future **fails
+///   verification** (`invalid_receipt`, fixture `lhr-004`). RFC
+///   RECOMMENDED: 120.
+/// - `max_age_seconds` — §6's freshness policy. A receipt older than
+///   this is still *verified* (it may be perfectly genuine — merely
+///   old); it is reported distinctly via
+///   [`VerifiedContext::head_receipt_stale`], never as a verification
+///   failure. RFC RECOMMENDED default: 300. `None` disables the
+///   staleness verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineageHeadPolicy {
+    /// Presence handling: `Ignore` (skip verification, preserve
+    /// verbatim), `VerifyIfPresent` (default), or `Require` (fail
+    /// closed unless present AND verified — appropriate when the
+    /// registry advertises `acdp-registry-head-receipts`, under which
+    /// a head receipt on `/current` is REQUIRED, RFC-ACDP-0011 §6).
+    pub receipts: ReceiptPolicy,
+    /// RFC-ACDP-0011 §7 step 6 clock-skew allowance (default 120 s).
+    pub max_clock_skew_seconds: u32,
+    /// RFC-ACDP-0011 §6 maximum acceptable receipt age for the
+    /// staleness verdict (default `Some(300)`).
+    pub max_age_seconds: Option<u32>,
+}
+
+impl Default for LineageHeadPolicy {
+    fn default() -> Self {
+        Self {
+            receipts: ReceiptPolicy::VerifyIfPresent,
+            max_clock_skew_seconds: 120,
+            max_age_seconds: Some(300),
+        }
+    }
 }
 
 /// How to treat a producer key that is present in the DID document's
@@ -128,6 +177,10 @@ impl VerificationPolicy {
             allow_unknown_status: true,
             receipts: ReceiptPolicy::Ignore,
             historical_keys: HistoricalKeyPolicy::Reject,
+            lineage_head: LineageHeadPolicy {
+                receipts: ReceiptPolicy::Ignore,
+                ..LineageHeadPolicy::default()
+            },
         }
     }
 }
@@ -143,6 +196,20 @@ pub struct VerifiedContext {
     /// policy verified it (RFC-ACDP-0010). `None` under
     /// [`ReceiptPolicy::Ignore`] or when the registry minted none.
     pub verified_receipt: Option<acdp_types::receipt::RegistryReceipt>,
+    /// The verified lineage-head receipt (ACDP 0.3, RFC-ACDP-0011),
+    /// when one was present and the policy verified it. Only populated
+    /// by [`Self::fetch_current`] / [`Self::fetch_current_with_policy`]
+    /// — plain retrieval preserves the raw value verbatim without
+    /// verification. Per §7 this verdict is independent of the body
+    /// verdict and the RFC-ACDP-0010 receipt verdict.
+    pub verified_head_receipt: Option<acdp_types::receipt::LineageHeadReceipt>,
+    /// RFC-ACDP-0011 §6 freshness verdict for the verified head
+    /// receipt, reported distinctly from verification: `Some(true)`
+    /// when the (genuine, verified) receipt's `as_of` is older than
+    /// [`LineageHeadPolicy::max_age_seconds`]; `Some(false)` when
+    /// within policy; `None` when there is no verified head receipt or
+    /// the max-age knob is disabled.
+    pub head_receipt_stale: Option<bool>,
 }
 
 impl VerifiedContext {
@@ -175,7 +242,137 @@ impl VerifiedContext {
         policy: &VerificationPolicy,
     ) -> Result<Self, AcdpError> {
         let ctx = client.retrieve(ctx_id).await?;
+        let (key_status, verified_receipt) =
+            Self::verify_retrieved(client, resolver, &ctx, ctx_id, policy).await?;
+        Ok(Self {
+            inner: ctx,
+            key_status,
+            verified_receipt,
+            verified_head_receipt: None,
+            head_receipt_stale: None,
+        })
+    }
 
+    /// Retrieve the current head of a lineage
+    /// (`GET /lineages/{lineage_id}/current`) and verify it with the
+    /// strict default [`VerificationPolicy`] — including the
+    /// lineage-head receipt when the registry minted one (ACDP 0.3,
+    /// RFC-ACDP-0011).
+    pub async fn fetch_current(
+        client: &RegistryClient,
+        resolver: &WebResolver,
+        lineage_id: &acdp_types::primitives::LineageId,
+    ) -> Result<Self, AcdpError> {
+        Self::fetch_current_with_policy(
+            client,
+            resolver,
+            lineage_id,
+            &VerificationPolicy::default(),
+        )
+        .await
+    }
+
+    /// Retrieve + verify the current head of a lineage with
+    /// caller-controlled strictness.
+    ///
+    /// Runs the same pipeline as [`Self::fetch_with_policy`] against
+    /// the `/current` response (the expected `ctx_id` is the served
+    /// body's own — there is no requested identifier on this endpoint;
+    /// the head receipt's §7 step 5 byte-match is what binds it), then
+    /// applies `policy.lineage_head` to the response's
+    /// `lineage_head_receipt` per RFC-ACDP-0011 §7:
+    ///
+    /// - [`ReceiptPolicy::Ignore`] — the raw value is preserved
+    ///   verbatim, unverified.
+    /// - [`ReceiptPolicy::VerifyIfPresent`] — verified when present
+    ///   (absence is fine: the registry may not advertise
+    ///   `acdp-registry-head-receipts`).
+    /// - [`ReceiptPolicy::Require`] — fail closed with
+    ///   `invalid_receipt` unless present AND verified.
+    ///
+    /// Verification fetches the registry's capabilities document for
+    /// the §7 step 3 `capabilities.registry_did` binding. Staleness
+    /// beyond `policy.lineage_head.max_age_seconds` is a *freshness*
+    /// verdict reported via [`Self::head_receipt_stale`], never a
+    /// verification failure (§6).
+    pub async fn fetch_current_with_policy(
+        client: &RegistryClient,
+        resolver: &WebResolver,
+        lineage_id: &acdp_types::primitives::LineageId,
+        policy: &VerificationPolicy,
+    ) -> Result<Self, AcdpError> {
+        let ctx = client.current(lineage_id).await?;
+        let served_ctx_id = ctx.body.ctx_id.clone();
+        let (key_status, verified_receipt) =
+            Self::verify_retrieved(client, resolver, &ctx, &served_ctx_id, policy).await?;
+
+        // ── Lineage-head receipt phase (RFC-ACDP-0011) ──────────────
+        let (verified_head_receipt, head_receipt_stale) =
+            match (policy.lineage_head.receipts, &ctx.lineage_head_receipt) {
+                (ReceiptPolicy::Ignore, _) | (ReceiptPolicy::VerifyIfPresent, None) => (None, None),
+                (ReceiptPolicy::Require, None) => {
+                    return Err(AcdpError::InvalidReceipt(
+                        "policy requires a lineage-head receipt but the /current response \
+                         carries none (registry without the acdp-registry-head-receipts \
+                         profile?)"
+                            .into(),
+                    ));
+                }
+                (_, Some(value)) => {
+                    let serving_authority = client
+                        .authority()
+                        .unwrap_or_else(|| served_ctx_id.authority().to_string());
+                    // §7 step 3 needs capabilities.registry_did — fetched
+                    // from the same authority the context came from.
+                    let caps = client.capabilities().await?;
+                    let receipt = super::receipt::verify_lineage_head_receipt_value(
+                        value,
+                        lineage_id,
+                        &served_ctx_id,
+                        ctx.body.version,
+                        &ctx.registry_state.status,
+                        true, // /current always serves the attested head
+                        &serving_authority,
+                        &caps.registry_did,
+                        chrono::Duration::seconds(
+                            policy.lineage_head.max_clock_skew_seconds as i64,
+                        ),
+                        resolver,
+                    )
+                    .await?;
+                    let stale = policy.lineage_head.max_age_seconds.map(|max| {
+                        receipt.age_at(chrono::Utc::now()) > chrono::Duration::seconds(max as i64)
+                    });
+                    (Some(receipt), stale)
+                }
+            };
+
+        Ok(Self {
+            inner: ctx,
+            key_status,
+            verified_receipt,
+            verified_head_receipt,
+            head_receipt_stale,
+        })
+    }
+
+    /// The shared retrieve-side verification pipeline: body schema,
+    /// hash recomputation, RFC-ACDP-0010 receipt phase, signature
+    /// phase (with the receipt-gated historical-key fallback), and the
+    /// unknown-status policy check.
+    async fn verify_retrieved(
+        client: &RegistryClient,
+        resolver: &WebResolver,
+        ctx: &FullContext,
+        expected_ctx_id: &CtxId,
+        policy: &VerificationPolicy,
+    ) -> Result<
+        (
+            KeyAuthorization,
+            Option<acdp_types::receipt::RegistryReceipt>,
+        ),
+        AcdpError,
+    > {
         if policy.validate_body_schema {
             acdp_validation::validate_body(&ctx.body)?;
         }
@@ -191,7 +388,7 @@ impl VerifiedContext {
         // key path is gated on a verified receipt.
         let serving_authority = client
             .authority()
-            .unwrap_or_else(|| ctx_id.authority().to_string());
+            .unwrap_or_else(|| expected_ctx_id.authority().to_string());
         let verified_receipt = match (policy.receipts, &ctx.registry_receipt) {
             (ReceiptPolicy::Ignore, _) | (ReceiptPolicy::VerifyIfPresent, None) => None,
             (ReceiptPolicy::Require, None) => {
@@ -212,7 +409,7 @@ impl VerifiedContext {
                 Some(
                     super::receipt::verify_receipt_value(
                         value,
-                        ctx_id,
+                        expected_ctx_id,
                         &ctx.body,
                         &ctx.body.content_hash,
                         &fingerprint,
@@ -250,11 +447,7 @@ impl VerifiedContext {
             }
         }
 
-        Ok(Self {
-            inner: ctx,
-            key_status,
-            verified_receipt,
-        })
+        Ok((key_status, verified_receipt))
     }
 
     /// Retrieve + verify, returning a structured [`VerificationReport`]
@@ -356,6 +549,8 @@ impl VerifiedContext {
                 inner: ctx,
                 key_status: KeyAuthorization::CurrentlyAuthorized,
                 verified_receipt: None,
+                verified_head_receipt: None,
+                head_receipt_stale: None,
             })
         } else {
             None
@@ -448,6 +643,8 @@ impl VerifiedContext {
                 inner: ctx,
                 key_status: KeyAuthorization::CurrentlyAuthorized,
                 verified_receipt: None,
+                verified_head_receipt: None,
+                head_receipt_stale: None,
             },
             report,
         ))

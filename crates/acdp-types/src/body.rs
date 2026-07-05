@@ -271,6 +271,14 @@ pub struct FullContext {
     /// to the library; preserved verbatim if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_receipt: Option<serde_json::Value>,
+    /// Optional lineage-head receipt (ACDP 0.3, RFC-ACDP-0011): the
+    /// registry's signed serve-time attestation of the current head of
+    /// the lineage. REQUIRED on `GET /lineages/{id}/current` responses
+    /// from registries advertising `acdp-registry-head-receipts`; MAY
+    /// appear on full retrieval; tolerated (and preserved verbatim)
+    /// when absent — non-advertising registries never emit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_head_receipt: Option<serde_json::Value>,
 
     /// Unknown top-level context fields, preserved per
     /// `acdp-context.schema.json` `additionalProperties: true`. Retained

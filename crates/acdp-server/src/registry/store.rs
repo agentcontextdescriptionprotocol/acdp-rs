@@ -352,6 +352,7 @@ impl RegistryStore for InMemoryStore {
                 extensions: Default::default(),
             },
             registry_receipt: None,
+            lineage_head_receipt: None,
             extensions: Default::default(),
         };
         let mut g = self.lock();
@@ -627,6 +628,10 @@ impl RegistryStore for InMemoryStore {
                 extensions: Default::default(),
             },
             registry_receipt: registry_receipt.clone(),
+            // Head receipts are ephemeral serve-time attestations —
+            // never persisted; `RegistryServer::current` mints per
+            // response (RFC-ACDP-0011 §6).
+            lineage_head_receipt: None,
             extensions: Default::default(),
         };
         g.by_ctx.insert(ctx_id_str.clone(), stored);
