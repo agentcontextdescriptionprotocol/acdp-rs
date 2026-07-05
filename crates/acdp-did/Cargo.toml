@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-did"
-version     = "0.1.1"
+version     = "0.1.2"
 edition     = "2021"
 description = "did:web and did:key resolution for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"
@@ -26,7 +26,7 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 acdp-primitives = { path = "../acdp-primitives", version = "0.1.1" }
-acdp-safe-http  = { path = "../acdp-safe-http", version = "0.1.1" }
+acdp-safe-http  = { path = "../acdp-safe-http", version = "0.1.2" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 base64     = "0.22"

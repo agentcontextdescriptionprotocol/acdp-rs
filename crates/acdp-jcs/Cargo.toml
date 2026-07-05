@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-jcs"
-version     = "0.1.1"
+version     = "0.1.2"
 edition     = "2021"
 description = "RFC 8785 JSON Canonicalization Scheme (JCS) implementation used by the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"

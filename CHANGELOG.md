@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
+## [0.3.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.3.0...acdp-v0.3.1) - 2026-07-05
+
+### Added
+
+- *(tracing)* instrument verify pipeline and server publish path
+- *(client)* fallible WebResolver constructors; feature-gate SSRF-relaxed test constructors behind test-transport
+
+### Other
+
+- fix double-comparison lint; docs: fix intra-doc link; chore: bump anyhow past RUSTSEC-2026-0190
+- bind lhr-001..004 fixtures and RFC-ACDP-0011 end-to-end suite
+- rustfmt fuzz target; lockfile update for tracing deps
+- *(bench)* criterion benchmarks for sign/verify, JCS, content-hash, SSRF classify
+
 ## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.2.1...acdp-v0.3.0) - 2026-06-24
 
 ### Other
