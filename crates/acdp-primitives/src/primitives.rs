@@ -215,7 +215,8 @@ pub enum Visibility {
 /// Registered context types plus open-ended custom namespace.
 ///
 /// Wire form is a single string. Standard values (`data_snapshot`,
-/// `analysis`, `prediction`, `alert`) deserialize to the named variants;
+/// `analysis`, `prediction`, `alert`, and — since acdp/0.3.0 —
+/// `key-revocation`, RFC-ACDP-0014 §4) deserialize to the named variants;
 /// any other value MUST be a namespaced custom type matching
 /// `^[a-z][a-z0-9_]*:[a-z][a-z0-9_-]*$` (e.g. `finance:portfolio_snapshot`)
 /// per `acdp-common.schema.json#/$defs/context_type`. Inputs that match
@@ -231,9 +232,35 @@ pub enum ContextType {
     Prediction,
     /// `alert`.
     Alert,
+    /// `key-revocation` — a producer's time-scoped declaration that one
+    /// of its signing keys is compromised (RFC-ACDP-0014 §4; standard in
+    /// acdp/0.3.0). The interim form published on pre-0.3.0 registries
+    /// is the namespaced custom type `acdp:key-revocation`
+    /// ([`ContextType::Custom`]); use [`ContextType::is_key_revocation`]
+    /// to recognize both, as 0.3.0 consumers MUST (RFC-ACDP-0014 §10).
+    KeyRevocation,
     /// Namespaced custom type, e.g. `finance:portfolio_snapshot`.
     /// MUST match `^[a-z][a-z0-9_]*:[a-z][a-z0-9_-]*$`.
     Custom(String),
+}
+
+impl ContextType {
+    /// The interim namespaced form of `key-revocation` accepted from
+    /// pre-0.3.0 registries (RFC-ACDP-0014 §10).
+    pub const KEY_REVOCATION_INTERIM: &'static str = "acdp:key-revocation";
+
+    /// True when this type denotes an RFC-ACDP-0014 key-revocation
+    /// context: the standard `key-revocation` form or the interim
+    /// `acdp:key-revocation` custom form, which 0.3.0 consumers MUST
+    /// treat as equivalent when the body satisfies §4–§5
+    /// (RFC-ACDP-0014 §10).
+    pub fn is_key_revocation(&self) -> bool {
+        match self {
+            ContextType::KeyRevocation => true,
+            ContextType::Custom(s) => s == Self::KEY_REVOCATION_INTERIM,
+            _ => false,
+        }
+    }
 }
 
 impl Serialize for ContextType {
@@ -243,6 +270,7 @@ impl Serialize for ContextType {
             ContextType::Analysis => "analysis",
             ContextType::Prediction => "prediction",
             ContextType::Alert => "alert",
+            ContextType::KeyRevocation => "key-revocation",
             ContextType::Custom(s) => s.as_str(),
         };
         serializer.serialize_str(s)
@@ -257,6 +285,7 @@ impl<'de> Deserialize<'de> for ContextType {
             "analysis" => ContextType::Analysis,
             "prediction" => ContextType::Prediction,
             "alert" => ContextType::Alert,
+            "key-revocation" => ContextType::KeyRevocation,
             other => {
                 // Custom types MUST be namespaced
                 if !is_namespaced_context_type(other) {
@@ -625,11 +654,34 @@ mod tests {
             ("analysis", ContextType::Analysis),
             ("prediction", ContextType::Prediction),
             ("alert", ContextType::Alert),
+            ("key-revocation", ContextType::KeyRevocation),
         ] {
             let parsed: ContextType = serde_json::from_value(json!(s)).unwrap();
             assert_eq!(parsed, expect);
             assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(s));
         }
+    }
+
+    /// RFC-ACDP-0014 §10 — both the standard `key-revocation` form and
+    /// the interim `acdp:key-revocation` custom form MUST be
+    /// recognizable as key-revocation contexts; nothing else is.
+    #[test]
+    fn context_type_key_revocation_recognition() {
+        let standard: ContextType = serde_json::from_value(json!("key-revocation")).unwrap();
+        assert_eq!(standard, ContextType::KeyRevocation);
+        assert!(standard.is_key_revocation());
+
+        // The interim form is a plain namespaced custom type on the
+        // wire but MUST be treated as equivalent by 0.3.0 consumers.
+        let interim: ContextType = serde_json::from_value(json!("acdp:key-revocation")).unwrap();
+        assert_eq!(
+            interim,
+            ContextType::Custom(ContextType::KEY_REVOCATION_INTERIM.into())
+        );
+        assert!(interim.is_key_revocation());
+
+        assert!(!ContextType::DataSnapshot.is_key_revocation());
+        assert!(!ContextType::Custom("acdp:key-rotation".into()).is_key_revocation());
     }
 
     #[test]

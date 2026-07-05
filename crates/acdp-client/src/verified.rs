@@ -48,6 +48,10 @@ pub struct VerificationPolicy {
     /// preserves any `lineage_head_receipt` verbatim without verifying
     /// it. Default [`LineageHeadPolicy::default`].
     pub lineage_head: LineageHeadPolicy,
+
+    /// Key-revocation handling (ACDP 0.3, RFC-ACDP-0014 §7). Default:
+    /// no known revocations — the phase is inert.
+    pub revocations: RevocationPolicy,
 }
 
 impl Default for VerificationPolicy {
@@ -58,8 +62,47 @@ impl Default for VerificationPolicy {
             receipts: ReceiptPolicy::VerifyIfPresent,
             historical_keys: HistoricalKeyPolicy::AcceptWithReceipt,
             lineage_head: LineageHeadPolicy::default(),
+            revocations: RevocationPolicy::default(),
         }
     }
+}
+
+/// Consumer-held key revocations to enforce during verification
+/// (ACDP 0.3, RFC-ACDP-0014 §7).
+///
+/// The revocation signal is **pull-based**: the pipeline does not go
+/// looking for revocations on its own — the caller supplies the
+/// **verified** revocations it holds (from
+/// [`find_revocations`](crate::revocation::find_revocations), an
+/// out-of-band channel, or its own indefinite cache — the statement is
+/// permanent, cache accordingly). When `known` is empty the phase is
+/// inert and verification behaves exactly as before RFC-ACDP-0014.
+///
+/// When the body's signing key matches a supplied revocation, §7
+/// applies: a receipt-attested publish time strictly before the
+/// (earliest, §4) `compromised_since` boundary verifies as
+/// [`KeyAuthorization::HistoricallyAuthorizedPreCompromise`]; at/after
+/// the boundary, or with no verified receipt to place the context at
+/// all, verification **fails closed** with `key_not_authorized` —
+/// regardless of DID-document state and regardless of the receipt's
+/// own validity. Note the interaction with [`ReceiptPolicy::Ignore`]:
+/// an unverified receipt provides no publish time, so a revoked key's
+/// contexts all fail closed under it.
+///
+/// Only put revocations here that you have verified (strict body
+/// pipeline + the §5 not-self-signed rule) and, per §6, that you have
+/// decided to act on: producer-signed ones unconditionally;
+/// registry-attested ones ([`RevocationTrustClass::RegistryAttested`](acdp_types::revocation::RevocationTrustClass))
+/// by default only for contexts served by or receipted by that same
+/// registry, with corroboration before global application.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RevocationPolicy {
+    /// Verified revocations to enforce, matched against the signing
+    /// key's RFC-ACDP-0010 §6 fingerprint. The §4 earliest-
+    /// `compromised_since` rule is applied across entries naming the
+    /// same fingerprint, so include *every* revocation of a lineage,
+    /// superseded ones too.
+    pub known: Vec<acdp_types::revocation::KeyRevocation>,
 }
 
 /// How to treat the optional `registry_receipt` on retrieval
@@ -150,6 +193,21 @@ pub enum KeyAuthorization {
     /// (RFC-ACDP-0010). Weigh accordingly: valid history, not a
     /// current endorsement.
     HistoricallyAuthorized,
+    /// The signing key is **revoked** (a verified RFC-ACDP-0014
+    /// revocation names its fingerprint), but a verified registry
+    /// receipt attests the context was published strictly *before* the
+    /// compromise boundary `compromised_since` — it was signed while
+    /// the key was still the producer's, and verified under the
+    /// RFC-ACDP-0010 §10 historical rule (RFC-ACDP-0014 §7 step 2).
+    ///
+    /// Deliberately distinguishable from BOTH
+    /// [`Self::CurrentlyAuthorized`] and the no-revocation
+    /// [`Self::HistoricallyAuthorized`]: the revocation and its
+    /// boundary MUST be visible in the verdict. Contexts by the same
+    /// key at/after the boundary — or with no verifiable publish time
+    /// — never reach a status at all: they fail closed with
+    /// `key_not_authorized` (§7 steps 3–4).
+    HistoricallyAuthorizedPreCompromise,
 }
 
 impl VerificationPolicy {
@@ -181,6 +239,9 @@ impl VerificationPolicy {
                 receipts: ReceiptPolicy::Ignore,
                 ..LineageHeadPolicy::default()
             },
+            // A 0.1.0-pinned consumer predates RFC-ACDP-0014 and is
+            // unaffected by it (§10): no revocations enforced.
+            revocations: RevocationPolicy::default(),
         }
     }
 }
@@ -421,22 +482,62 @@ impl VerifiedContext {
             }
         };
 
+        // ── Revocation phase (RFC-ACDP-0014 §7) ─────────────────────
+        // Runs after the receipt phase because the boundary comparison
+        // accepts ONLY a receipt-attested publish time (§7 step 1 —
+        // the bare body created_at is registry-assigned and MUST NOT
+        // be used). The verified receipt's key_fingerprint was already
+        // cross-checked against the body's signing key above (§8 step
+        // 5), so `verified_receipt.created_at` genuinely places THIS
+        // key's signature in time.
+        let revocation_verdict = if policy.revocations.known.is_empty() {
+            None
+        } else {
+            let fingerprint = acdp_crypto::fingerprint::fingerprint_for_key_id(
+                &ctx.body.signature.key_id,
+                &ctx.body.signature.algorithm,
+                resolver,
+            )
+            .await?;
+            super::revocation::classify_under_revocation(
+                &policy.revocations.known,
+                &fingerprint,
+                verified_receipt.as_ref().map(|r| r.created_at),
+            )?
+        };
+
         // ── Signature phase ──────────────────────────────────────────
         // Standard path enforces assertionMethod membership. A
         // KeyNotAuthorized failure falls back to the historical path
         // only under AcceptWithReceipt AND a verified receipt — the
         // receipt's key_fingerprint (already cross-checked against this
         // exact key above) is what attests publish-time authorization.
-        let key_status = match verifier.verify_body_signature(&ctx.body).await {
-            Ok(()) => KeyAuthorization::CurrentlyAuthorized,
-            Err(AcdpError::KeyNotAuthorized(_))
-                if policy.historical_keys == HistoricalKeyPolicy::AcceptWithReceipt
-                    && verified_receipt.is_some() =>
-            {
-                acdp_verify::verify_body_signature_historical(&ctx.body, resolver).await?;
-                KeyAuthorization::HistoricallyAuthorized
+        let key_status = match revocation_verdict {
+            // Pre-compromise (§7 step 2): the signature is verified
+            // under the RFC-ACDP-0010 §10 historical rule — the key may
+            // legitimately have left assertionMethod (and SHOULD, §9),
+            // and even a key still in assertionMethod MUST NOT be
+            // reported as fully current once revoked. did:key material
+            // cannot rotate, so it takes the plain envelope path.
+            Some(pre_compromise) => {
+                if ctx.body.agent_id.as_str().starts_with("did:key:") {
+                    verifier.verify_body_signature(&ctx.body).await?;
+                } else {
+                    acdp_verify::verify_body_signature_historical(&ctx.body, resolver).await?;
+                }
+                pre_compromise
             }
-            Err(e) => return Err(e),
+            None => match verifier.verify_body_signature(&ctx.body).await {
+                Ok(()) => KeyAuthorization::CurrentlyAuthorized,
+                Err(AcdpError::KeyNotAuthorized(_))
+                    if policy.historical_keys == HistoricalKeyPolicy::AcceptWithReceipt
+                        && verified_receipt.is_some() =>
+                {
+                    acdp_verify::verify_body_signature_historical(&ctx.body, resolver).await?;
+                    KeyAuthorization::HistoricallyAuthorized
+                }
+                Err(e) => return Err(e),
+            },
         };
 
         if !policy.allow_unknown_status {
@@ -783,6 +884,10 @@ mod tests {
         assert!(strict.allow_unknown_status);
         assert_eq!(strict.receipts, ReceiptPolicy::Ignore);
         assert_eq!(strict.historical_keys, HistoricalKeyPolicy::Reject);
+        assert!(
+            strict.revocations.known.is_empty(),
+            "a 0.1.0-pinned consumer is unaffected by RFC-ACDP-0014"
+        );
         assert_ne!(
             strict,
             VerificationPolicy::default(),

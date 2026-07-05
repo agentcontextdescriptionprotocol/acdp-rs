@@ -15,6 +15,7 @@ pub mod lifecycle;
 pub mod log;pub mod profile;
 pub mod publish;
 pub mod receipt;
+pub mod revocation;
 pub mod search;
 
 // `primitives` / `serde_helpers` / `wire_error` live in acdp-primitives;
@@ -31,4 +32,5 @@ pub use lifecycle::{LifecycleEvent, LifecycleEventType};
 pub use log::{LogCheckpoint, LogConsistencyProof, LogInclusion, LogLeaf};pub use primitives::{AgentDid, ContentHash, ContextType, CtxId, LineageId, Status, Visibility};
 pub use publish::{PublishRequest, PublishResponse};
 pub use receipt::{ReceiptSigner, RegistryReceipt};
+pub use revocation::{KeyRevocation, RevocationTrustClass};
 pub use search::{SearchParams, SearchParamsBuilder, SearchResponse, SearchResult};
