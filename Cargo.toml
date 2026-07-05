@@ -61,17 +61,22 @@ test-transport = [
 [[test]]
 name              = "tls_conformance"
 path              = "tests/tls_conformance.rs"
-required-features = ["client", "server"]
+required-features = ["client", "server", "test-transport"]
 
 # The end-to-end example drives `RegistryClient` against a wiremock mock
 # registry, so it needs the `client` feature. Declared here (rather than
 # left to auto-discovery) so `--no-default-features` builds skip it
 # instead of failing to compile. `producer`, `consumer`, and
 # `supersession` use only the always-on core and need no gate.
+[[test]]
+name              = "registry_client"
+path              = "tests/registry_client.rs"
+required-features = ["client", "test-transport"]
+
 [[example]]
 name              = "end_to_end"
 path              = "examples/end_to_end.rs"
-required-features = ["client"]
+required-features = ["client", "test-transport"]
 
 # Receipt end-to-end tests (RFC-ACDP-0010) drive the in-process TLS
 # registry harness: `client` for the resolver/RegistryClient, `server`
@@ -79,14 +84,14 @@ required-features = ["client"]
 [[test]]
 name              = "receipts"
 path              = "tests/receipts.rs"
-required-features = ["client", "server"]
+required-features = ["client", "server", "test-transport"]
 
 # Lineage-head receipt end-to-end tests (RFC-ACDP-0011) drive the same
 # in-process TLS registry harness as `receipts`.
 [[test]]
 name              = "lineage_head_receipts"
 path              = "tests/lineage_head_receipts.rs"
-required-features = ["client", "server"]
+required-features = ["client", "server", "test-transport"]
 
 # Lifecycle-event / retraction tests (RFC-ACDP-0013) bind the lc-001..003
 # fixtures at the RegistryServer API level. did:key producers keep the
@@ -103,7 +108,7 @@ required-features = ["server"]
 [[test]]
 name              = "key_revocation"
 path              = "tests/key_revocation.rs"
-required-features = ["client", "server"]
+required-features = ["client", "server", "test-transport"]
 # Criterion benchmarks for the crypto / JCS / SSRF hot paths.
 # `harness = false` hands `main` to criterion instead of libtest.
 [[bench]]

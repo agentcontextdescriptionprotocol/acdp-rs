@@ -37,3 +37,16 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[features]
+test-transport = ["acdp/test-transport"]
+
+# The subprocess integration tests drive a mock HTTP registry through the
+# ACDP_INSECURE_TRANSPORT escape hatch, which only exists when the
+# `test-transport` feature is compiled in (both in this test target and
+# in the spawned binary — CARGO_BIN_EXE builds it with the same feature
+# set as the test invocation).
+[[test]]
+name              = "cli"
+path              = "tests/cli.rs"
+required-features = ["test-transport"]

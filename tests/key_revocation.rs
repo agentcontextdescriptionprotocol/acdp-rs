@@ -617,8 +617,6 @@ struct Harness {
     context_json: Arc<RwLock<Option<serde_json::Value>>>,
     resolver: WebResolver,
 }
-
-#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn start_harness(registry_receipt_pub: &[u8; 32], producer_pub: &[u8; 32]) -> Harness {
     let registry_doc = ed25519_did_doc(REGISTRY_DID, "receipt-key-1", registry_receipt_pub);
     let producer_doc = ed25519_did_doc(LOCAL_PRODUCER_DID, "key-1", producer_pub);
@@ -668,7 +666,6 @@ async fn start_harness(registry_receipt_pub: &[u8; 32], producer_pub: &[u8; 32])
 }
 
 impl Harness {
-    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
     fn client(&self) -> RegistryClient {
         RegistryClient::with_test_endpoint(
             &format!("https://{REGISTRY_AUTHORITY}"),
@@ -849,7 +846,6 @@ async fn rev_002_fetch_pipeline_boundary_matrix() {
 /// silently skips candidates that fail §5 — here a "revocation" signed
 /// by the very key it revokes, which is at most a hint (§5 step 2).
 #[tokio::test]
-#[allow(deprecated)] // test-transport constructors; gated in 0.4.0
 async fn find_revocations_returns_only_verified() {
     use acdp::client::find_revocations;
     use std::collections::HashMap;

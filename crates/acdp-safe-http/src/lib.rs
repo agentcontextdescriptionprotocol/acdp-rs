@@ -168,12 +168,7 @@ impl SsrfPolicy {
     /// `#[doc(hidden)]` because production must never use this — see
     /// [`Self::allow_loopback_resolved`].
     #[doc(hidden)]
-    #[cfg_attr(
-        not(feature = "test-transport"),
-        deprecated(
-            note = "SSRF-relaxed test-only constructor: enable the `test-transport` feature to use it without this warning; the ungated fallback is removed in 0.4.0"
-        )
-    )]
+    #[cfg(feature = "test-transport")]
     pub fn allow_test_loopback() -> Self {
         Self {
             allow_loopback_resolved: true,
@@ -654,9 +649,8 @@ mod tests {
 
     /// allow_test_loopback permits loopback so tests can POST to a local
     /// listener.
-    #[cfg(feature = "client")]
+    #[cfg(all(feature = "client", feature = "test-transport"))]
     #[test]
-    #[allow(deprecated)] // test-transport constructors; gated in 0.4.0
     fn safe_client_builds_with_loopback_policy() {
         assert!(safe_client(
             &SsrfPolicy::allow_test_loopback(),
