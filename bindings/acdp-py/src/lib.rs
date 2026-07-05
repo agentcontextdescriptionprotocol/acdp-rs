@@ -18,24 +18,29 @@
 #![allow(clippy::useless_conversion)]
 
 mod did;
+mod errors;
 mod helpers;
 mod jcs;
+mod merkle;
 mod producer;
 mod safe_http;
+mod v030;
 mod verifier;
 
 use pyo3::prelude::*;
 
 /// The `acdp` Python module — exposes `AcdpProducer`,
 /// `AcdpP256Producer`, `AcdpVerifier`, `AcdpCanonicalizer`,
-/// `AcdpSsrfPolicy`, `AcdpDid`, `AcdpDidDocument`, and the
-/// `SsrfRejected` / `DidResolutionError` exceptions.
+/// `AcdpMerkle`, `AcdpSsrfPolicy`, `AcdpDid`, `AcdpDidDocument`, and
+/// the `SsrfRejected` / `DidResolutionError` / `InvalidLogProof` /
+/// `ImmutableField` / `InvalidLifecycleTransition` exceptions.
 #[pymodule]
 fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<producer::PyAcdpProducer>()?;
     m.add_class::<producer::PyAcdpP256Producer>()?;
     m.add_class::<verifier::PyAcdpVerifier>()?;
     m.add_class::<jcs::PyAcdpCanonicalizer>()?;
+    m.add_class::<merkle::PyAcdpMerkle>()?;
     m.add_class::<safe_http::PyAcdpSsrfPolicy>()?;
     m.add_class::<did::PyAcdpDid>()?;
     m.add_class::<did::PyAcdpDidDocument>()?;
@@ -46,6 +51,19 @@ fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "DidResolutionError",
         m.py().get_type_bound::<did::DidResolutionError>(),
+    )?;
+    m.add(
+        "InvalidLogProof",
+        m.py().get_type_bound::<errors::InvalidLogProof>(),
+    )?;
+    m.add(
+        "ImmutableField",
+        m.py().get_type_bound::<errors::ImmutableField>(),
+    )?;
+    m.add(
+        "InvalidLifecycleTransition",
+        m.py()
+            .get_type_bound::<errors::InvalidLifecycleTransition>(),
     )?;
     Ok(())
 }

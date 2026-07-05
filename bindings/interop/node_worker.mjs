@@ -28,6 +28,7 @@ const AcdpProducer = mod.AcdpProducer ?? mod.default?.AcdpProducer;
 const AcdpP256Producer = mod.AcdpP256Producer ?? mod.default?.AcdpP256Producer;
 const AcdpVerifier = mod.AcdpVerifier ?? mod.default?.AcdpVerifier;
 const AcdpCanonicalizer = mod.AcdpCanonicalizer ?? mod.default?.AcdpCanonicalizer;
+const AcdpMerkle = mod.AcdpMerkle ?? mod.default?.AcdpMerkle;
 const AcdpSsrfPolicy = mod.AcdpSsrfPolicy ?? mod.default?.AcdpSsrfPolicy;
 const AcdpDid = mod.AcdpDid ?? mod.default?.AcdpDid;
 const AcdpDidDocument = mod.AcdpDidDocument ?? mod.default?.AcdpDidDocument;
@@ -36,6 +37,7 @@ if (
   !AcdpP256Producer ||
   !AcdpVerifier ||
   !AcdpCanonicalizer ||
+  !AcdpMerkle ||
   !AcdpSsrfPolicy ||
   !AcdpDid ||
   !AcdpDidDocument
@@ -93,6 +95,7 @@ const methods = {
       AcdpP256Producer: describeClass(AcdpP256Producer),
       AcdpVerifier: describeClass(AcdpVerifier),
       AcdpCanonicalizer: describeClass(AcdpCanonicalizer),
+      AcdpMerkle: describeClass(AcdpMerkle),
       AcdpSsrfPolicy: describeClass(AcdpSsrfPolicy),
       AcdpDid: describeClass(AcdpDid),
       AcdpDidDocument: describeClass(AcdpDidDocument),
@@ -182,6 +185,83 @@ const methods = {
       p.sig_b64,
       p.content_hash,
     ),
+  }),
+
+  // ── ACDP 0.3 surface (AcdpVerifier verdicts / AcdpMerkle) ─────────────
+  // Each returns the raw JSON string the binding produced (so byte
+  // equality with the Python side is observable).
+  build_log_leaf: (p) => ({
+    raw: AcdpVerifier.buildLogLeaf(p.receipt_json),
+  }),
+
+  parse_key_revocation: (p) => ({
+    raw: AcdpVerifier.parseKeyRevocation(
+      p.body_json,
+      p.signer_fingerprint ?? null,
+    ),
+  }),
+
+  classify_under_revocation: (p) => ({
+    raw: AcdpVerifier.classifyUnderRevocation(
+      p.revocations_json,
+      p.signer_fingerprint,
+      p.receipt_created_at ?? null,
+    ),
+  }),
+
+  verify_lineage_head_receipt: (p) => ({
+    raw: AcdpVerifier.verifyLineageHeadReceipt(
+      p.receipt_json,
+      p.expected_json,
+      p.registry_did_doc_json,
+      p.now ?? null,
+      p.max_skew_secs ?? null,
+      p.max_age_secs ?? null,
+    ),
+  }),
+
+  verify_log_checkpoint: (p) => ({
+    raw: AcdpVerifier.verifyLogCheckpoint(
+      p.checkpoint_json,
+      p.registry_did_doc_json,
+      p.expected_log_id ?? null,
+      p.now ?? null,
+      p.max_skew_secs ?? null,
+    ),
+  }),
+
+  verify_log_inclusion: (p) => ({
+    raw: AcdpVerifier.verifyLogInclusion(
+      p.inclusion_json,
+      p.checkpoint_json,
+      p.leaf_json,
+    ),
+  }),
+
+  verify_log_consistency: (p) => ({
+    raw: AcdpVerifier.verifyLogConsistency(
+      p.consistency_json,
+      p.checkpoint_json,
+      p.first_root_hash,
+    ),
+  }),
+
+  verify_lifecycle_event: (p) => ({
+    raw: AcdpVerifier.verifyLifecycleEvent(
+      p.event_json,
+      p.actor_did_doc_json ?? null,
+      p.expected_ctx_id,
+    ),
+  }),
+
+  merkle_leaf_hash: (p) => ({ result: AcdpMerkle.leafHash(p.leaf_json) }),
+
+  merkle_node_hash: (p) => ({
+    result: AcdpMerkle.nodeHash(p.left_hash, p.right_hash),
+  }),
+
+  merkle_root_hash: (p) => ({
+    result: AcdpMerkle.rootHash(p.leaf_hashes_json),
   }),
 
   // ── did:web helpers (AcdpDid / AcdpDidDocument) ───────────────────────

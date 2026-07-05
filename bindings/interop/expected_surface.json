@@ -30,11 +30,19 @@
       "sign_challenge"
     ],
     "AcdpVerifier": [
+      "build_log_leaf",
       "canonical_preimage",
+      "classify_under_revocation",
       "explain_hash_mismatch",
       "fingerprint_ed25519_b64",
+      "parse_key_revocation",
       "verify_body_offline",
       "verify_content_hash",
+      "verify_lifecycle_event",
+      "verify_lineage_head_receipt",
+      "verify_log_checkpoint",
+      "verify_log_consistency",
+      "verify_log_inclusion",
       "verify_publish_request_offline",
       "verify_receipt",
       "verify_signature",
@@ -43,6 +51,11 @@
     "AcdpCanonicalizer": [
       "canonicalize",
       "content_hash"
+    ],
+    "AcdpMerkle": [
+      "leaf_hash",
+      "node_hash",
+      "root_hash"
     ],
     "AcdpSsrfPolicy": [
       "allow_test_loopback",

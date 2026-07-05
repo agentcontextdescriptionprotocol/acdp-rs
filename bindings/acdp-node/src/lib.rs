@@ -13,8 +13,11 @@
 //! keeps the forbid attribute.
 
 mod did;
+mod errors;
 mod helpers;
 mod jcs;
+mod merkle;
 mod producer;
 mod safe_http;
+mod v030;
 mod verifier;
