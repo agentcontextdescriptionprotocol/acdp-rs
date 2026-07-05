@@ -28,7 +28,10 @@ crate-type = ["cdylib"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-acdp       = { path = "../..", default-features = false }
+acdp       = { path = "../..", default-features = false, features = ["test-transport"] }
+# ^ test-transport: the bindings deliberately re-export allow_test_loopback
+#   on their pinned FFI surface (expected_surface.json) as a HOST-side test
+#   helper; the Rust-side hard gate targets Rust dependency trees.
 # abi3-py39: build a single forward-compatible wheel (cp39-abi3) per
 # platform that runs on CPython 3.9+ via the stable ABI, instead of one
 # wheel per interpreter version. Keeps the release matrix to one build
