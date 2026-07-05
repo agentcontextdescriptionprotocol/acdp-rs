@@ -132,8 +132,14 @@ jobs:
           ignore: RUSTSEC-2025-0134
 
   semver:
-    name: cargo-semver-checks
+    name: cargo-semver-checks (advisory)
     runs-on: ubuntu-latest
+    # Advisory: version bumps land in release-plz's follow-up release PR,
+    # so a PR carrying an intentional breaking change (feat!/BREAKING
+    # CHANGE) correctly fails this check until that PR merges. Treat a
+    # red result as a prompt to verify the commit is marked breaking —
+    # release-plz derives the bump from the marker.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
