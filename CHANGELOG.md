@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
-## [0.3.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.3.0...acdp-v0.3.1) - 2026-07-05
+## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.3.0...acdp-v0.3.1) - 2026-07-05
 
 ### Added
 
