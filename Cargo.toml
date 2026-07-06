@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name    = "acdp"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 description   = "Rust client library for the Agent Context Distribution Protocol (ACDP v0.1.0)"
 license       = "MIT OR Apache-2.0"
@@ -121,17 +121,17 @@ harness = false
 # crates live in `[dev-dependencies]` (used only by the integration
 # tests and examples that still live here).
 [dependencies]
-acdp-primitives = { path = "crates/acdp-primitives", version = "0.3.0" }
-acdp-jcs        = { path = "crates/acdp-jcs", version = "0.1.4" }
-acdp-safe-http  = { path = "crates/acdp-safe-http", version = "0.2.1" }
-acdp-did        = { path = "crates/acdp-did", version = "0.2.1" }
-acdp-crypto     = { path = "crates/acdp-crypto", version = "0.1.4" }
-acdp-types      = { path = "crates/acdp-types", version = "0.3.1" }
-acdp-validation = { path = "crates/acdp-validation", version = "0.3.1" }
-acdp-verify     = { path = "crates/acdp-verify", version = "0.3.1" }
-acdp-producer   = { path = "crates/acdp-producer", version = "0.3.1" }
-acdp-client     = { path = "crates/acdp-client", version = "0.4.0", optional = true }
-acdp-server     = { path = "crates/acdp-server", version = "0.3.1", optional = true }
+acdp-primitives = { path = "crates/acdp-primitives", version = "0.4.0" }
+acdp-jcs        = { path = "crates/acdp-jcs", version = "0.1.5" }
+acdp-safe-http  = { path = "crates/acdp-safe-http", version = "0.2.2" }
+acdp-did        = { path = "crates/acdp-did", version = "0.2.2" }
+acdp-crypto     = { path = "crates/acdp-crypto", version = "0.1.5" }
+acdp-types      = { path = "crates/acdp-types", version = "0.3.2" }
+acdp-validation = { path = "crates/acdp-validation", version = "0.3.2" }
+acdp-verify     = { path = "crates/acdp-verify", version = "0.3.2" }
+acdp-producer   = { path = "crates/acdp-producer", version = "0.3.2" }
+acdp-client     = { path = "crates/acdp-client", version = "0.4.1", optional = true }
+acdp-server     = { path = "crates/acdp-server", version = "0.3.2", optional = true }
 
 [dev-dependencies]
 serde         = { version = "1", features = ["derive"] }

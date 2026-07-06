@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-client-v0.4.0...acdp-client-v0.4.1) - 2026-07-06
+
+### Added
+
+- *(client)* witness cosignature verification, quorum, and safe mint (RFC-ACDP-0015)
+
+### Other
+
+- *(conformance)* bind wit-001..004 witness-cosigning fixtures (RFC-ACDP-0015)
+
 ## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-client-v0.3.0...acdp-client-v0.4.0) - 2026-07-06
 
 ### Added
