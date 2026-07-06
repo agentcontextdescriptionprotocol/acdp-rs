@@ -148,7 +148,7 @@ url           = "2"
 urlencoding   = "2"
 tokio    = { version = "1", features = ["full"] }
 anyhow   = "1"
-criterion = "0.5"
+criterion = "0.8"
 wiremock = "0.6"
 proptest = "1"
 # TLS test harness — used to mock a `did:web` HTTPS endpoint and a
