@@ -1,0 +1,68 @@
+
+# cargo-vet audits file
+
+[[audits.curve25519-dalek]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "4.1.3"
+notes = "Canonical dalek-cryptography Curve25519 arithmetic underpinning ed25519-dalek. Reviewed 4.1.3: audited unsafe confined to gated SIMD backends; constant-time subtle-based ops; no I/O. 4.1.3 carries the fix for the <=4.1.2 timing issue. Latest 4.x; cargo audit clean 2026-07-05."
+
+[[audits.ecdsa]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.16.9"
+notes = "RustCrypto 'ecdsa' generic ECDSA over elliptic-curve traits; backs p256 verification. Reviewed 0.16.9: constant-time via rfc6979/signature, no unsafe of concern, no I/O. Canonical, latest 0.16.x. cargo audit clean 2026-07-05."
+
+[[audits.ed25519-dalek]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "2.2.0"
+notes = "Canonical dalek-cryptography Ed25519 impl. Mandatory ACDP signature primitive (RFC-ACDP-0002); acdp-crypto sign/verify builds on it. Reviewed 2.2.0: no build.rs, unsafe only via vetted curve25519-dalek backends, zeroizes secret material, no network/fs/process access. Latest 2.x; no open RUSTSEC advisory (cargo audit clean 2026-07-05)."
+
+[[audits.elliptic-curve]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.13.8"
+notes = "RustCrypto 'elliptic-curve' trait/framework crate underpinning p256/ecdsa. Reviewed 0.13.8: generic curve arithmetic traits, constant-time helpers, no I/O/build script. Canonical, latest 0.13.x. cargo audit clean 2026-07-05."
+
+[[audits.p256]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.13.2"
+notes = "RustCrypto 'p256' (NIST P-256/secp256r1) used by ACDP for did:web ES256/P-256 verification-method support. Reviewed 0.13.2: pure Rust, no unsafe of concern, no I/O/build script; builds on ecdsa/elliptic-curve/primeorder. Canonical, latest 0.13.x. cargo audit clean 2026-07-05."
+
+[[audits.ring]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.17.14"
+notes = "briansmith 'ring' crypto primitives (BoringSSL-derived) used as the default rustls crypto provider. Reviewed 0.17.14: unsafe/asm inherent to the C+asm primitives, upstream is the canonical widely-audited source; no Rust-level I/O beyond getrandom. Latest 0.17.x; cargo audit clean 2026-07-05."
+
+[[audits.rustls]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.23.40"
+notes = "Canonical rustls TLS stack (github.com/rustls/rustls) providing the HTTPS transport for WebResolver/RegistryClient (reqwest+rustls, RFC-ACDP-0008 HTTPS-only). Reviewed 0.23.40: memory-safe TLS in Rust, unsafe limited to vetted crypto providers (ring/aws-lc-rs); actively maintained, ISRG-backed. Latest 0.23.x; cargo audit clean 2026-07-05."
+
+[[audits.sha2]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "0.10.9"
+notes = "RustCrypto 'sha2'. SHA-256 for ACDP content_hash + lineage_id (RFC-ACDP-0001 5.7). Reviewed 0.10.9: unsafe confined to cpufeatures-gated asm/SIMD backends; no I/O. Canonical, latest 0.10.x. cargo audit clean 2026-07-05."
+
+[[audits.signature]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "2.2.0"
+notes = "RustCrypto 'signature' trait crate. Pure trait/marker defs used by ed25519/ecdsa; no unsafe, no I/O, no build script. Canonical upstream, latest 2.x. cargo audit clean 2026-07-05."
+
+[[audits.subtle]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "2.6.1"
+notes = "dalek 'subtle' constant-time primitives (Choice/ConditionallySelectable) guarding against timing side-channels across the crypto stack. Reviewed 2.6.1: no_std, no I/O, no concerning unsafe. Canonical, latest 2.x. cargo audit clean 2026-07-05."
+
+[[audits.zeroize]]
+who = "Ajit Koti <ajitkoti@zer07labs.com>"
+criteria = "safe-to-deploy"
+version = "1.8.2"
+notes = "RustCrypto 'zeroize'. Secure zeroing; acdp-crypto SigningKey seed uses ZeroizeOnDrop. Reviewed 1.8.2: volatile writes + compiler fences, minimal audited unsafe. Canonical, latest 1.x. cargo audit clean 2026-07-05."

@@ -37,6 +37,10 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.host }}
+    permissions:
+      contents: read
+      id-token: write # OIDC for build provenance attestation
+      attestations: write # write the SLSA provenance attestation
     strategy:
       fail-fast: false
       matrix:
@@ -56,15 +60,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: bindings/acdp-node
       - name: Install zig (cross targets)
         if: ${{ matrix.zig }}
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1.2.2
         with:
           version: 0.13.0
       - name: Install dependencies
@@ -75,6 +80,17 @@ jobs:
       - name: Build (zig cross)
         if: ${{ matrix.zig }}
         run: npx napi build --platform --release --target ${{ matrix.target }} --zig
+      # Attest the freshly-built native binary BEFORE it leaves this job.
+      # Produces a signed SLSA build-provenance statement (stored via the
+      # GitHub attestations API) binding this .node's sha256 to this repo,
+      # workflow, and commit. Consumers verify with:
+      #   gh attestation verify <file.node> --repo <owner>/acdp-rs
+      # subject-path is resolved from GITHUB_WORKSPACE (uses: steps ignore
+      # the job-level defaults.run.working-directory).
+      - name: Attest build provenance (.node)
+        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        with:
+          subject-path: bindings/acdp-node/*.node
       - name: Upload .node artifact
         uses: actions/upload-artifact@v4
         with:
@@ -127,7 +143,12 @@ jobs:
       # (which is `napi prepublish`) and republishing the platform packages.
       - name: Publish root loader package
         if: ${{ always() && (github.event_name == 'push' || !inputs.dry_run) }}
-        run: npm publish --access public --ignore-scripts
+        # --provenance publishes a signed npm provenance statement generated
+        # from this run's OIDC id-token (job perm `id-token: write`). Requires
+        # npm >= 9.5; setup-node's Node 20 ships npm >= 10. NPM_CONFIG_PROVENANCE
+        # is kept for `napi prepublish` (the platform-package step), which has
+        # no --provenance flag of its own and reads the env var instead.
+        run: npm publish --access public --provenance --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
