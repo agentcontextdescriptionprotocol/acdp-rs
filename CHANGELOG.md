@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
+## [0.5.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.0...acdp-v0.5.1) - 2026-07-06
+
+### Added
+
+- *(bindings)* expose ACDP 0.3.0 verification surfaces in both SDKs
+
+### Other
+
+- add supply-chain security policy
+- add cargo-vet supply-chain dependency vetting
+- *(bindings)* pin the 0.3.0 golden vectors and cross-binding parity
+
 ## [0.5.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.4.0...acdp-v0.5.0) - 2026-07-05
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-primitives"
-version     = "0.2.0"
+version     = "0.3.0"
 edition     = "2021"
 description = "Foundational types and error vocabulary for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"
