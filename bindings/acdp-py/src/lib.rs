@@ -25,6 +25,7 @@ mod merkle;
 mod producer;
 mod safe_http;
 mod v030;
+mod v040;
 mod verifier;
 
 use pyo3::prelude::*;
@@ -64,6 +65,10 @@ fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "InvalidLifecycleTransition",
         m.py()
             .get_type_bound::<errors::InvalidLifecycleTransition>(),
+    )?;
+    m.add(
+        "InvalidWitnessCosignature",
+        m.py().get_type_bound::<errors::InvalidWitnessCosignature>(),
     )?;
     Ok(())
 }

@@ -254,6 +254,37 @@ const methods = {
     ),
   }),
 
+  // ── ACDP 0.4 witness cosignatures (RFC-ACDP-0015) ─────────────────────
+  build_witness_cosignature: (p) => ({
+    raw: AcdpVerifier.buildWitnessCosignature(
+      p.witnessed_checkpoint_json,
+      p.witness_did,
+      p.witness_seed_hex,
+      p.witnessed_at_rfc3339,
+    ),
+  }),
+
+  verify_witness_cosignature: (p) => ({
+    raw: AcdpVerifier.verifyWitnessCosignature(
+      p.cosig_json,
+      p.witness_did_doc_json,
+      p.expected_checkpoint_json,
+      p.now ?? null,
+      p.max_clock_skew_secs ?? null,
+    ),
+  }),
+
+  evaluate_witness_quorum: (p) => ({
+    raw: AcdpVerifier.evaluateWitnessQuorum(
+      p.cosignatures_json,
+      p.expected_checkpoint_json,
+      p.trusted_witness_dids_json,
+      p.witness_did_docs_json,
+      p.policy_json,
+      p.now ?? null,
+    ),
+  }),
+
   merkle_leaf_hash: (p) => ({ result: AcdpMerkle.leafHash(p.leaf_json) }),
 
   merkle_node_hash: (p) => ({

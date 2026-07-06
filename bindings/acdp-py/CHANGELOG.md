@@ -5,6 +5,43 @@ Independently versioned from the Rust crates (this package is
 in lock-step with the Node SDK (`bindings/acdp-node`) — the interop
 suite fails if the two versions or API surfaces drift.
 
+## 0.7.0 — 2026-07-05
+
+ACDP 0.4 transparency-log **witness cosignatures** (RFC-ACDP-0015),
+offline and JSON-over-FFI like everything else (documents supplied by
+the caller; the binding never touches the network).
+
+### Added
+
+- **`AcdpVerifier.build_witness_cosignature`** (RFC-ACDP-0015 §5) — the
+  MINT surface a host-language witness service uses: cosign an observed
+  checkpoint (`{log_id, tree_size, root_hash, timestamp}`) with the
+  witness's OWN Ed25519 key (a 32-byte hex seed, mirroring
+  `AcdpProducer`), signing-key DID URL derived as
+  `"<witness_did>#witness-key-1"`. Uses the RFC-ACDP-0010 §5
+  construction verbatim; a fixed seed + input reproduces the wit-001
+  golden signature byte-for-byte (pinned in the interop suite as the
+  witness-layer analogue of the sig-001 cross-binding equality). This
+  is the RAW mint — the §7 obligation (checkpoint signature +
+  consistency) is the host's job.
+- **`AcdpVerifier.verify_witness_cosignature`** (RFC-ACDP-0015 §8
+  steps 1–5) — verify one cosignature against a checkpoint the consumer
+  has itself verified, against a caller-supplied witness DID document.
+  Returns a JSON verdict (`valid` / `witness_id` / `age_secs` /
+  `stale`); staleness (§8.1) is policy, never a verification failure.
+  Failures carry `code: "invalid_witness_cosignature"` — deliberately
+  distinct from `invalid_log_proof` (§10).
+- **`AcdpVerifier.evaluate_witness_quorum`** (RFC-ACDP-0015 §8) — the
+  N-witnessed count over a set of cosignatures for a verified
+  checkpoint, under a `{min_witnesses, max_age_secs,
+  max_clock_skew_secs}` policy. Returns `{witnessed_count, witnesses,
+  meets_quorum, fresh_witnessed_count, meets_fresh_quorum, failures}`;
+  distinct trusted `witness_id` values are counted, and a cosignature
+  that fails a step is recorded in `failures` without failing the
+  checkpoint.
+- **`InvalidWitnessCosignature`** — the typed, catchable exception for
+  the RFC-ACDP-0015 §10 wire code (mirrors `InvalidLogProof`).
+
 ## 0.6.0 — 2026-07-05
 
 ACDP 0.3.0 surfaces, offline and JSON-over-FFI like everything else

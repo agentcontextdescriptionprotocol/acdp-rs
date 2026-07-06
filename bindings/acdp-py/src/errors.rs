@@ -44,6 +44,19 @@ create_exception!(
      one. Retryable only after the state changes."
 );
 
+create_exception!(
+    acdp,
+    InvalidWitnessCosignature,
+    PyException,
+    "A transparency-log witness cosignature failed verification \
+     (RFC-ACDP-0015 §8, §10): a signature that does not verify under the \
+     witness's resolved assertionMethod key, a checkpoint-binding \
+     mismatch, a future-dated witnessed_at, or a malformed cosignature \
+     object. Deliberately DISTINCT from InvalidLogProof — it indicts a \
+     witness's attestation, never the registry's log. Permanent — a bad \
+     cosignature will not verify on retry."
+);
+
 /// Map a core [`AcdpError`] to the binding's exception taxonomy:
 /// the three 0.3.0 wire codes get their typed exceptions,
 /// `schema_violation` stays a `ValueError` (malformed input), and
@@ -55,6 +68,9 @@ pub(crate) fn map_acdp_error(e: AcdpError) -> PyErr {
         AcdpError::ImmutableField(_) => ImmutableField::new_err(e.to_string()),
         AcdpError::InvalidLifecycleTransition(_) => {
             InvalidLifecycleTransition::new_err(e.to_string())
+        }
+        AcdpError::InvalidWitnessCosignature(_) => {
+            InvalidWitnessCosignature::new_err(e.to_string())
         }
         AcdpError::SchemaViolation(_) => PyValueError::new_err(e.to_string()),
         _ => PyRuntimeError::new_err(e.to_string()),
