@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name    = "acdp"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 description   = "Rust client library for the Agent Context Distribution Protocol (ACDP v0.1.0)"
 license       = "MIT OR Apache-2.0"
