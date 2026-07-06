@@ -112,7 +112,7 @@ pub use error::{AcdpError, SupersessionReason};
 pub use types::{
     AgentDid, Body, CapabilitiesDocument, ContentHash, ContextType, CtxId, DataRef, DataRefType,
     FullContext, KeyRevocation, LifecycleEvent, LifecycleEventType, LineageId, Location,
-    LogCheckpoint, LogConsistencyProof, LogInclusion, LogLeaf, PublishRequest, PublishResponse,
-    RegistryState, RevocationTrustClass, SearchParams, SearchResponse, Status, Visibility,
-    WireError,
+    LogCheckpoint, LogConsistencyProof, LogCosignature, LogInclusion, LogLeaf, PublishRequest,
+    PublishResponse, RegistryState, RevocationTrustClass, SearchParams, SearchResponse, Status,
+    Visibility, WireError, WitnessSigner, WitnessedCheckpoint,
 };
