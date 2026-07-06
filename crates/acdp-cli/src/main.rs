@@ -220,7 +220,7 @@ async fn cmd_retrieve(rest: &[String]) -> Result<(), CliError> {
     let client = registry_client(url)?;
     let resolver = WebResolver::new();
     let ctx = VerifiedContext::fetch(&client, &resolver, &CtxId(id.clone())).await?;
-    println!("{}", serde_json::to_string_pretty(&ctx.inner)?);
+    println!("{}", serde_json::to_string_pretty(ctx.full_context())?);
     Ok(())
 }
 

@@ -234,11 +234,8 @@ async fn receipt_minted_verified_end_to_end() {
     let verified = VerifiedContext::fetch(&client, &h.resolver, &ctx_id)
         .await
         .expect("fetch + verify with receipt");
-    assert_eq!(verified.key_status, KeyAuthorization::CurrentlyAuthorized);
-    let vr = verified
-        .verified_receipt
-        .as_ref()
-        .expect("receipt verified");
+    assert_eq!(verified.key_status(), KeyAuthorization::CurrentlyAuthorized);
+    let vr = verified.verified_receipt().expect("receipt verified");
     assert_eq!(vr.ctx_id, ctx_id);
     assert_eq!(vr.content_hash, verified.body().content_hash);
 
@@ -330,10 +327,10 @@ async fn rotated_key_verifies_historically_via_receipt() {
         .await
         .expect("receipt-attested historical key must verify");
     assert_eq!(
-        verified.key_status,
+        verified.key_status(),
         KeyAuthorization::HistoricallyAuthorized
     );
-    assert!(verified.verified_receipt.is_some());
+    assert!(verified.verified_receipt().is_some());
 
     // Strict policy: historical keys rejected outright.
     let strict = VerificationPolicy {
@@ -485,7 +482,7 @@ async fn fed_009_missing_receipt_from_advertising_upstream_fails() {
         .resolve(&ctx_id)
         .await
         .expect("advertising upstream with a valid receipt must resolve");
-    assert!(verified.verified_receipt.is_some());
+    assert!(verified.verified_receipt().is_some());
 
     // Case 2: advertising upstream + NO receipt → invalid_receipt
     // (registry fault, not degraded mode).
@@ -506,5 +503,5 @@ async fn fed_009_missing_receipt_from_advertising_upstream_fails() {
         .resolve(&ctx_id)
         .await
         .expect("receipt-less upstream without the profile must resolve");
-    assert!(verified.verified_receipt.is_none());
+    assert!(verified.verified_receipt().is_none());
 }
