@@ -41,6 +41,10 @@ jobs:
   wheels:
     name: wheel ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write # OIDC for build provenance attestation
+      attestations: write # write the SLSA provenance attestation
     strategy:
       fail-fast: false
       matrix:
@@ -60,12 +64,20 @@ jobs:
       # maturin-action picks up `abi3-py39` from Cargo.toml and emits a
       # single cp39-abi3 wheel per target; `manylinux: auto` builds the
       # Linux wheels in a manylinux container (and cross-compiles aarch64).
-      - uses: PyO3/maturin-action@v1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           working-directory: bindings/acdp-py
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist
+      # Attest the wheel before it leaves this job (SLSA build provenance,
+      # verifiable with `gh attestation verify <wheel> --repo <owner>/acdp-rs`).
+      # This is independent of the PEP 740 attestation the publish job uploads
+      # to PyPI — belt and suspenders.
+      - name: Attest build provenance (wheel)
+        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        with:
+          subject-path: bindings/acdp-py/dist/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.target }}
@@ -75,13 +87,21 @@ jobs:
   sdist:
     name: sdist
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC for build provenance attestation
+      attestations: write # write the SLSA provenance attestation
     steps:
       - uses: actions/checkout@v4
-      - uses: PyO3/maturin-action@v1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           working-directory: bindings/acdp-py
           command: sdist
           args: --out dist
+      - name: Attest build provenance (sdist)
+        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        with:
+          subject-path: bindings/acdp-py/dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
@@ -106,6 +126,12 @@ jobs:
       - name: List what will be published
         run: ls -la dist
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1 (v1.14.0)
         with:
           packages-dir: dist
+          # PEP 740 attestations: the action mints a digital attestation for
+          # each uploaded file from this run's OIDC id-token and uploads it to
+          # PyPI. Default-on when id-token: write is present; set explicitly so
+          # the guarantee is visible and cannot silently regress. Viewable on
+          # the PyPI release page and via the integrity API.
+          attestations: true

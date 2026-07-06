@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -30,10 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - run: cargo clippy -p acdp --no-default-features --all-targets -- -D warnings
 
@@ -50,10 +50,10 @@ jobs:
             rust: beta
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           toolchain: ${{ matrix.rust }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - run: cargo test --workspace --all-features
       - run: cargo test -p acdp --no-default-features
       - run: cargo build --all-features --examples
@@ -68,8 +68,8 @@ jobs:
         with:
           repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
           path: acdp-spec
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       # ACDP_REQUIRE_CONFORMANCE makes a missing spec a hard failure, so
       # a green run genuinely proves conformance — the fixtures are not
       # silently skipped (IMP-02).
@@ -84,8 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.86.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@2767295e193a2ee92d23c1ff586f596cb6d94a7a # 1.86.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - run: cargo build --workspace --all-features
       - run: cargo build -p acdp --no-default-features
 
@@ -94,8 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
         run: cargo doc --workspace --all-features --no-deps
@@ -105,23 +105,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       # Install a checksum-verified prebuilt binary (with retries) and run
       # `cargo deny` directly, rather than EmbarkStudios/cargo-deny-action,
       # whose Docker image intermittently failed extracting the cargo-deny
       # release tarball ("tar: Error is not recoverable") on several
       # Dependabot PRs. Same install mechanism as the coverage job's
       # cargo-llvm-cov.
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-deny
       - run: cargo deny check
+
+  vet:
+    name: cargo-vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: taiki-e/install-action@c0ae9b92c15529ec87e792a1233f3f4a6c726bfa # cargo-vet
+      # BLOCKING supply-chain gate: every third-party dependency in the
+      # locked graph must be covered by a cargo-vet audit, an imported
+      # audit from a trusted set (mozilla/google/bytecode-alliance), or an
+      # explicit exemption in supply-chain/config.toml. A new or bumped
+      # dependency that is not yet vetted fails this job. See
+      # docs/supply-chain.md for the certify/exempt contributor workflow.
+      - run: cargo vet --locked
 
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # RUSTSEC-2025-0134: rustls-pemfile is "unmaintained" (folded
@@ -142,9 +158,9 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-semver-checks
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: taiki-e/install-action@28a94b8721026748876cf52d0a3048ff9e4c9769 # cargo-semver-checks
       # Compares every published workspace crate's public API against its
       # latest crates.io release and fails when a change requires a semver
       # bump the current version numbers don't carry. release-plz derives
@@ -157,13 +173,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: taiki-e/install-action@7c1105379b6217809b9ed26c163a46c65c7a528f # cargo-llvm-cov
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           files: lcov.info
           fail_ci_if_error: false

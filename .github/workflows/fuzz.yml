@@ -27,11 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: fuzz
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
       - run: cargo fuzz build
 
   run:
@@ -44,11 +44,11 @@ jobs:
         target: [fuzz_jcs, fuzz_wire, fuzz_did_doc, fuzz_ssrf]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: fuzz
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
       - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300
       - name: Upload crash artifacts
         if: failure()
