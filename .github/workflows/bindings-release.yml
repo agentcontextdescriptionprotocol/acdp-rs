@@ -88,7 +88,7 @@ jobs:
       # subject-path is resolved from GITHUB_WORKSPACE (uses: steps ignore
       # the job-level defaults.run.working-directory).
       - name: Attest build provenance (.node)
-        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        uses: actions/attest-build-provenance@v4 # first-party, major tag
         with:
           subject-path: bindings/acdp-node/*.node
       - name: Upload .node artifact

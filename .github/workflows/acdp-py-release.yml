@@ -75,7 +75,7 @@ jobs:
       # This is independent of the PEP 740 attestation the publish job uploads
       # to PyPI — belt and suspenders.
       - name: Attest build provenance (wheel)
-        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        uses: actions/attest-build-provenance@v4 # first-party, major tag
         with:
           subject-path: bindings/acdp-py/dist/*.whl
       - uses: actions/upload-artifact@v4
@@ -99,7 +99,7 @@ jobs:
           command: sdist
           args: --out dist
       - name: Attest build provenance (sdist)
-        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        uses: actions/attest-build-provenance@v4 # first-party, major tag
         with:
           subject-path: bindings/acdp-py/dist/*.tar.gz
       - uses: actions/upload-artifact@v4
