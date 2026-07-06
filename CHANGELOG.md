@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
+## [0.5.3](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.2...acdp-v0.5.3) - 2026-07-06
+
+### Added
+
+- *(bindings)* expose RFC-ACDP-0015 witness-cosigning surface (py + node 0.7.0)
+- *(types)* add LogCosignature witness-cosignature types (RFC-ACDP-0015)
+
 ## [0.5.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.1...acdp-v0.5.2) - 2026-07-06
 
 ### Other

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-did-v0.2.1...acdp-did-v0.2.2) - 2026-07-06
+
+### Other
+
+- updated the following local packages: acdp-primitives, acdp-safe-http
+
 ## [0.2.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-did-v0.2.0...acdp-did-v0.2.1) - 2026-07-06
 
 ### Other

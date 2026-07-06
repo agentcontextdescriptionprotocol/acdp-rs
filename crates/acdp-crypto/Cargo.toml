@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-crypto"
-version     = "0.1.4"
+version     = "0.1.5"
 edition     = "2021"
 description = "Content-hashing, signing, verification, and key fingerprinting for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"
@@ -17,9 +17,9 @@ rust-version = "1.86"
 client = ["acdp-did/client"]
 
 [dependencies]
-acdp-primitives = { path = "../acdp-primitives", version = "0.3.0" }
-acdp-jcs        = { path = "../acdp-jcs", version = "0.1.4" }
-acdp-did        = { path = "../acdp-did", version = "0.2.1" }
+acdp-primitives = { path = "../acdp-primitives", version = "0.4.0" }
+acdp-jcs        = { path = "../acdp-jcs", version = "0.1.5" }
+acdp-did        = { path = "../acdp-did", version = "0.2.2" }
 serde         = { version = "1", features = ["derive"] }
 serde_json    = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 chrono        = { version = "0.4", features = ["serde"] }

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-types-v0.3.1...acdp-types-v0.3.2) - 2026-07-06
+
+### Added
+
+- *(types)* add LogCosignature witness-cosignature types (RFC-ACDP-0015)
+
+### Other
+
+- *(conformance)* bind wit-001..004 witness-cosigning fixtures (RFC-ACDP-0015)
+
 ## [0.3.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-types-v0.3.0...acdp-types-v0.3.1) - 2026-07-06
 
 ### Other
