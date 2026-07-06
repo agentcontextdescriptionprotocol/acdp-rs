@@ -522,8 +522,8 @@ impl RegistryClientBuilder {
     /// Build the [`RegistryClient`].
     ///
     /// Async because [`Self::pinned`] mode resolves DNS up front. The
-    /// default (DNS-hook) mode does no async work; it is handled by the
-    /// synchronous [`Self::build_blocking`] internally.
+    /// default (DNS-hook) mode does no async work — it is constructed
+    /// synchronously internally.
     pub async fn build(self) -> Result<RegistryClient, AcdpError> {
         if !self.pinned {
             return self.build_blocking();
