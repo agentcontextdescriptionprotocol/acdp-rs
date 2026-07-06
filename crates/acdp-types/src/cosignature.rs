@@ -176,10 +176,12 @@ impl LogCosignature {
             )));
         }
         // witnessed_checkpoint identity-field shapes.
-        parse_log_id(&cosig.witnessed_checkpoint.log_id)
-            .map_err(|e| AcdpError::InvalidWitnessCosignature(format!("witnessed_checkpoint: {e}")))?;
-        decode_sha256_hex(&cosig.witnessed_checkpoint.root_hash)
-            .map_err(|e| AcdpError::InvalidWitnessCosignature(format!("witnessed_checkpoint: {e}")))?;
+        parse_log_id(&cosig.witnessed_checkpoint.log_id).map_err(|e| {
+            AcdpError::InvalidWitnessCosignature(format!("witnessed_checkpoint: {e}"))
+        })?;
+        decode_sha256_hex(&cosig.witnessed_checkpoint.root_hash).map_err(|e| {
+            AcdpError::InvalidWitnessCosignature(format!("witnessed_checkpoint: {e}"))
+        })?;
 
         // §4 canonical millisecond byte forms, checked on the RAW wire
         // strings (before parsing normalization).

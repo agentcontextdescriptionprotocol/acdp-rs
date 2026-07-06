@@ -290,9 +290,9 @@ pub fn evaluate_witness_quorum(
         ) {
             Ok(cosig) => {
                 verified.insert(cosig.witness_id.clone());
-                let within_age = policy.max_age_seconds.is_none_or(|max| {
-                    cosig.age_at(now) <= chrono::Duration::seconds(max as i64)
-                });
+                let within_age = policy
+                    .max_age_seconds
+                    .is_none_or(|max| cosig.age_at(now) <= chrono::Duration::seconds(max as i64));
                 if within_age {
                     fresh.insert(cosig.witness_id);
                 }
@@ -493,17 +493,19 @@ mod tests {
         // Body is witness A's, but sign with witness B's key.
         let mut cosig = signer(0x33, WITNESS_A).mint(&cp, Utc::now()).unwrap();
         let hash = cosig.preimage_hash().unwrap();
-        let (_alg, wrong_value) = acdp_crypto::sign::AcdpSigningKey::from(SigningKey::from_bytes(
-            &[0x44u8; 32],
-        ))
-        .sign_content_hash(&hash);
+        let (_alg, wrong_value) =
+            acdp_crypto::sign::AcdpSigningKey::from(SigningKey::from_bytes(&[0x44u8; 32]))
+                .sign_content_hash(&hash);
         cosig.signature.value = wrong_value;
         let wire = serde_json::to_value(&cosig).unwrap();
 
         let pub_a = SigningKey::from_bytes(&[0x33u8; 32]).verifying_key_bytes();
         let doc = witness_doc(WITNESS_A, "witness-key-1", &pub_a);
         let err = verify_witness_cosignature_value(&wire, &doc, &cp, None, None).unwrap_err();
-        assert!(matches!(err, AcdpError::InvalidWitnessCosignature(_)), "got {err:?}");
+        assert!(
+            matches!(err, AcdpError::InvalidWitnessCosignature(_)),
+            "got {err:?}"
+        );
         assert!(!err.is_transient());
     }
 
@@ -517,10 +519,10 @@ mod tests {
 
         let pub_a = SigningKey::from_bytes(&[0x33u8; 32]).verifying_key_bytes();
         let pub_b = SigningKey::from_bytes(&[0x44u8; 32]).verifying_key_bytes();
-        let cosig_a = serde_json::to_value(signer(0x33, WITNESS_A).mint(&cp, Utc::now()).unwrap())
-            .unwrap();
-        let cosig_b = serde_json::to_value(signer(0x44, WITNESS_B).mint(&cp, Utc::now()).unwrap())
-            .unwrap();
+        let cosig_a =
+            serde_json::to_value(signer(0x33, WITNESS_A).mint(&cp, Utc::now()).unwrap()).unwrap();
+        let cosig_b =
+            serde_json::to_value(signer(0x44, WITNESS_B).mint(&cp, Utc::now()).unwrap()).unwrap();
         // A second cosignature from witness A (fresh witnessed_at) counts once.
         let cosig_a2 = serde_json::to_value(
             signer(0x33, WITNESS_A)
@@ -530,10 +532,17 @@ mod tests {
         .unwrap();
 
         let mut docs = HashMap::new();
-        docs.insert(WITNESS_A.to_string(), witness_doc(WITNESS_A, "witness-key-1", &pub_a));
-        docs.insert(WITNESS_B.to_string(), witness_doc(WITNESS_B, "witness-key-1", &pub_b));
-        let trusted: HashSet<String> =
-            [WITNESS_A.to_string(), WITNESS_B.to_string()].into_iter().collect();
+        docs.insert(
+            WITNESS_A.to_string(),
+            witness_doc(WITNESS_A, "witness-key-1", &pub_a),
+        );
+        docs.insert(
+            WITNESS_B.to_string(),
+            witness_doc(WITNESS_B, "witness-key-1", &pub_b),
+        );
+        let trusted: HashSet<String> = [WITNESS_A.to_string(), WITNESS_B.to_string()]
+            .into_iter()
+            .collect();
 
         let report = evaluate_witness_quorum(
             &[cosig_a.clone(), cosig_b, cosig_a2],
@@ -554,7 +563,10 @@ mod tests {
 
         // Only trusting A → 1-witnessed; require 2 → not met.
         let only_a: HashSet<String> = [WITNESS_A.to_string()].into_iter().collect();
-        let strict = WitnessPolicy { min_witnesses: 2, ..WitnessPolicy::default() };
+        let strict = WitnessPolicy {
+            min_witnesses: 2,
+            ..WitnessPolicy::default()
+        };
         let report = evaluate_witness_quorum(&[cosig_a], &docs, &only_a, &cp, &strict, None);
         assert_eq!(report.witnessed_count, 1);
         assert!(!report.meets_quorum);

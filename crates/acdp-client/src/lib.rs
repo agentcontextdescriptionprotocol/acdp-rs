@@ -29,6 +29,6 @@ pub use verified::{
 };
 pub use witness::{
     evaluate_witness_quorum, mint_cosignature_checked, verify_witness_cosignature_value,
-    WitnessConsistencyCheck, WitnessPolicy, WitnessQuorumReport,
-    DEFAULT_WITNESS_MAX_AGE_SECONDS, DEFAULT_WITNESS_MAX_CLOCK_SKEW_SECONDS,
+    WitnessConsistencyCheck, WitnessPolicy, WitnessQuorumReport, DEFAULT_WITNESS_MAX_AGE_SECONDS,
+    DEFAULT_WITNESS_MAX_CLOCK_SKEW_SECONDS,
 };
