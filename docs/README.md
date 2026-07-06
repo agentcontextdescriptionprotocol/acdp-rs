@@ -51,6 +51,12 @@ normative protocol rules. For those, each page links to the relevant RFC.
 | [Conformance & testing](conformance.md) | Running the spec golden vectors and the conformance fixture suite via `ACDP_SPEC_DIR`. |
 | [Supply-chain security](supply-chain.md) | Build provenance (npm/PyPI/GitHub attestations), the Action-pinning policy, the `cargo vet` contributor workflow, and the `cargo deny` + `cargo audit` posture. |
 
+## Research track
+
+Forward-looking evaluation memos for roadmap items that are **not yet scheduled** —
+WebAssembly targeting, `did:webvh`, and post-quantum (ML-DSA) signatures. See
+[research/README.md](research/README.md).
+
 ---
 
 ## The 30-second model
