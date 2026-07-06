@@ -49,6 +49,7 @@ normative protocol rules. For those, each page links to the relevant RFC.
 | [CLI reference](cli.md) | The `acdp` binary (`cli` feature) — 11 subcommands for capabilities, retrieve, publish, validate, hash, sign, resolve. |
 | [Language bindings](bindings.md) | The Python (`acdp-py`) and Node (`acdp-node`) SDKs and the JSON-across-FFI design. |
 | [Conformance & testing](conformance.md) | Running the spec golden vectors and the conformance fixture suite via `ACDP_SPEC_DIR`. |
+| [Supply-chain security](supply-chain.md) | Build provenance (npm/PyPI/GitHub attestations), the Action-pinning policy, the `cargo vet` contributor workflow, and the `cargo deny` + `cargo audit` posture. |
 
 ---
 
