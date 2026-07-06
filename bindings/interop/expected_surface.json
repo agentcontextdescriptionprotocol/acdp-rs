@@ -31,8 +31,10 @@
     ],
     "AcdpVerifier": [
       "build_log_leaf",
+      "build_witness_cosignature",
       "canonical_preimage",
       "classify_under_revocation",
+      "evaluate_witness_quorum",
       "explain_hash_mismatch",
       "fingerprint_ed25519_b64",
       "parse_key_revocation",
@@ -46,7 +48,8 @@
       "verify_publish_request_offline",
       "verify_receipt",
       "verify_signature",
-      "verify_signature_p256"
+      "verify_signature_p256",
+      "verify_witness_cosignature"
     ],
     "AcdpCanonicalizer": [
       "canonicalize",

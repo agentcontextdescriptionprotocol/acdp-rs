@@ -32,7 +32,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::errors::input_err;
-use crate::v030;
+use crate::{v030, v040};
 
 /// Parse an optional RFC 3339 `now` argument, defaulting to the system
 /// clock (the fixture-friendly escape hatch: golden vectors pin their
@@ -50,6 +50,26 @@ fn parse_now(now_rfc3339: Option<&str>) -> std::result::Result<DateTime<Utc>, Er
 /// name on malformed input.
 fn parse_json(arg: &str, what: &str) -> std::result::Result<serde_json::Value, Error<String>> {
     serde_json::from_str(arg).map_err(|e| input_err(format!("invalid {what} JSON: {e}")))
+}
+
+/// Parse a REQUIRED RFC 3339 timestamp argument, throwing with the
+/// argument's name on malformed input.
+fn parse_rfc3339_required(
+    raw: &str,
+    what: &str,
+) -> std::result::Result<DateTime<Utc>, Error<String>> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| input_err(format!("invalid {what} '{raw}': {e}")))
+}
+
+/// Decode a hex-encoded 32-byte witness signing seed.
+fn decode_witness_seed_hex(seed_hex: &str) -> std::result::Result<[u8; 32], Error<String>> {
+    let bytes =
+        hex::decode(seed_hex).map_err(|e| input_err(format!("invalid witnessSeedHex: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| input_err("witnessSeedHex must decode to 32 bytes"))
 }
 
 /// Consumer-side verification utilities. All methods are static.
@@ -623,5 +643,157 @@ impl AcdpVerifier {
             &signer_fingerprint,
             created_at,
         ))
+    }
+
+    // ── ACDP 0.4 — witness cosignatures (RFC-ACDP-0015) ──────────────
+
+    /// Mint a signed transparency-log witness cosignature
+    /// (RFC-ACDP-0015 §5) — the MINT surface a host-language witness
+    /// service uses. The witness observes a checkpoint and cosigns it
+    /// with its OWN Ed25519 key (a witness key, distinct from the
+    /// registry receipt key); the returned `log_cosignature` uses the
+    /// RFC-ACDP-0010 §5 construction verbatim (the witness signs the
+    /// ASCII bytes of the `"sha256:<hex>"` cosignature-hash string).
+    ///
+    /// * `witnessedCheckpointJson` — the identity-bearing subset of the
+    ///   checkpoint the witness observed: `{"log_id", "tree_size",
+    ///   "root_hash", "timestamp"}` (closed schema).
+    /// * `witnessDid` — the witness's own DID (`did:web` or `did:key`).
+    ///   The signing-key DID URL is derived as
+    ///   `"<witnessDid>#witness-key-1"` (the §5/§9 witness-key
+    ///   convention).
+    /// * `witnessSeedHex` — the witness Ed25519 signing seed, hex-
+    ///   encoded (64 hex chars → 32 bytes). The same seed produces
+    ///   byte-identical cosignatures across bindings.
+    /// * `witnessedAtRfc3339` — the witness-clock observation time
+    ///   (canonical millisecond RFC 3339 UTC; truncated to ms).
+    ///
+    /// Returns the signed `log_cosignature` as a JSON string. This is
+    /// the RAW mint (no §7 obligation — the checkpoint's own signature
+    /// and consistency against a retained head are the host's job).
+    /// Throws on malformed input (bad seed / timestamp / witness DID /
+    /// witnessed_checkpoint).
+    #[napi]
+    pub fn build_witness_cosignature(
+        witnessed_checkpoint_json: String,
+        witness_did: String,
+        witness_seed_hex: String,
+        witnessed_at_rfc3339: String,
+    ) -> Result<String, String> {
+        let witnessed_checkpoint = parse_json(&witnessed_checkpoint_json, "witnessed_checkpoint")?;
+        let seed = decode_witness_seed_hex(&witness_seed_hex)?;
+        let witnessed_at = parse_rfc3339_required(&witnessed_at_rfc3339, "witnessedAtRfc3339")?;
+        v040::build_witness_cosignature_core(
+            &witnessed_checkpoint,
+            &witness_did,
+            &seed,
+            witnessed_at,
+        )
+        .map_err(crate::errors::map_acdp_err)
+    }
+
+    /// Verify one witness cosignature against a checkpoint the consumer
+    /// has itself verified, offline per RFC-ACDP-0015 §8 (steps 1–5):
+    /// closed parse + witness binding, checkpoint binding, the witness
+    /// signature over the RAW wire preimage against the key resolved
+    /// from the caller-supplied witness DID document (§9: looked up in
+    /// `verificationMethod`, retired keys stay verifiable), and the
+    /// `witnessed_at` well-formedness + forward-skew check.
+    ///
+    /// * `cosigJson` — the `log_cosignature` object as received.
+    /// * `witnessDidDocJson` — the WITNESS's resolved DID document
+    ///   (resolution stays in JS land). Its `id` MUST equal the
+    ///   cosignature's `witness_id`.
+    /// * `expectedCheckpointJson` — the RFC-ACDP-0012 checkpoint the
+    ///   consumer independently holds and verified; the cosignature's
+    ///   `{log_id, tree_size, root_hash}` MUST match it (§8 step 4).
+    /// * `nowRfc3339` — the consumer clock (defaults to now).
+    /// * `maxClockSkewSecs` — §8 step 5 forward allowance (default 120).
+    ///
+    /// Returns a JSON verdict: `{"valid": true, "witness_id": ...,
+    /// "age_secs": int, "stale": bool}` — staleness (§8.1) is policy,
+    /// not a verification failure — or `{"valid": false, "code":
+    /// "invalid_witness_cosignature"|..., "error": ...}`. Throws only
+    /// on malformed host input.
+    #[napi]
+    pub fn verify_witness_cosignature(
+        cosig_json: String,
+        witness_did_doc_json: String,
+        expected_checkpoint_json: String,
+        now_rfc3339: Option<String>,
+        max_clock_skew_secs: Option<i64>,
+    ) -> Result<String, String> {
+        let cosig = parse_json(&cosig_json, "cosignature")?;
+        let doc = parse_json(&witness_did_doc_json, "witness DID document")?;
+        let checkpoint = parse_json(&expected_checkpoint_json, "checkpoint")?;
+        let now = parse_now(now_rfc3339.as_deref())?;
+        Ok(v040::verify_witness_cosignature_verdict(
+            &cosig,
+            &doc,
+            &checkpoint,
+            now,
+            max_clock_skew_secs.unwrap_or(v040::DEFAULT_WITNESS_MAX_CLOCK_SKEW_SECS),
+            v040::DEFAULT_WITNESS_MAX_AGE_SECS,
+        ))
+    }
+
+    /// Compute the RFC-ACDP-0015 §8 N-witnessed report over a set of
+    /// cosignatures for a checkpoint the consumer has itself verified.
+    /// A cosignature counts toward N iff it names a TRUSTED witness,
+    /// covers the checkpoint's `(log_id, tree_size, root_hash)` tuple,
+    /// and passes every §8 step; DISTINCT `witness_id` values are
+    /// counted. A cosignature that fails a step does not fail the
+    /// checkpoint — it is recorded in `failures` and simply does not
+    /// count.
+    ///
+    /// * `cosignaturesJson` — a JSON array of `log_cosignature` objects.
+    /// * `expectedCheckpointJson` — the verified checkpoint the quorum
+    ///   is over.
+    /// * `trustedWitnessDidsJson` — a JSON array of the witness DIDs the
+    ///   consumer trusts; only these can count.
+    /// * `witnessDidDocsJson` — a JSON object mapping each `witness_id`
+    ///   to its resolved DID document.
+    /// * `policyJson` — `{"min_witnesses"?, "max_age_secs"?,
+    ///   "max_clock_skew_secs"?}`. Defaults mirror the Rust
+    ///   `WitnessPolicy`: `min_witnesses=1`, `max_age_secs=300` (an
+    ///   explicit `null` disables the freshness split),
+    ///   `max_clock_skew_secs=120`.
+    /// * `nowRfc3339` — the consumer clock (defaults to now).
+    ///
+    /// Returns a JSON report: `{"witnessed_count", "witnesses",
+    /// "meets_quorum", "fresh_witnessed_count", "meets_fresh_quorum",
+    /// "failures"}`. Throws on malformed host input.
+    #[napi]
+    pub fn evaluate_witness_quorum(
+        cosignatures_json: String,
+        expected_checkpoint_json: String,
+        trusted_witness_dids_json: String,
+        witness_did_docs_json: String,
+        policy_json: String,
+        now_rfc3339: Option<String>,
+    ) -> Result<String, String> {
+        let cosignatures: Vec<serde_json::Value> = serde_json::from_str(&cosignatures_json)
+            .map_err(|e| input_err(format!("invalid cosignatures JSON (array): {e}")))?;
+        let checkpoint = parse_json(&expected_checkpoint_json, "checkpoint")?;
+        let trusted: Vec<String> = serde_json::from_str(&trusted_witness_dids_json)
+            .map_err(|e| input_err(format!("invalid trustedWitnessDids JSON (array): {e}")))?;
+        let docs_value = parse_json(&witness_did_docs_json, "witness DID docs")?;
+        let docs = docs_value
+            .as_object()
+            .ok_or_else(|| {
+                input_err("witnessDidDocsJson must be a JSON object keyed by witness_id")
+            })?
+            .clone();
+        let policy = v040::parse_witness_policy(&policy_json).map_err(input_err)?;
+        let now = parse_now(now_rfc3339.as_deref())?;
+        v040::evaluate_witness_quorum_report(
+            &cosignatures,
+            &checkpoint,
+            &trusted,
+            &docs,
+            &policy,
+            now,
+        )
+        .map_err(crate::errors::map_acdp_err)
     }
 }

@@ -20,4 +20,5 @@ mod merkle;
 mod producer;
 mod safe_http;
 mod v030;
+mod v040;
 mod verifier;

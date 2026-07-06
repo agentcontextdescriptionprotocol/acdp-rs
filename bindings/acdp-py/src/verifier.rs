@@ -47,7 +47,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::errors::map_acdp_error;
-use crate::v030;
+use crate::{v030, v040};
 
 /// Parse an optional RFC 3339 `now` argument, defaulting to the system
 /// clock (the fixture-friendly escape hatch: golden vectors pin their
@@ -66,6 +66,23 @@ fn parse_now(now_rfc3339: Option<&str>) -> PyResult<DateTime<Utc>> {
 fn parse_json(arg: &str, what: &str) -> PyResult<serde_json::Value> {
     serde_json::from_str(arg)
         .map_err(|e| PyValueError::new_err(format!("invalid {what} JSON: {e}")))
+}
+
+/// Parse a REQUIRED RFC 3339 timestamp argument, raising `ValueError`
+/// with the argument's name on malformed input.
+fn parse_rfc3339_required(raw: &str, what: &str) -> PyResult<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| PyValueError::new_err(format!("invalid {what} '{raw}': {e}")))
+}
+
+/// Decode a hex-encoded 32-byte witness signing seed.
+fn decode_witness_seed_hex(seed_hex: &str) -> PyResult<[u8; 32]> {
+    let bytes = hex::decode(seed_hex)
+        .map_err(|e| PyValueError::new_err(format!("invalid witness_seed_hex: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| PyValueError::new_err("witness_seed_hex must decode to 32 bytes"))
 }
 
 /// Decode a standard-base64 raw 32-byte Ed25519 public key.
@@ -648,5 +665,169 @@ impl PyAcdpVerifier {
             signer_fingerprint,
             created_at,
         ))
+    }
+
+    // ── ACDP 0.4 — witness cosignatures (RFC-ACDP-0015) ──────────────
+
+    /// Mint a signed transparency-log witness cosignature
+    /// (RFC-ACDP-0015 §5) — the MINT surface a host-language witness
+    /// service uses. The witness observes a checkpoint and cosigns it
+    /// with its OWN Ed25519 key (a witness key, distinct from the
+    /// registry receipt key); the returned `log_cosignature` uses the
+    /// RFC-ACDP-0010 §5 construction verbatim (the witness signs the
+    /// ASCII bytes of the `"sha256:<hex>"` cosignature-hash string).
+    ///
+    /// * `witnessed_checkpoint_json` — the identity-bearing subset of
+    ///   the checkpoint the witness observed, copied verbatim from the
+    ///   verified checkpoint: `{"log_id", "tree_size", "root_hash",
+    ///   "timestamp"}` (closed schema — an unknown member raises).
+    /// * `witness_did` — the witness's own DID (`did:web` or `did:key`).
+    ///   The signing-key DID URL is derived as
+    ///   `"<witness_did>#witness-key-1"` (the §5/§9 witness-key
+    ///   convention).
+    /// * `witness_seed_hex` — the witness Ed25519 signing seed, hex-
+    ///   encoded (64 hex chars → 32 bytes). The same seed produces
+    ///   byte-identical cosignatures across bindings.
+    /// * `witnessed_at_rfc3339` — the witness-clock observation time
+    ///   (canonical millisecond RFC 3339 UTC; truncated to ms).
+    ///
+    /// Returns the signed `log_cosignature` as a JSON string. This is
+    /// the RAW mint (no §7 obligation — the checkpoint's own signature
+    /// and consistency against a retained head are the host's job).
+    /// Raises `ValueError` on malformed input (bad seed, bad
+    /// timestamp, malformed witness DID / witnessed_checkpoint).
+    #[staticmethod]
+    fn build_witness_cosignature(
+        witnessed_checkpoint_json: &str,
+        witness_did: &str,
+        witness_seed_hex: &str,
+        witnessed_at_rfc3339: &str,
+    ) -> PyResult<String> {
+        let witnessed_checkpoint = parse_json(witnessed_checkpoint_json, "witnessed_checkpoint")?;
+        let seed = decode_witness_seed_hex(witness_seed_hex)?;
+        let witnessed_at = parse_rfc3339_required(witnessed_at_rfc3339, "witnessed_at_rfc3339")?;
+        v040::build_witness_cosignature_core(
+            &witnessed_checkpoint,
+            witness_did,
+            &seed,
+            witnessed_at,
+        )
+        .map_err(map_acdp_error)
+    }
+
+    /// Verify one witness cosignature against a checkpoint the consumer
+    /// has itself verified, offline per RFC-ACDP-0015 §8 (steps 1–5):
+    /// closed parse + witness binding, checkpoint binding, the witness
+    /// signature over the RAW wire preimage against the key resolved
+    /// from the caller-supplied witness DID document (§9: looked up in
+    /// `verificationMethod`, retired keys stay verifiable), and the
+    /// `witnessed_at` well-formedness + forward-skew check.
+    ///
+    /// * `cosig_json` — the `log_cosignature` object as received.
+    /// * `witness_did_doc_json` — the WITNESS's resolved DID document
+    ///   (resolution stays in the host). Its `id` MUST equal the
+    ///   cosignature's `witness_id`.
+    /// * `expected_checkpoint_json` — the RFC-ACDP-0012 checkpoint the
+    ///   consumer independently holds and verified; the cosignature's
+    ///   `{log_id, tree_size, root_hash}` MUST match it (§8 step 4).
+    /// * `now_rfc3339` — the consumer clock (defaults to now).
+    /// * `max_clock_skew_secs` — §8 step 5 forward allowance
+    ///   (default 120).
+    ///
+    /// Returns a JSON verdict: `{"valid": true, "witness_id": ...,
+    /// "age_secs": int, "stale": bool}` — staleness (§8.1) is policy,
+    /// not a verification failure; an old cosignature is stronger
+    /// anti-backdating evidence — or `{"valid": false, "code":
+    /// "invalid_witness_cosignature"|..., "error": ...}`. Raises
+    /// `ValueError` only on malformed host input.
+    #[staticmethod]
+    #[pyo3(signature = (cosig_json, witness_did_doc_json, expected_checkpoint_json, now_rfc3339=None, max_clock_skew_secs=None))]
+    fn verify_witness_cosignature(
+        cosig_json: &str,
+        witness_did_doc_json: &str,
+        expected_checkpoint_json: &str,
+        now_rfc3339: Option<&str>,
+        max_clock_skew_secs: Option<i64>,
+    ) -> PyResult<String> {
+        let cosig = parse_json(cosig_json, "cosignature")?;
+        let doc = parse_json(witness_did_doc_json, "witness DID document")?;
+        let checkpoint = parse_json(expected_checkpoint_json, "checkpoint")?;
+        let now = parse_now(now_rfc3339)?;
+        Ok(v040::verify_witness_cosignature_verdict(
+            &cosig,
+            &doc,
+            &checkpoint,
+            now,
+            max_clock_skew_secs.unwrap_or(v040::DEFAULT_WITNESS_MAX_CLOCK_SKEW_SECS),
+            v040::DEFAULT_WITNESS_MAX_AGE_SECS,
+        ))
+    }
+
+    /// Compute the RFC-ACDP-0015 §8 N-witnessed report over a set of
+    /// cosignatures for a checkpoint the consumer has itself verified.
+    /// A cosignature counts toward N iff it names a TRUSTED witness,
+    /// covers the checkpoint's `(log_id, tree_size, root_hash)` tuple,
+    /// and passes every §8 step; DISTINCT `witness_id` values are
+    /// counted (repeats from one witness count once). A cosignature
+    /// that fails a step does not fail the checkpoint — it is recorded
+    /// in `failures` and simply does not count.
+    ///
+    /// * `cosignatures_json` — a JSON array of `log_cosignature`
+    ///   objects (e.g. a checkpoint response's `witness_signatures`).
+    /// * `expected_checkpoint_json` — the verified checkpoint the
+    ///   quorum is over.
+    /// * `trusted_witness_dids_json` — a JSON array of the witness DIDs
+    ///   the consumer trusts; only these can count.
+    /// * `witness_did_docs_json` — a JSON object mapping each
+    ///   `witness_id` to its resolved DID document.
+    /// * `policy_json` — `{"min_witnesses"?, "max_age_secs"?,
+    ///   "max_clock_skew_secs"?}`. Defaults mirror the Rust
+    ///   `WitnessPolicy`: `min_witnesses=1`, `max_age_secs=300` (an
+    ///   explicit `null` disables the freshness split),
+    ///   `max_clock_skew_secs=120`.
+    /// * `now_rfc3339` — the consumer clock (defaults to now).
+    ///
+    /// Returns a JSON report: `{"witnessed_count", "witnesses",
+    /// "meets_quorum", "fresh_witnessed_count", "meets_fresh_quorum",
+    /// "failures"}`. Raises `ValueError` on malformed host input.
+    #[staticmethod]
+    #[pyo3(signature = (cosignatures_json, expected_checkpoint_json, trusted_witness_dids_json, witness_did_docs_json, policy_json, now_rfc3339=None))]
+    fn evaluate_witness_quorum(
+        cosignatures_json: &str,
+        expected_checkpoint_json: &str,
+        trusted_witness_dids_json: &str,
+        witness_did_docs_json: &str,
+        policy_json: &str,
+        now_rfc3339: Option<&str>,
+    ) -> PyResult<String> {
+        let cosignatures: Vec<serde_json::Value> = serde_json::from_str(cosignatures_json)
+            .map_err(|e| {
+                PyValueError::new_err(format!("invalid cosignatures JSON (array): {e}"))
+            })?;
+        let checkpoint = parse_json(expected_checkpoint_json, "checkpoint")?;
+        let trusted: Vec<String> =
+            serde_json::from_str(trusted_witness_dids_json).map_err(|e| {
+                PyValueError::new_err(format!("invalid trusted_witness_dids JSON (array): {e}"))
+            })?;
+        let docs_value = parse_json(witness_did_docs_json, "witness DID docs")?;
+        let docs = docs_value
+            .as_object()
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "witness_did_docs_json must be a JSON object keyed by witness_id",
+                )
+            })?
+            .clone();
+        let policy = v040::parse_witness_policy(policy_json).map_err(PyValueError::new_err)?;
+        let now = parse_now(now_rfc3339)?;
+        v040::evaluate_witness_quorum_report(
+            &cosignatures,
+            &checkpoint,
+            &trusted,
+            &docs,
+            &policy,
+            now,
+        )
+        .map_err(map_acdp_error)
     }
 }

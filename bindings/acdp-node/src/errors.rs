@@ -18,6 +18,7 @@ use napi::bindgen_prelude::*;
 pub(crate) fn map_acdp_err(e: AcdpError) -> Error<String> {
     let code = match &e {
         AcdpError::InvalidLogProof(_) => "invalid_log_proof",
+        AcdpError::InvalidWitnessCosignature(_) => "invalid_witness_cosignature",
         AcdpError::ImmutableField(_) => "immutable_field",
         AcdpError::InvalidLifecycleTransition(_) => "invalid_lifecycle_transition",
         AcdpError::InvalidReceipt(_) => "invalid_receipt",
