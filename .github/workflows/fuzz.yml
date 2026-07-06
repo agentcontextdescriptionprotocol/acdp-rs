@@ -32,6 +32,8 @@ jobs:
         with:
           workspaces: fuzz
       - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
+        with:
+          tool: cargo-fuzz
       - run: cargo fuzz build
 
   run:
@@ -49,6 +51,8 @@ jobs:
         with:
           workspaces: fuzz
       - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
+        with:
+          tool: cargo-fuzz
       - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300
       - name: Upload crash artifacts
         if: failure()

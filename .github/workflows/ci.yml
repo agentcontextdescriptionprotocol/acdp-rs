@@ -114,6 +114,8 @@ jobs:
       # Dependabot PRs. Same install mechanism as the coverage job's
       # cargo-llvm-cov.
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-deny
+        with:
+          tool: cargo-deny
       - run: cargo deny check
 
   vet:
@@ -124,6 +126,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - uses: taiki-e/install-action@c0ae9b92c15529ec87e792a1233f3f4a6c726bfa # cargo-vet
+        with:
+          tool: cargo-vet
       # BLOCKING supply-chain gate: every third-party dependency in the
       # locked graph must be covered by a cargo-vet audit, an imported
       # audit from a trusted set (mozilla/google/bytecode-alliance), or an
@@ -161,6 +165,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - uses: taiki-e/install-action@28a94b8721026748876cf52d0a3048ff9e4c9769 # cargo-semver-checks
+        with:
+          tool: cargo-semver-checks
       # Compares every published workspace crate's public API against its
       # latest crates.io release and fails when a change requires a semver
       # bump the current version numbers don't carry. release-plz derives
@@ -178,6 +184,8 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - uses: taiki-e/install-action@7c1105379b6217809b9ed26c163a46c65c7a528f # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
       - uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
