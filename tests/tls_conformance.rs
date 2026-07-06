@@ -384,8 +384,9 @@ async fn fed_006_registry_did_mismatch() {
 // ── SEC-01 — CrossRegistryResolver pins authority DNS ────────────────────────
 
 /// SEC-01 — `CrossRegistryResolver` builds its per-authority
-/// `RegistryClient` via `RegistryClient::new_pinned`, which resolves the
-/// authority's DNS up-front and refuses any answer in a forbidden range.
+/// `RegistryClient` via `RegistryClient::builder(base).pinned(true)`,
+/// which resolves the authority's DNS up-front and refuses any answer
+/// in a forbidden range.
 ///
 /// `check_url` alone only validates URL *syntax* — a hostile `ctx_id`
 /// authority that is a syntactically valid public hostname but resolves
@@ -404,8 +405,8 @@ async fn sec_01_cross_registry_pins_authority_dns() {
         Ok(_) => panic!("SEC-01: authority resolving to loopback MUST be refused"),
         Err(e) => e,
     };
-    // `new_pinned` → `pin_resolved_ip` rejects the loopback answer with
-    // `SchemaViolation` ("forbidden range"); it propagates unwrapped
+    // The pinned builder → `pin_resolved_ip` rejects the loopback answer
+    // with `SchemaViolation` ("forbidden range"); it propagates unwrapped
     // from `client_for`.
     assert!(
         matches!(err, AcdpError::SchemaViolation(_)),
