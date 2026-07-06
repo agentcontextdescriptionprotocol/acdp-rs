@@ -138,7 +138,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-      - uses: taiki-e/install-action@c0ae9b92c15529ec87e792a1233f3f4a6c726bfa # cargo-vet
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-vet
         with:
           tool: cargo-vet@0.10.2
       # BLOCKING supply-chain gate: every third-party dependency in the
@@ -179,7 +179,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-      - uses: taiki-e/install-action@28a94b8721026748876cf52d0a3048ff9e4c9769 # cargo-semver-checks
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-semver-checks
         with:
           tool: cargo-semver-checks
       # Compares every published workspace crate's public API against its
@@ -199,7 +199,7 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-      - uses: taiki-e/install-action@7c1105379b6217809b9ed26c163a46c65c7a528f # cargo-llvm-cov
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info

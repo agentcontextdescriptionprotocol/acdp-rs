@@ -33,7 +33,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: fuzz
-      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-fuzz
         with:
           tool: cargo-fuzz
       - run: cargo fuzz build --target x86_64-unknown-linux-gnu
@@ -54,7 +54,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: fuzz
-      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-fuzz
         with:
           tool: cargo-fuzz
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=300
