@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-client-v0.3.0...acdp-client-v0.4.0) - 2026-07-06
+
+### Added
+
+- *(client)* [**breaking**] add RegistryClient::builder, deprecate new_pinned
+
+### Other
+
+- *(client)* drop the private-item intra-doc link in RegistryClientBuilder::build
+- *(client)* [**breaking**] encapsulate VerifiedContext behind accessors
+
 ## [0.3.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-client-v0.2.0...acdp-client-v0.3.0) - 2026-07-05
 
 ### Added
