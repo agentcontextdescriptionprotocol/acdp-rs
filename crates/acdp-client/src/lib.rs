@@ -13,6 +13,7 @@ pub mod receipt;
 pub mod registry;
 pub mod revocation;
 pub mod verified;
+pub mod witness;
 
 pub use cross_registry::{CrossRegistryResolver, ResolverOptions};
 pub use data_ref::{
@@ -25,4 +26,9 @@ pub use revocation::{classify_under_revocation, find_revocations, verify_revocat
 pub use verified::{
     HistoricalKeyPolicy, KeyAuthorization, LineageHeadPolicy, ReceiptPolicy, RevocationPolicy,
     VerificationPolicy, VerificationReport, VerifiedContext,
+};
+pub use witness::{
+    evaluate_witness_quorum, mint_cosignature_checked, verify_witness_cosignature_value,
+    WitnessConsistencyCheck, WitnessPolicy, WitnessQuorumReport,
+    DEFAULT_WITNESS_MAX_AGE_SECONDS, DEFAULT_WITNESS_MAX_CLOCK_SKEW_SECONDS,
 };
