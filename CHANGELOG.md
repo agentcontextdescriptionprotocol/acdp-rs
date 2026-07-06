@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — ACDP 0.2 Trust & Hardening
 
+## [0.5.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.1...acdp-v0.5.2) - 2026-07-06
+
+### Other
+
+- add research-track evaluation memos (wasm, did:webvh, post-quantum)
+
 ## [0.5.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.0...acdp-v0.5.1) - 2026-07-06
 
 ### Added
