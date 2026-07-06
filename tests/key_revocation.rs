@@ -757,12 +757,8 @@ async fn rev_002_fetch_pipeline_boundary_matrix() {
     let verified = VerifiedContext::fetch(&client, &h.resolver, &ctx_id)
         .await
         .expect("baseline fetch");
-    assert_eq!(verified.key_status, KeyAuthorization::CurrentlyAuthorized);
-    let receipt_time = verified
-        .verified_receipt
-        .as_ref()
-        .expect("receipt")
-        .created_at;
+    assert_eq!(verified.key_status(), KeyAuthorization::CurrentlyAuthorized);
+    let receipt_time = verified.verified_receipt().expect("receipt").created_at;
 
     // A: boundary strictly after the receipt-attested publish time →
     // historically authorized (pre-compromise, receipt-attested), even
@@ -778,7 +774,7 @@ async fn rev_002_fetch_pipeline_boundary_matrix() {
         .await
         .expect("pre-compromise context must verify");
     assert_eq!(
-        verified.key_status,
+        verified.key_status(),
         KeyAuthorization::HistoricallyAuthorizedPreCompromise
     );
 
@@ -837,7 +833,7 @@ async fn rev_002_fetch_pipeline_boundary_matrix() {
     let verified = VerifiedContext::fetch_with_policy(&client, &h.resolver, &ctx_id, &unrelated)
         .await
         .expect("unrelated revocation is inert");
-    assert_eq!(verified.key_status, KeyAuthorization::CurrentlyAuthorized);
+    assert_eq!(verified.key_status(), KeyAuthorization::CurrentlyAuthorized);
 }
 
 // ── §8 discovery: find_revocations over a searchable harness ────────────────

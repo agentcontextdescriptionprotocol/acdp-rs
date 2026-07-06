@@ -316,15 +316,14 @@ async fn fetch_current_policy_end_to_end() {
         .await
         .expect("fetch_current with default policy");
     let head = verified
-        .verified_head_receipt
-        .as_ref()
+        .verified_head_receipt()
         .expect("head receipt verified");
     assert_eq!(head.head_version, 2);
     assert_eq!(head.head_ctx_id, verified.body().ctx_id);
-    assert_eq!(verified.head_receipt_stale, Some(false));
+    assert_eq!(verified.head_receipt_stale(), Some(false));
     // The RFC-ACDP-0010 publish receipt rides the same response and is
     // verified independently (§7: three independent verdicts).
-    assert!(verified.verified_receipt.is_some());
+    assert!(verified.verified_receipt().is_some());
 
     VerifiedContext::fetch_current_with_policy(&client, &h.resolver, &lineage_id, &require)
         .await
@@ -346,8 +345,8 @@ async fn fetch_current_policy_end_to_end() {
     let verified = VerifiedContext::fetch_current(&client, &h.resolver, &lineage_id)
         .await
         .expect("VerifyIfPresent tolerates absence");
-    assert!(verified.verified_head_receipt.is_none());
-    assert_eq!(verified.head_receipt_stale, None);
+    assert!(verified.verified_head_receipt().is_none());
+    assert_eq!(verified.head_receipt_stale(), None);
 
     // lhr-002 behavior: v2 body served with the (genuinely signed)
     // v1-attesting receipt → §7 step 5 byte-match fails.
@@ -382,8 +381,8 @@ async fn fetch_current_policy_end_to_end() {
         VerifiedContext::fetch_current_with_policy(&client, &h.resolver, &lineage_id, &ignore)
             .await
             .expect("Ignore policy skips head-receipt verification");
-    assert!(verified.verified_head_receipt.is_none());
-    assert!(verified.inner.lineage_head_receipt.is_some());
+    assert!(verified.verified_head_receipt().is_none());
+    assert!(verified.lineage_head_receipt().is_some());
 }
 
 // ── §6 / §9 issuance invariants ──────────────────────────────────────────────

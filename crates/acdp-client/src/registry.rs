@@ -63,8 +63,36 @@ impl RegistryClient {
     /// Uses `rustls` for TLS; does not use the system OpenSSL. Applies
     /// the RFC-ACDP-0006 §7.4 default timeouts (5s connect, 30s total)
     /// and §7.5 redirect policy (max 3 follows, same authority only).
+    ///
+    /// # DNS-rebinding posture (default)
+    ///
+    /// This constructor installs the **`SafeDnsResolver` DNS hook**
+    /// (RFC-ACDP-0006 §7.6): every hostname lookup — the first connect,
+    /// each redirect, and every reconnect the pool makes over the
+    /// client's lifetime — is filtered through the [`SsrfPolicy`] *at
+    /// DNS time, before any TCP connect*. This is **strictly stronger
+    /// than pin-once resolution** ([`Self::new_pinned`]): a pinned
+    /// client validates a single answer and reuses that address, so a
+    /// hostile authoritative DNS server that only later flips a name
+    /// into a forbidden range is still caught here but not there. The
+    /// DNS-hook posture is therefore the default for all callers; reach
+    /// for [`Self::builder`] only when you need a non-default knob (a
+    /// private root cert, a custom [`SsrfPolicy`], timeout overrides, or
+    /// the legacy pinned mode).
     pub fn new(base_url: &str) -> Result<Self, AcdpError> {
         Self::build(base_url, None, None, SsrfPolicy::default())
+    }
+
+    /// Start a [`RegistryClientBuilder`] for the non-default connection
+    /// postures — a private root certificate, a custom [`SsrfPolicy`],
+    /// timeout overrides, and the legacy pinned-resolution mode.
+    ///
+    /// The builder's *default* is identical to [`Self::new`]: the
+    /// stronger `SafeDnsResolver` DNS-hook posture with the default
+    /// SSRF policy and the RFC-ACDP-0006 §7.4 timeouts. Opt into
+    /// pin-once resolution with [`RegistryClientBuilder::pinned`].
+    pub fn builder(base_url: &str) -> RegistryClientBuilder {
+        RegistryClientBuilder::new(base_url)
     }
 
     /// Connect to a registry that trusts the given PEM-encoded root
@@ -135,126 +163,42 @@ impl RegistryClient {
         resolve_target: Option<std::net::SocketAddr>,
         policy_ssrf: SsrfPolicy,
     ) -> Result<Self, AcdpError> {
-        let base = base_url.trim_end_matches('/').to_string();
-        // RFC-ACDP-0006 §7 / RFC-ACDP-0008 §4.8–4.9: reject non-HTTPS,
-        // IP-literal, and malformed base URLs up front, then filter every
-        // resolved IP at DNS time (below) so DNS-rebinding answers in
-        // forbidden ranges are refused before connect. Previously `new()`
-        // applied neither, contradicting the documented "applied
-        // automatically by the public client APIs" guarantee (P0-1).
-        policy_ssrf.check_url(&base)?;
-        let original_authority = url::Url::parse(&base)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_string));
-
-        let policy = redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(format!(
-                    "exceeded {MAX_REDIRECTS} redirects per RFC-ACDP-0006 §7.5"
-                ));
-            }
-            // Same-authority enforcement (scheme + host + port) against the
-            // original request URL. RFC-ACDP-0008 §4.8.
-            let cross = attempt
-                .previous()
-                .first()
-                .filter(|orig| !acdp_safe_http::same_fetch_authority(orig, attempt.url()))
-                .map(|orig| (orig.to_string(), attempt.url().to_string()));
-            if let Some((from, to)) = cross {
-                return attempt.error(format!(
-                    "cross-authority redirect rejected ({from} -> {to})"
-                ));
-            }
-            attempt.follow()
-        });
-
-        let mut builder = Client::builder()
-            .use_rustls_tls()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(policy)
-            // DNS-time SSRF filtering for every connection (incl. redirects
-            // and reconnects), defeating DNS rebinding — RFC-ACDP-0006 §7.6.
-            // Mirrors `WebResolver::build_http_client` / `HttpsDataRefFetcher`.
-            .dns_resolver(acdp_safe_http::SafeDnsResolver::arc(policy_ssrf));
-
-        if let Some(pem) = extra_root_pem {
-            let cert = reqwest::Certificate::from_pem(pem)
-                .map_err(|e| AcdpError::Http(format!("invalid root cert PEM: {e}")))?;
-            builder = builder.add_root_certificate(cert);
+        RegistryClientBuilder {
+            base_url: base_url.to_string(),
+            pinned: false,
+            ssrf_policy: policy_ssrf,
+            root_cert_pem: extra_root_pem.map(<[u8]>::to_vec),
+            resolve_target,
+            connect_timeout: CONNECT_TIMEOUT,
+            request_timeout: REQUEST_TIMEOUT,
         }
-
-        if let (Some(target), Some(host)) = (resolve_target, original_authority) {
-            builder = builder.resolve(&host, target);
-        }
-
-        let http = builder
-            .build()
-            .map_err(|e| AcdpError::Http(e.to_string()))?;
-
-        Ok(Self { base, http })
+        .build_blocking()
     }
 
-    /// Connect to a registry with DNS-rebinding protection
+    /// Connect to a registry with pin-once DNS-rebinding protection
     /// (RFC-ACDP-0006 §7.6).
     ///
     /// Resolves the hostname once, validates the resolved IP against
-    /// `policy`, then pins that IP into the HTTP client so every
-    /// connection uses the address that was filtered. Use this in
-    /// server-side cross-registry contexts where a hostile authoritative
-    /// DNS server could otherwise flip the answer between the SSRF
-    /// filter check and the actual connect.
+    /// `policy`, then pins that IP into the HTTP client.
     ///
-    /// Returns the same [`AcdpError`] variants as
-    /// [`SsrfPolicy::pin_resolved_ip`] when the host cannot be safely
-    /// resolved.
+    /// **Deprecated:** the default [`Self::new`] posture installs the
+    /// `SafeDnsResolver` DNS hook, which validates the resolved IP on
+    /// *every* connection (including reconnects) rather than just once —
+    /// strictly stronger protection. For the rare case that still wants
+    /// pin-once semantics with a custom policy, use
+    /// `RegistryClient::builder(base_url).pinned(true).ssrf_policy(policy).build().await`.
+    #[deprecated(
+        since = "0.4.0",
+        note = "prefer `RegistryClient::new` (SafeDnsResolver DNS hook — validates every \
+                connection, strictly stronger than pin-once) or, for explicit pin-once mode, \
+                `RegistryClient::builder(base_url).pinned(true).ssrf_policy(policy).build().await`"
+    )]
     pub async fn new_pinned(base_url: &str, policy: &SsrfPolicy) -> Result<Self, AcdpError> {
-        let base = base_url.trim_end_matches('/').to_string();
-        let parsed = url::Url::parse(&base)
-            .map_err(|e| AcdpError::SchemaViolation(format!("invalid base URL: {e}")))?;
-        // Pre-flight: scheme + host range checks via the same policy.
-        policy.check_url(&base)?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| AcdpError::SchemaViolation(format!("base URL has no host: {base}")))?
-            .to_string();
-        let port = parsed
-            .port_or_known_default()
-            .unwrap_or(if parsed.scheme() == "http" { 80 } else { 443 });
-
-        let pinned = policy.pin_resolved_ip(&host, port).await?;
-
-        let policy_redirect = redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(format!(
-                    "exceeded {MAX_REDIRECTS} redirects per RFC-ACDP-0006 §7.5"
-                ));
-            }
-            // Same-authority enforcement (scheme + host + port) against the
-            // original request URL. RFC-ACDP-0008 §4.8.
-            let cross = attempt
-                .previous()
-                .first()
-                .filter(|orig| !acdp_safe_http::same_fetch_authority(orig, attempt.url()))
-                .map(|orig| (orig.to_string(), attempt.url().to_string()));
-            if let Some((from, to)) = cross {
-                return attempt.error(format!(
-                    "cross-authority redirect rejected ({from} -> {to})"
-                ));
-            }
-            attempt.follow()
-        });
-
-        let http = Client::builder()
-            .use_rustls_tls()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(policy_redirect)
-            .resolve(&host, pinned)
+        Self::builder(base_url)
+            .pinned(true)
+            .ssrf_policy(policy.clone())
             .build()
-            .map_err(|e| AcdpError::Http(e.to_string()))?;
-
-        Ok(Self { base, http })
+            .await
     }
 
     // ── Capabilities ────────────────────────────────────────────────────────
@@ -468,6 +412,201 @@ impl RegistryClient {
     /// ```
     pub fn search_builder(&self) -> RegistrySearch<'_> {
         RegistrySearch::new(self)
+    }
+}
+
+/// Same-authority + redirect-cap policy shared by every
+/// [`RegistryClient`] HTTP client (RFC-ACDP-0006 §7.5 / RFC-ACDP-0008
+/// §4.8): at most [`MAX_REDIRECTS`] follows, and each follow must stay
+/// on the original request's scheme + host + port.
+fn redirect_policy() -> redirect::Policy {
+    redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error(format!(
+                "exceeded {MAX_REDIRECTS} redirects per RFC-ACDP-0006 §7.5"
+            ));
+        }
+        // Same-authority enforcement (scheme + host + port) against the
+        // original request URL. RFC-ACDP-0008 §4.8.
+        let cross = attempt
+            .previous()
+            .first()
+            .filter(|orig| !acdp_safe_http::same_fetch_authority(orig, attempt.url()))
+            .map(|orig| (orig.to_string(), attempt.url().to_string()));
+        if let Some((from, to)) = cross {
+            return attempt.error(format!(
+                "cross-authority redirect rejected ({from} -> {to})"
+            ));
+        }
+        attempt.follow()
+    })
+}
+
+/// Builder for the non-default [`RegistryClient`] connection postures.
+///
+/// Start from [`RegistryClient::builder`]. The defaults match
+/// [`RegistryClient::new`] exactly — the stronger `SafeDnsResolver`
+/// DNS-hook posture (RFC-ACDP-0006 §7.6), the default [`SsrfPolicy`],
+/// and the RFC-ACDP-0006 §7.4 timeouts (5s connect, 30s total) — so a
+/// bare `builder(url).build().await` is equivalent to `new(url)`. Each
+/// setter changes exactly one knob:
+///
+/// - [`Self::pinned`] — pin-once resolution instead of the DNS hook.
+/// - [`Self::ssrf_policy`] — a custom SSRF policy (e.g. a test policy).
+/// - [`Self::root_cert_pem`] — trust an extra PEM root (private CA).
+/// - [`Self::connect_timeout`] / [`Self::request_timeout`] — override
+///   the RFC default timeouts.
+pub struct RegistryClientBuilder {
+    base_url: String,
+    pinned: bool,
+    ssrf_policy: SsrfPolicy,
+    root_cert_pem: Option<Vec<u8>>,
+    /// Test-only: pin `<authority>` to a fixed socket via reqwest's
+    /// `.resolve()`. Only set through the private `RegistryClient::build`
+    /// shim (never via the public `builder()` surface).
+    resolve_target: Option<std::net::SocketAddr>,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+}
+
+impl RegistryClientBuilder {
+    fn new(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            pinned: false,
+            ssrf_policy: SsrfPolicy::default(),
+            root_cert_pem: None,
+            resolve_target: None,
+            connect_timeout: CONNECT_TIMEOUT,
+            request_timeout: REQUEST_TIMEOUT,
+        }
+    }
+
+    /// Select **pin-once** resolution (RFC-ACDP-0006 §7.6): resolve the
+    /// authority's DNS a single time, validate that answer against the
+    /// SSRF policy, and pin the connection to it. Weaker than the
+    /// default DNS-hook posture (which re-validates every connection) —
+    /// prefer the default unless you specifically need pin-once.
+    pub fn pinned(mut self, pinned: bool) -> Self {
+        self.pinned = pinned;
+        self
+    }
+
+    /// Override the [`SsrfPolicy`] applied to the base URL and to every
+    /// resolved IP. Defaults to [`SsrfPolicy::default`].
+    pub fn ssrf_policy(mut self, policy: SsrfPolicy) -> Self {
+        self.ssrf_policy = policy;
+        self
+    }
+
+    /// Trust an additional PEM-encoded root certificate in addition to
+    /// the system roots (e.g. a private/corporate CA).
+    pub fn root_cert_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
+        self.root_cert_pem = Some(pem.into());
+        self
+    }
+
+    /// Override the connect timeout (default: RFC-ACDP-0006 §7.4, 5s).
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Override the total request timeout (default: RFC-ACDP-0006 §7.4,
+    /// 30s).
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Build the [`RegistryClient`].
+    ///
+    /// Async because [`Self::pinned`] mode resolves DNS up front. The
+    /// default (DNS-hook) mode does no async work — it is constructed
+    /// synchronously internally.
+    pub async fn build(self) -> Result<RegistryClient, AcdpError> {
+        if !self.pinned {
+            return self.build_blocking();
+        }
+
+        // ── Pin-once mode (RFC-ACDP-0006 §7.6) ──────────────────────
+        let base = self.base_url.trim_end_matches('/').to_string();
+        let parsed = url::Url::parse(&base)
+            .map_err(|e| AcdpError::SchemaViolation(format!("invalid base URL: {e}")))?;
+        // Pre-flight: scheme + host range checks via the same policy.
+        self.ssrf_policy.check_url(&base)?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| AcdpError::SchemaViolation(format!("base URL has no host: {base}")))?
+            .to_string();
+        let port = parsed
+            .port_or_known_default()
+            .unwrap_or(if parsed.scheme() == "http" { 80 } else { 443 });
+        let pinned = self.ssrf_policy.pin_resolved_ip(&host, port).await?;
+
+        let mut builder = Client::builder()
+            .use_rustls_tls()
+            .connect_timeout(self.connect_timeout)
+            .timeout(self.request_timeout)
+            .redirect(redirect_policy())
+            .resolve(&host, pinned);
+        builder = Self::apply_root_cert(builder, self.root_cert_pem.as_deref())?;
+
+        let http = builder
+            .build()
+            .map_err(|e| AcdpError::Http(e.to_string()))?;
+        Ok(RegistryClient { base, http })
+    }
+
+    /// Synchronous build for the default DNS-hook posture (no pinning).
+    /// The public sync constructors ([`RegistryClient::new`] and the
+    /// test-transport factories) route through here.
+    fn build_blocking(self) -> Result<RegistryClient, AcdpError> {
+        debug_assert!(
+            !self.pinned,
+            "build_blocking is DNS-hook only; pinned mode must use the async build()"
+        );
+        let base = self.base_url.trim_end_matches('/').to_string();
+        // RFC-ACDP-0006 §7 / RFC-ACDP-0008 §4.8–4.9: reject non-HTTPS,
+        // IP-literal, and malformed base URLs up front, then filter every
+        // resolved IP at DNS time (below) so DNS-rebinding answers in
+        // forbidden ranges are refused before connect.
+        self.ssrf_policy.check_url(&base)?;
+        let original_authority = url::Url::parse(&base)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string));
+
+        let mut builder = Client::builder()
+            .use_rustls_tls()
+            .connect_timeout(self.connect_timeout)
+            .timeout(self.request_timeout)
+            .redirect(redirect_policy())
+            // DNS-time SSRF filtering for every connection (incl. redirects
+            // and reconnects), defeating DNS rebinding — RFC-ACDP-0006 §7.6.
+            // Mirrors `WebResolver::build_http_client` / `HttpsDataRefFetcher`.
+            .dns_resolver(acdp_safe_http::SafeDnsResolver::arc(self.ssrf_policy));
+        builder = Self::apply_root_cert(builder, self.root_cert_pem.as_deref())?;
+
+        if let (Some(target), Some(host)) = (self.resolve_target, original_authority) {
+            builder = builder.resolve(&host, target);
+        }
+
+        let http = builder
+            .build()
+            .map_err(|e| AcdpError::Http(e.to_string()))?;
+        Ok(RegistryClient { base, http })
+    }
+
+    fn apply_root_cert(
+        builder: reqwest::ClientBuilder,
+        pem: Option<&[u8]>,
+    ) -> Result<reqwest::ClientBuilder, AcdpError> {
+        let Some(pem) = pem else {
+            return Ok(builder);
+        };
+        let cert = reqwest::Certificate::from_pem(pem)
+            .map_err(|e| AcdpError::Http(format!("invalid root cert PEM: {e}")))?;
+        Ok(builder.add_root_certificate(cert))
     }
 }
 

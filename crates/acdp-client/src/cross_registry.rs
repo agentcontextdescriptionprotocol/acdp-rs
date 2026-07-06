@@ -153,9 +153,9 @@ impl CrossRegistryResolver {
     /// whose HTTP layer trusts the in-process TLS server's self-signed
     /// root certificate (via [`RegistryClient::with_root_cert_pem`]), so
     /// the resolver hits the mock instead of attempting a real network
-    /// call. The seeded client wins over the lazy
-    /// `RegistryClient::new_pinned` constructor that [`Self::resolve`]
-    /// would otherwise invoke on first access.
+    /// call. The seeded client wins over the lazy pin-once
+    /// `RegistryClient::builder(..).pinned(true)` client that
+    /// [`Self::resolve`] would otherwise build on first access.
     pub fn seed_client(&self, authority: impl Into<String>, client: RegistryClient) {
         self.client_cache
             .lock()
@@ -336,10 +336,11 @@ impl CrossRegistryResolver {
     /// on first use. Reuse across hops avoids per-hop reqwest
     /// connection-pool churn.
     ///
-    /// SEC-01: the client is built with [`RegistryClient::new_pinned`],
-    /// which resolves the authority's DNS up-front, filters every
-    /// resolved IP through the resolver's [`SsrfPolicy`], and pins the
-    /// connection to that address. Without pinning a hostile `ctx_id`
+    /// SEC-01: the client is built via
+    /// `RegistryClient::builder(base).pinned(true)`, which resolves the
+    /// authority's DNS up-front, filters every resolved IP through the
+    /// resolver's [`SsrfPolicy`], and pins the connection to that
+    /// address. Without pinning a hostile `ctx_id`
     /// authority (e.g. `internal-host.example.com` resolving to
     /// `10.0.0.1` or `169.254.169.254`) would slip past the URL-syntax
     /// `check_url` gate and reach an internal target. The seeded test
@@ -351,10 +352,15 @@ impl CrossRegistryResolver {
                 return Ok(c.clone());
             }
         }
-        // Build with full DNS pinning before taking the cache lock —
-        // `new_pinned` is async and the cache mutex must not be held
+        // Build with pin-once DNS resolution before taking the cache
+        // lock — the builder's `.build()` is async (it resolves the
+        // authority up front) and the cache mutex must not be held
         // across the await.
-        let client = RegistryClient::new_pinned(base, &self.ssrf_policy).await?;
+        let client = RegistryClient::builder(base)
+            .pinned(true)
+            .ssrf_policy(self.ssrf_policy.clone())
+            .build()
+            .await?;
         let mut cache = self.client_cache.lock().unwrap();
         Ok(cache.entry(authority.to_string()).or_insert(client).clone())
     }

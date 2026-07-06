@@ -247,30 +247,39 @@ impl VerificationPolicy {
 }
 
 /// A retrieved context that has been cryptographically verified.
+///
+/// Every value of this type is the output of one of the
+/// `VerifiedContext::fetch*` pipelines, each of which independently
+/// recomputes `content_hash` (RFC-ACDP-0001 §5.11) and verifies the
+/// producer signature before the value is constructed. The fields are
+/// **private** precisely so this "cryptographically verified" invariant
+/// cannot be forged: there is no way to construct a `VerifiedContext`
+/// around an unverified [`FullContext`]. Downstream code can therefore
+/// trust the accessors below without re-deriving anything.
 #[derive(Debug)]
 pub struct VerifiedContext {
-    pub inner: FullContext,
+    inner: FullContext,
     /// Whether the body verified against a currently authorized key or
     /// a receipt-attested historical one (ACDP 0.2, WS-B).
-    pub key_status: KeyAuthorization,
+    key_status: KeyAuthorization,
     /// The verified registry receipt, when one was present and the
     /// policy verified it (RFC-ACDP-0010). `None` under
     /// [`ReceiptPolicy::Ignore`] or when the registry minted none.
-    pub verified_receipt: Option<acdp_types::receipt::RegistryReceipt>,
+    verified_receipt: Option<acdp_types::receipt::RegistryReceipt>,
     /// The verified lineage-head receipt (ACDP 0.3, RFC-ACDP-0011),
     /// when one was present and the policy verified it. Only populated
     /// by [`Self::fetch_current`] / [`Self::fetch_current_with_policy`]
     /// — plain retrieval preserves the raw value verbatim without
     /// verification. Per §7 this verdict is independent of the body
     /// verdict and the RFC-ACDP-0010 receipt verdict.
-    pub verified_head_receipt: Option<acdp_types::receipt::LineageHeadReceipt>,
+    verified_head_receipt: Option<acdp_types::receipt::LineageHeadReceipt>,
     /// RFC-ACDP-0011 §6 freshness verdict for the verified head
     /// receipt, reported distinctly from verification: `Some(true)`
     /// when the (genuine, verified) receipt's `as_of` is older than
     /// [`LineageHeadPolicy::max_age_seconds`]; `Some(false)` when
     /// within policy; `None` when there is no verified head receipt or
     /// the max-age knob is disabled.
-    pub head_receipt_stale: Option<bool>,
+    head_receipt_stale: Option<bool>,
 }
 
 impl VerifiedContext {
@@ -759,6 +768,46 @@ impl VerifiedContext {
         &self.inner.registry_state
     }
 
+    /// The verified [`FullContext`] (body + registry state + any
+    /// receipts) in its retrieval shape. Every field was reached only
+    /// after this context's hash + signature were verified.
+    pub fn full_context(&self) -> &FullContext {
+        &self.inner
+    }
+
+    /// Whether the body verified against a currently authorized key, a
+    /// receipt-attested historical one, or a receipt-attested
+    /// pre-compromise one (ACDP 0.2 WS-B / RFC-ACDP-0014 §7).
+    pub fn key_status(&self) -> KeyAuthorization {
+        self.key_status
+    }
+
+    /// The verified registry receipt (RFC-ACDP-0010), when one was
+    /// present and the policy verified it. `None` under
+    /// [`ReceiptPolicy::Ignore`] or when the registry minted none. For
+    /// the raw on-wire value see [`Self::receipt`].
+    pub fn verified_receipt(&self) -> Option<&acdp_types::receipt::RegistryReceipt> {
+        self.verified_receipt.as_ref()
+    }
+
+    /// The verified lineage-head receipt (ACDP 0.3, RFC-ACDP-0011),
+    /// populated only by [`Self::fetch_current`] /
+    /// [`Self::fetch_current_with_policy`] when one was present and the
+    /// policy verified it. For the raw on-wire value see
+    /// [`Self::lineage_head_receipt`].
+    pub fn verified_head_receipt(&self) -> Option<&acdp_types::receipt::LineageHeadReceipt> {
+        self.verified_head_receipt.as_ref()
+    }
+
+    /// RFC-ACDP-0011 §6 freshness verdict for the verified head
+    /// receipt: `Some(true)` when the (genuine, verified) receipt's
+    /// `as_of` is older than [`LineageHeadPolicy::max_age_seconds`];
+    /// `Some(false)` when within policy; `None` when there is no
+    /// verified head receipt or the max-age knob is disabled.
+    pub fn head_receipt_stale(&self) -> Option<bool> {
+        self.head_receipt_stale
+    }
+
     /// Raw registry receipt value as served on the wire
     /// (RFC-ACDP-0010), preserved verbatim. For the verified, typed
     /// form see [`Self::verified_receipt`].
@@ -766,18 +815,34 @@ impl VerifiedContext {
         self.inner.registry_receipt.as_ref()
     }
 
+    /// Raw lineage-head receipt value as served on the wire
+    /// (RFC-ACDP-0011), preserved verbatim. For the verified, typed
+    /// form see [`Self::verified_head_receipt`].
+    pub fn lineage_head_receipt(&self) -> Option<&serde_json::Value> {
+        self.inner.lineage_head_receipt.as_ref()
+    }
+
     /// Verify the registry receipt, when one is present
     /// (RFC-ACDP-0010).
     ///
-    /// Standalone variant for contexts obtained via the report paths or
-    /// constructed externally; `fetch_with_policy` already does this
-    /// under [`ReceiptPolicy::VerifyIfPresent`]/`Require`. The serving
+    /// Standalone variant for contexts obtained via the report paths;
+    /// `fetch_with_policy` already does this under
+    /// [`ReceiptPolicy::VerifyIfPresent`]/`Require`. The serving
     /// authority is taken from the context's own `ctx_id` — correct
     /// when the context was fetched from its home registry, which is
     /// the only retrieval shape v0.2 defines.
     ///
     /// Returns `Ok(None)` when no receipt is present, `Ok(Some(_))`
     /// with the verified receipt otherwise.
+    ///
+    /// The receipt cross-check (RFC-ACDP-0010 §8 step 4) relies on
+    /// `body.content_hash` being the independently recomputed value.
+    /// That is guaranteed by the type invariant — every
+    /// `VerifiedContext` is built only after its constructing pipeline
+    /// verified the body hash (`Verifier::verify_body_hash` /
+    /// `verify_body_signed`), and the fields are private so no caller
+    /// can substitute an unverified body — so no re-derivation is
+    /// needed here.
     pub async fn verify_receipt(
         &self,
         resolver: &WebResolver,
@@ -785,20 +850,6 @@ impl VerifiedContext {
         let Some(value) = &self.inner.registry_receipt else {
             return Ok(None);
         };
-        // Recompute the body hash rather than trusting the echoed
-        // `body.content_hash`: all fields of this type are public, so a
-        // caller may have constructed it around an unverified
-        // FullContext, and the receipt cross-check is only meaningful
-        // against an independently recomputed hash (RFC-ACDP-0010 §8
-        // step 4).
-        let body_val = serde_json::to_value(&self.inner.body)?;
-        let recomputed = acdp_crypto::compute_content_hash(&body_val)?;
-        if recomputed != self.inner.body.content_hash {
-            return Err(AcdpError::HashMismatch {
-                stored: self.inner.body.content_hash.clone(),
-                recomputed,
-            });
-        }
         let fingerprint = acdp_crypto::fingerprint::fingerprint_for_key_id(
             &self.inner.body.signature.key_id,
             &self.inner.body.signature.algorithm,

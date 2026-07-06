@@ -7,7 +7,8 @@
 //! - `FullContext` / `Body` (retrieval shape)
 //! - `CapabilitiesDocument` (`GET /.well-known/acdp.json`)
 //! - `SearchResponse`
-//! - `WireError` (the RFC-ACDP-0007 §5 error envelope, from acdp-primitives)
+//! - `WireError` (the RFC-ACDP-0007 §5 error envelope; canonical path
+//!   `acdp_types::WireError`, defined in acdp-primitives)
 
 #![no_main]
 
@@ -31,6 +32,6 @@ fuzz_target!(|data: &[u8]| {
     parse_then_reserialize::<acdp_types::Body>(data);
     parse_then_reserialize::<acdp_types::CapabilitiesDocument>(data);
     parse_then_reserialize::<acdp_types::SearchResponse>(data);
-    parse_then_reserialize::<acdp_primitives::wire_error::WireError>(data);
-    parse_then_reserialize::<acdp_primitives::wire_error::WireErrorBody>(data);
+    parse_then_reserialize::<acdp_types::WireError>(data);
+    parse_then_reserialize::<acdp_types::WireErrorBody>(data);
 });
