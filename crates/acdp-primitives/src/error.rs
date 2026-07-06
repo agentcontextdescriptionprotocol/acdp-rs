@@ -163,6 +163,25 @@ pub enum AcdpError {
     #[error("invalid transparency-log proof: {0}")]
     InvalidLogProof(String),
 
+    /// Wire code: `invalid_witness_cosignature` (RFC-ACDP-0015 §8,
+    /// §10 — 0.4.0). A transparency-log **witness cosignature** failed
+    /// the §8 verification procedure: closed parse, the witness-key
+    /// signature, witness binding (`signature.key_id` DID ≠
+    /// `witness_id`), checkpoint binding (`witnessed_checkpoint` ≠ the
+    /// checkpoint being evaluated), or the `witnessed_at` skew check.
+    /// Deliberately **distinct** from [`AcdpError::InvalidLogProof`]:
+    /// that indicts the *log* (tree membership, history consistency,
+    /// the registry's checkpoint signature); this indicts a *witness's*
+    /// attestation — an independent verdict over an independent signer
+    /// (RFC-ACDP-0015 §10). Permanent — a bad cosignature will not
+    /// verify on retry (HTTP 502 on the wire: the cosignature came from
+    /// an upstream party — a registry aggregating on a caller's behalf
+    /// or a resolver validating a witness's cosignatures). A cosignature
+    /// that verifies but is merely *stale* is consumer freshness policy
+    /// (§8.1), never this code.
+    #[error("invalid witness cosignature: {0}")]
+    InvalidWitnessCosignature(String),
+
     /// Wire code: `immutable_field` (RFC-ACDP-0013 §6, §10 — 0.3.0;
     /// activated from the v0.1.0 reservation). A lifecycle (or future
     /// mutation) endpoint request attempted to supply or alter
@@ -282,6 +301,7 @@ impl AcdpError {
             "cross_registry_resolution_failed" => AcdpError::CrossRegistryResolutionFailed(msg),
             "invalid_receipt" => AcdpError::InvalidReceipt(msg),
             "invalid_log_proof" => AcdpError::InvalidLogProof(msg),
+            "invalid_witness_cosignature" => AcdpError::InvalidWitnessCosignature(msg),
             "immutable_field" => AcdpError::ImmutableField(msg),
             "invalid_lifecycle_transition" => AcdpError::InvalidLifecycleTransition(msg),
             "internal_error" => AcdpError::RegistryInternal(msg),
@@ -344,8 +364,8 @@ mod tests {
     }
 
     #[test]
-    fn all_24_wire_codes_round_trip() {
-        // Test-coverage matrix entry: "All 24 error codes parse from WireError".
+    fn all_25_wire_codes_round_trip() {
+        // Test-coverage matrix entry: "All 25 error codes parse from WireError".
         // Every code enumerated by acdp-error.schema.json's enum MUST map to a
         // typed AcdpError variant (or, for `superseded_target` with details,
         // produce the right SupersessionReason).
@@ -408,6 +428,9 @@ mod tests {
             ("invalid_log_proof", |e| {
                 matches!(e, AcdpError::InvalidLogProof(_))
             }),
+            ("invalid_witness_cosignature", |e| {
+                matches!(e, AcdpError::InvalidWitnessCosignature(_))
+            }),
             ("immutable_field", |e| {
                 matches!(e, AcdpError::ImmutableField(_))
             }),
@@ -418,11 +441,12 @@ mod tests {
                 matches!(e, AcdpError::RegistryInternal(_))
             }),
         ];
-        // Schema enumerates exactly 24 codes (RFC-ACDP-0007 §5 + the
+        // Schema enumerates exactly 25 codes (RFC-ACDP-0007 §5 + the
         // RFC-ACDP-0010 `invalid_receipt` addition + the 0.3.0 codes:
         // `invalid_log_proof` (RFC-0012), `immutable_field` and
-        // `invalid_lifecycle_transition` (RFC-0013)).
-        assert_eq!(cases.len(), 24);
+        // `invalid_lifecycle_transition` (RFC-0013) + the 0.4.0 code
+        // `invalid_witness_cosignature` (RFC-0015)).
+        assert_eq!(cases.len(), 25);
         for (code, expected) in cases {
             let err = AcdpError::from_wire_error(wire(code, "msg", None));
             assert!(
@@ -506,6 +530,8 @@ mod tests {
         // RFC-ACDP-0010: a failed receipt will not verify on retry.
         assert!(!AcdpError::InvalidReceipt("x".into()).is_transient());
         assert!(!AcdpError::InvalidLogProof("x".into()).is_transient());
+        // RFC-ACDP-0015: a bad witness cosignature will not verify on retry.
+        assert!(!AcdpError::InvalidWitnessCosignature("x".into()).is_transient());
         assert!(!AcdpError::ImmutableField("x".into()).is_transient());
         assert!(!AcdpError::InvalidLifecycleTransition("x".into()).is_transient());
     }

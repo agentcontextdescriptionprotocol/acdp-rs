@@ -10,6 +10,7 @@
 
 pub mod body;
 pub mod capabilities;
+pub mod cosignature;
 pub mod data_ref;
 pub mod lifecycle;
 pub mod log;
@@ -28,6 +29,7 @@ pub(crate) use acdp_primitives::serde_helpers;
 pub use acdp_primitives::wire_error::{WireError, WireErrorBody};
 pub use body::{Body, DataPeriod, FullContext, RegistryState, Signature};
 pub use capabilities::{CapabilitiesDocument, Limits};
+pub use cosignature::{LogCosignature, WitnessSigner, WitnessedCheckpoint, COSIGNATURE_VERSION};
 pub use data_ref::{DataRef, DataRefType, EmbeddedContent, EmbeddedEncoding, Location};
 pub use lifecycle::{LifecycleEvent, LifecycleEventType};
 pub use log::{LogCheckpoint, LogConsistencyProof, LogInclusion, LogLeaf};
