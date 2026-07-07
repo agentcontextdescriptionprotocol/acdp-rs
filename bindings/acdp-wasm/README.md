@@ -52,6 +52,31 @@ wasm-bindgen exports (camelCase in JS/TypeScript):
 | `resolveDidKey` | — | offline `did:key` → public key |
 | `canonicalPreimage` / `explainHashMismatch` | — | hash-divergence diagnostics |
 
+## Install
+
+Published to npm as **`@agentcontextdistributionprotocol/acdp-wasm`** (a
+public scoped package, provenance-signed on GitHub Actions), so the console
+and other consumers depend on it without a sibling checkout:
+
+```bash
+npm install @agentcontextdistributionprotocol/acdp-wasm
+```
+
+```js
+import init, { verifyContentHash, verifySignatureEd25519 }
+  from "@agentcontextdistributionprotocol/acdp-wasm";
+await init();
+const verdict = JSON.parse(verifyContentHash(bodyJson, body.content_hash));
+if (verdict.valid) { /* the hash the consumer recomputed itself checks out */ }
+```
+
+The package is built with `wasm-pack --target web`: an ESM module you
+initialize once with `await init()`. This is the target the crate is
+designed and CI-tested around, and it loads cleanly in browsers and in
+Next.js client components (webpack 5 resolves the `new URL(..., import.meta.url)`
+wasm asset the `web` target emits — no `experiments.asyncWebAssembly`
+webpack override, which the `bundler` target would require).
+
 ## Build
 
 ```bash
@@ -60,11 +85,13 @@ rustup target add wasm32-unknown-unknown
 # Raw wasm (regression build-check):
 cargo build --target wasm32-unknown-unknown            # verify-only default
 
-# Browser package (.js / .wasm / .d.ts) with wasm-pack:
-wasm-pack build --target web --out-dir pkg
+# Browser package (.js / .wasm / .d.ts) with wasm-pack. `--scope` makes
+# wasm-pack emit the package name `@agentcontextdistributionprotocol/acdp-wasm`
+# (the same rename the release workflow performs):
+wasm-pack build --target web --out-dir pkg --scope agentcontextdistributionprotocol
 ```
 
-Import from a browser:
+Import from a browser (local, unpublished build):
 
 ```js
 import init, { verifyContentHash, verifySignatureEd25519 } from "./pkg/acdp_wasm.js";
