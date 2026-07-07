@@ -1,0 +1,90 @@
+# Standalone package: NOT a member of the parent acdp-rs crate (acdp-rs is
+# a single-package facade over the `crates/*` workspace). Built by
+# `wasm-pack` / `cargo build --target wasm32-unknown-unknown` against a
+# browser or edge JS host, so it carries its own [workspace] table like
+# `acdp-py` / `acdp-node`.
+#
+# The acdp library is pulled in via path with `default-features = false`
+# so reqwest / tokio / rustls never end up in the .wasm binary — this
+# binding never makes network calls. `did:web` resolution and HTTP
+# transport stay in the JS host (fetch); the wasm surface is a pure,
+# offline VERIFIER (+ deterministic witness mint). See
+# docs/research/wasm-target.md.
+[package]
+name        = "acdp-wasm"
+version     = "0.1.0"
+edition     = "2021"
+description = "Agent Context Distribution Protocol — WebAssembly verification core"
+license     = "MIT OR Apache-2.0"
+publish     = false
+
+[workspace]
+
+[lib]
+# `cdylib` for the wasm artifact; `rlib` so the pure `core`/`v030`/`v040`
+# modules are exercised by a native `cargo test` (golden-vector parity)
+# without a browser engine.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Default is VERIFY-ONLY and RNG-free at runtime: no method draws
+# randomness (Ed25519 + RFC 6979 P-256 signing and all verification are
+# deterministic). The getrandom *backend* below is still required to
+# COMPILE for wasm32-unknown-unknown, because the core crates pull
+# rand_core/OsRng (acdp-crypto) and uuid v4 (acdp-primitives)
+# unconditionally — see docs/research/wasm-target.md §4 and the memo
+# correction in this crate's README. It is never called on the verify
+# path.
+default  = []
+# `producer` would additionally expose fresh key generation
+# (SigningKey::generate), the only caller of OsRng. Reserved; not wired
+# yet — the verify-first surface needs no key generation.
+producer = []
+
+[dependencies]
+acdp       = { path = "../..", default-features = false }
+wasm-bindgen = "0.2"
+serde_json = "1"
+base64     = "0.22"
+chrono     = { version = "0.4", features = ["serde"] }
+hex        = "0.4"
+
+# getrandom backends are only meaningful on wasm — target-gate them so a
+# native `cargo test` (used for golden parity) is untouched. Two majors
+# are in the graph:
+#   * 0.2  ← rand_core 0.6 / OsRng (acdp-crypto)  → `js` FEATURE
+#   * 0.4  ← uuid v4 (acdp-primitives)            → `wasm_js` feature
+#            + `--cfg getrandom_backend="wasm_js"` (.cargo/config.toml)
+# Both `compile_error!` on wasm32-unknown-unknown without a backend even
+# though verification never draws randomness.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom      = { version = "0.2", features = ["js"] }
+getrandom_wasm = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+# uuid v4 (acdp-primitives) needs its OWN wasm randomness feature on top
+# of the getrandom backend above: without `js` it emits its own
+# "specify a source of randomness" compile_error! on
+# wasm32-unknown-unknown. Never called on the verify path (no method
+# mints a UUID) — required only to link.
+uuid           = { version = "1", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+lto           = true
+codegen-units = 1
+# Optimize the wasm for size; the verifier surface has no hot loops that
+# benefit from -O3, and a browser download budget cares about bytes.
+opt-level     = "s"
+strip         = "symbols"
+
+# Disable wasm-pack's bundled `wasm-opt` post-pass. Recent rustc emits
+# wasm with newer features (reference-types etc.) that the wasm-opt
+# version wasm-pack ships can reject ("error validating input"), which is
+# a toolchain-version mismatch, not a problem with our module. The cargo
+# `release` profile above (LTO + opt-level="s" + strip) already does the
+# size reduction; keeping this off makes `wasm-pack build` deterministic
+# across runner/toolchain versions. Re-enable once wasm-pack bundles a
+# wasm-opt new enough for the CI toolchain.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
