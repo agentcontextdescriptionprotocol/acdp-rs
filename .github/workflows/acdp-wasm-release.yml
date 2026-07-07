@@ -1,0 +1,111 @@
+name: acdp-wasm-release
+
+# Publishes the `@agentcontextdistributionprotocol/acdp-wasm` browser/edge
+# WebAssembly verification core to npm.
+#
+# Trigger: push a tag of the form `acdp-wasm-v0.7.0`. A single job runs
+# `wasm-pack build --target web` (the target the crate is designed and
+# CI-tested around — see bindings/acdp-wasm/README.md and the `acdp-wasm`
+# job in bindings.yml), scopes the emitted `pkg/package.json` to
+# `@agentcontextdistributionprotocol/acdp-wasm`, patches
+# `publishConfig.access=public`, attests SLSA build provenance for the raw
+# `.wasm`, then `npm publish --provenance --access public`.
+#
+# Requires repo secret `NPM_TOKEN` (an npm automation token with publish
+# rights to the `@agentcontextdistributionprotocol` scope).
+#
+# NOTE: the tag version must match `version` in
+# bindings/acdp-wasm/Cargo.toml.
+
+on:
+  push:
+    tags:
+      - 'acdp-wasm-v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only; skip npm publish'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: bindings/acdp-wasm
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: build + publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC: npm provenance + SLSA build-provenance attestation
+      attestations: write # write the SLSA provenance attestation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: bindings/acdp-wasm
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
+        with:
+          tool: wasm-pack
+      # `--scope agentcontextdistributionprotocol` makes wasm-pack derive the
+      # package name `@agentcontextdistributionprotocol/acdp-wasm` from the
+      # crate name — the cleanest supported rename (no manual name edit).
+      - name: wasm-pack build (--target web, scoped)
+        run: |
+          wasm-pack build --target web --out-dir pkg \
+            --scope agentcontextdistributionprotocol
+          test -f pkg/acdp_wasm.js
+          test -f pkg/acdp_wasm_bg.wasm
+          test -f pkg/acdp_wasm.d.ts
+      # wasm-pack does not emit `publishConfig`; a scoped package defaults to
+      # `restricted`, so add `access: public` (belt-and-suspenders with the
+      # `--access public` flag below) plus repository/homepage metadata for
+      # parity with the Node SDK's package.json.
+      - name: Patch pkg/package.json (publishConfig + repo metadata)
+        run: |
+          jq '. + {
+            "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+            "repository": { "type": "git", "url": "git+https://github.com/agentcontextdistributionprotocol/acdp-rs.git", "directory": "bindings/acdp-wasm" },
+            "homepage": "https://github.com/agentcontextdistributionprotocol/acdp-rs/tree/main/bindings/acdp-wasm"
+          }' pkg/package.json > pkg/package.json.tmp
+          mv pkg/package.json.tmp pkg/package.json
+          cat pkg/package.json
+      # Attest the freshly-built .wasm BEFORE it leaves this job: a signed
+      # SLSA build-provenance statement binding the module's sha256 to this
+      # repo, workflow, and commit. Consumers verify with:
+      #   gh attestation verify acdp_wasm_bg.wasm --repo <owner>/acdp-rs
+      # subject-path is resolved from GITHUB_WORKSPACE (uses: steps ignore the
+      # job-level defaults.run.working-directory).
+      - name: Attest build provenance (.wasm)
+        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        with:
+          subject-path: bindings/acdp-wasm/pkg/acdp_wasm_bg.wasm
+      - name: List what will be published
+        run: npm publish --dry-run --access public
+        working-directory: bindings/acdp-wasm/pkg
+      # --provenance publishes a signed npm provenance statement generated
+      # from this run's OIDC id-token (job perm `id-token: write`). Requires
+      # npm >= 9.5; setup-node's Node 20 ships npm >= 10.
+      - name: Publish to npm
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        run: npm publish --access public --provenance
+        working-directory: bindings/acdp-wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'

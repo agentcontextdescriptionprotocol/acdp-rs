@@ -51,6 +51,25 @@ Actions"** badge with the source repo, commit, and workflow file.
 > for a fresh install — this is the one step that can only be checked against
 > the live registry.
 
+### npm (`@agentcontextdistributionprotocol/acdp-wasm` — browser WebAssembly verifier)
+
+Published by
+[`acdp-wasm-release.yml`](../.github/workflows/acdp-wasm-release.yml) on an
+`acdp-wasm-v*` tag with the same **npm provenance** mechanism as the Node SDK
+(`npm publish --provenance --access public`, publish job holds
+`id-token: write`). The job also attests the raw `.wasm` with
+`actions/attest-build-provenance` before publishing, so the module carries
+both an npm provenance statement and a GitHub SLSA attestation.
+
+```bash
+npm view @agentcontextdistributionprotocol/acdp-wasm --json | jq '.dist.attestations'
+npm audit signatures
+
+# Verify the raw wasm module against this repo:
+gh attestation verify ./node_modules/@agentcontextdistributionprotocol/acdp-wasm/acdp_wasm_bg.wasm \
+    --repo agentcontextdistributionprotocol/acdp-rs
+```
+
 ### PyPI (`acdp` Python SDK)
 
 Published by [`acdp-py-release.yml`](../.github/workflows/acdp-py-release.yml)
