@@ -1,0 +1,11 @@
+# getrandom 0.3+ (0.4, pulled by uuid v4 in acdp-primitives) selects its
+# WebAssembly backend via a build cfg, NOT a feature alone: the `wasm_js`
+# feature (set in Cargo.toml) plus this cfg together wire
+# `crypto.getRandomValues`. Without it the wasm32-unknown-unknown build
+# fails with getrandom's "unsupported target" compile_error!. The 0.2
+# major on the crypto path uses the `js` FEATURE instead (no cfg needed).
+#
+# This is scoped to wasm32-unknown-unknown only, so a native `cargo test`
+# (golden-vector parity) is unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

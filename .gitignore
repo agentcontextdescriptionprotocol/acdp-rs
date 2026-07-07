@@ -21,6 +21,9 @@ bindings/acdp-node/node_modules/
 # time. Regenerate with `npm run build` after any change to the exported API.
 bindings/acdp-node/acdp.*.node
 bindings/acdp-node/package-lock.json
+# acdp-wasm: the wasm-pack / wasm-bindgen output dir (.js/.wasm/.d.ts) is
+# generated on demand by `wasm-pack build`, never committed.
+bindings/acdp-wasm/pkg/
 __pycache__/
 .pytest_cache/
 

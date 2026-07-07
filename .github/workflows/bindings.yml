@@ -98,6 +98,66 @@ jobs:
         # path (MODULE_NOT_FOUND) instead of recursing into the dir.
         run: node --test tests/*.mjs
 
+  acdp-wasm:
+    name: acdp-wasm (wasm32 verifier core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The golden-parity test (sig-001 + wit-001) reads the canonical
+      # spec fixtures; check them out so ACDP_REQUIRE_CONFORMANCE can make
+      # a missing fixture a hard failure rather than a silent skip.
+      - name: Check out the ACDP spec
+        uses: actions/checkout@v4
+        with:
+          repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
+          path: acdp-spec
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          # This build-check job is the regression guard for the "core
+          # stays wasm-clean" invariant: a tokio/reqwest/ring-flavoured
+          # dependency creeping into a core crate breaks it here.
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: bindings/acdp-wasm
+      # 1. Native golden-vector parity: the same pure `core` functions the
+      #    wasm exports wrap must reproduce sig-001 / wit-001 byte-for-byte
+      #    (parity with the acdp-py / acdp-node suites and the Rust core).
+      - name: Golden-vector parity (native)
+        working-directory: bindings/acdp-wasm
+        env:
+          ACDP_SPEC_DIR: ${{ github.workspace }}/acdp-spec
+          ACDP_REQUIRE_CONFORMANCE: "1"
+        run: cargo test
+      # 2. The wasm32-unknown-unknown build itself (verify-first default
+      #    feature set — no getrandom draw at runtime, backend wired only
+      #    to link). Debug + release so opt-level="s"/LTO also stay green.
+      - name: Build wasm32-unknown-unknown (verifier core)
+        working-directory: bindings/acdp-wasm
+        run: |
+          cargo build --target wasm32-unknown-unknown
+          cargo build --release --target wasm32-unknown-unknown
+      # 3. Full browser package emit: wasm-pack runs wasm-bindgen + wasm-opt
+      #    and produces the .js / .wasm / .d.ts a browser (the console)
+      #    imports. Proves the FFI surface links end to end.
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
+        with:
+          tool: wasm-pack
+      - name: wasm-pack build (--target web)
+        working-directory: bindings/acdp-wasm
+        run: |
+          wasm-pack build --target web --out-dir pkg
+          test -f pkg/acdp_wasm.js
+          test -f pkg/acdp_wasm_bg.wasm
+          test -f pkg/acdp_wasm.d.ts
+      # 4. Exercise the exported wrappers in a REAL wasm engine (Node's V8)
+      #    via wasm-bindgen-test — proves the FFI surface links and runs,
+      #    not just that it compiles.
+      - name: wasm-pack test (--node)
+        working-directory: bindings/acdp-wasm
+        run: wasm-pack test --node
+
   interop:
     name: interop (python ↔ node)
     runs-on: ubuntu-latest
