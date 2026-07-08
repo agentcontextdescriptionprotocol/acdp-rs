@@ -1,15 +1,15 @@
 # CLI Reference
 
-The `acdp` binary is a thin command-line wrapper over the library, behind the
-`cli` feature. It's useful for scripting, debugging the wire format, and
-exercising a registry from a shell. It deliberately uses no argument-parsing
-crate (`std::env::args` only), to keep its dependency graph identical to the
-library.
+The `acdp` binary is a thin command-line wrapper over the library, and is its
+own crate (`crates/acdp-cli`). It's useful for scripting, debugging the wire
+format, and exercising a registry from a shell. It deliberately uses no
+argument-parsing crate (`std::env::args` only), to keep its dependency graph
+identical to the library.
 
 ```bash
-cargo run --features cli --bin acdp -- <subcommand> [args]
+cargo run -p acdp-cli -- <subcommand> [args]
 # or install it:
-cargo install acdp --features cli
+cargo install acdp-cli
 acdp <subcommand> [args]
 ```
 

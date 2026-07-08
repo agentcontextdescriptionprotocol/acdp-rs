@@ -130,7 +130,7 @@ perform the **entire post-verification commit as one atomic critical section**:
 > race in RFC-ACDP-0008's threat model.
 
 `InMemoryStore` is a complete reference implementation — read
-`src/registry/store.rs` to see exactly what `commit_publish` must guarantee.
+`crates/acdp-server/src/registry/store.rs` to see exactly what `commit_publish` must guarantee.
 
 ## Rate limiting
 

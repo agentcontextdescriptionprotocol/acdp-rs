@@ -1,11 +1,18 @@
 //! # acdp — Rust library for the Agent Context Distribution Protocol
 //!
-//! Reference implementation of **ACDP v0.1.0 Final** (specification
-//! promoted to Final on 2026-05-19).
+//! Reference implementation of **ACDP v0.1.0 Final** (promoted 2026-05-19)
+//! plus the **v0.2.0 Trust & Hardening** layer and the 0.3/0.4 drafts
+//! ([`ACDP_VERSION`] is `0.2.0`). Covers RFC-ACDP-0001 through 0015
+//! (0009 reserved): the core protocol, registry receipts (0010),
+//! lineage-head receipts (0011), the transparency log (0012),
+//! lifecycle/retraction (0013), key revocation (0014), and witness
+//! cosigning (0015).
 //!
 //! ACDP lets agents publish immutable, producer-signed context descriptors,
 //! retrieve and verify them locally, discover them by keyword, and follow
-//! signed references across registries.
+//! signed references across registries. This crate is the facade over a
+//! workspace of fine-grained crates under `crates/`; see the repository
+//! README for the layout.
 //!
 //! ## Quick start — producer
 //!

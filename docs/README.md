@@ -1,6 +1,6 @@
 # acdp — Library Documentation
 
-**Crate**: `acdp` &nbsp;|&nbsp; **Protocol**: ACDP v0.1.0 (Final) &nbsp;|&nbsp; **Language**: Rust (MSRV 1.86)
+**Crate**: `acdp` &nbsp;|&nbsp; **Protocol**: ACDP v0.1.0 Final + v0.2.0 Trust & Hardening (`ACDP_VERSION` = `0.2.0`) &nbsp;|&nbsp; **Language**: Rust (MSRV 1.86)
 
 This is the reference Rust implementation of the **Agent Context Distribution
 Protocol**. ACDP lets agents publish immutable, producer-signed context
@@ -70,8 +70,8 @@ field across these layers breaks the protocol:
 - **Body** — ProducerContent plus the registry-assigned fields (`ctx_id`,
   `lineage_id`, `origin_registry`, `created_at`) and the integrity fields
   (`content_hash`, `signature`). Immutable once published.
-- **RegistryState** — the mutable, registry-derived state (`status` in v0.1.0)
-  returned alongside the Body on retrieval.
+- **RegistryState** — the mutable, registry-derived state (`status`, and in
+  0.2.0 the optional registry receipt) returned alongside the Body on retrieval.
 
 ```
 PublishRequest                 ← what a producer POSTs

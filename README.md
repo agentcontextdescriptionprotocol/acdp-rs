@@ -6,14 +6,30 @@
 [![License](https://img.shields.io/crates/l/acdp.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.86-blue)](https://blog.rust-lang.org/2025/04/03/Rust-1.86.0.html)
 
-Rust library for the **Agent Context Distribution Protocol (ACDP v0.1.0)**.
+Reference Rust library for the **Agent Context Distribution Protocol** —
+ACDP v0.1.0 Final plus the v0.2.0 Trust & Hardening layer and the 0.3/0.4
+drafts (`ACDP_VERSION` is `0.2.0`).
 
 ACDP lets agents publish immutable, producer-signed context descriptors,
 retrieve and verify them locally, discover them by keyword, and follow signed
-`acdp://` references across registries.
+`acdp://` references across registries. The Trust & Hardening layer adds
+registry receipts, offline `did:key` verification, a transparency log,
+witness cosigning, key revocation, and lifecycle/retraction events.
 
 > Spec: [agentcontextdistributionprotocol/spec](https://github.com/agentcontextdistributionprotocol)
-> (RFC-ACDP-0001/0002/0003/0007).
+> — RFC-ACDP-0001 through 0015 (0009 reserved). This crate implements 0001–0008
+> (core + retrieval/lineage/search), 0010 (registry receipts), 0011 (lineage-head
+> receipts), 0012 (transparency log), 0013 (lifecycle/retraction), 0014 (key
+> revocation), and 0015 (witness cosigning).
+
+This is a **Cargo workspace**: the umbrella `acdp` crate is a thin facade that
+re-exports a fine-grained set of crates under [`crates/`](./crates/)
+(`acdp-primitives` → `acdp-jcs`/`acdp-safe-http` → `acdp-did` → `acdp-crypto` →
+`acdp-types` → `acdp-validation` → `acdp-verify` → `acdp-producer` →
+`acdp-client`/`acdp-server` → `acdp-cli`), preserving the historical
+`acdp::{error, types, crypto, did, validation, verify, producer, client,
+registry, …}` paths. Language bindings live under [`bindings/`](./bindings/)
+(Python, Node.js, and a browser/edge WebAssembly verifier core published to npm).
 
 ## Documentation
 
@@ -58,23 +74,33 @@ registry implementers compose into `acdp-registry-core` /
   (everything except the producer-controlled fields). The producer
   signs ProducerContent; the SHA-256 of its JCS-canonicalized bytes
   is the body's `content_hash`.
-- **RegistryState** — the mutable, registry-derived state (`status` in
-  v0.1.0) returned alongside the Body on retrieval.
+- **RegistryState** — the mutable, registry-derived state (`status`, and
+  in 0.2.0 the optional registry receipt) returned alongside the Body on
+  retrieval.
 - **Lineage** — a chain of contexts representing successive versions of
   the same logical work, identified by a stable `lineage_id` derived
   from the v1 ctx_id.
 - **JCS** — JSON Canonicalization Scheme (RFC 8785). The deterministic
   serialization used as the SHA-256 input for `content_hash`.
-- **DID** — Decentralized Identifier (W3C). v0.1.0 producers MUST use
-  `did:web` so their keys can be resolved over HTTPS.
+- **DID** — Decentralized Identifier (W3C). `did:web` producers resolve
+  their keys over HTTPS; 0.2.0 adds offline `did:key` (Ed25519 + P-256,
+  no network) resolved purely from the identifier.
+- **Registry receipt** — a registry's signed attestation that it stored a
+  context (RFC-ACDP-0010), verified by recomputing the ProducerContent
+  hash rather than trusting the echoed value.
 
 ## Features
 
-| Feature   | Default | Description                                                                  |
-|-----------|---------|------------------------------------------------------------------------------|
-| `client`  | ✓       | `RegistryClient`, `VerifiedContext`, `WebResolver`, `CrossRegistryResolver`  |
-| `server`  | ✗       | `PublishValidator` for registry implementations                              |
-| `tracing` | ✗       | `#[instrument]` spans on async ops; pulls in `tracing` (no subscriber)       |
+| Feature          | Default | Description                                                                  |
+|------------------|---------|------------------------------------------------------------------------------|
+| `client`         | ✓       | `RegistryClient`, `VerifiedContext`, `WebResolver`, `CrossRegistryResolver`  |
+| `server`         | ✗       | `PublishValidator`, `RegistryServer`, `InMemoryStore` for registry impls     |
+| `tracing`        | ✗       | `#[instrument]` spans on async ops; pulls in `tracing` (no subscriber)       |
+| `test-transport` | ✗       | Test-only permissive HTTP transport for in-process mock registries           |
+
+The `acdp` binary is its own crate (`cargo run -p acdp-cli -- …`). Offline
+`did:key` verification and the receipt types work under
+`--no-default-features` (no HTTP stack).
 
 ## Security defaults
 
@@ -131,17 +157,19 @@ println!("content_hash: {}", req.content_hash);
 
 #### `acdp_version` field
 
-The builder omits `acdp_version` by default. Conformant consumers treat an absent
-field as `"0.1.0"` (RFC-ACDP-0001 §6), so this is safe. To emit it explicitly:
+Since 0.2.0 the builder **emits `acdp_version` explicitly by default**
+(`"0.2.0"`, the value of `acdp::ACDP_VERSION`) — the omission default is closed
+for 0.2.0 builders. Consumers still treat an absent field as `"0.1.0"`
+(RFC-ACDP-0001 §6). To reproduce the 0.1.x omitted form, opt out:
 
 ```rust,ignore
-builder.acdp_version(acdp::ACDP_VERSION) // adds "acdp_version": "0.1.0" to the body
+builder.omit_acdp_version() // drops the field, matching the 0.1.x wire form
 ```
 
-**Note:** absent and explicit `"0.1.0"` are semantically identical but produce
-**different `content_hash` values** (the JCS byte sequences differ). Pick one and
-stay consistent within a lineage. The `sig-001` golden vector was signed without
-the field; using the omission default keeps round-trip tests byte-stable.
+**Note:** absent and explicit forms produce **different `content_hash` values**
+(the JCS byte sequences differ). Pick one and stay consistent within a lineage.
+The `sig-001` golden vector was signed without the field, so its tests use
+`omit_acdp_version()` to stay byte-stable.
 
 ### Consumer — retrieve and verify
 
@@ -191,20 +219,22 @@ let response = server.publish_verified(req, None, resolver).await?;
 
 The library implements three protocol-critical operations exactly:
 
-| Operation             | Spec reference        | Rust impl                                     |
-|-----------------------|-----------------------|-----------------------------------------------|
-| JCS canonicalization  | RFC 8785              | `src/crypto/jcs.rs` (inline, handles `-0.0`)  |
-| `content_hash`        | RFC-ACDP-0001 §5.7    | `src/crypto/hash.rs`                          |
-| Ed25519 sign/verify   | RFC-ACDP-0001 §5.8/11 | `src/crypto/{sign,verify}.rs`                 |
+| Operation             | Spec reference        | Rust impl                                              |
+|-----------------------|-----------------------|--------------------------------------------------------|
+| JCS canonicalization  | RFC 8785              | `crates/acdp-jcs/src/lib.rs` (inline, handles `-0.0`)  |
+| `content_hash`        | RFC-ACDP-0001 §5.7    | `crates/acdp-crypto/src/hash.rs`                       |
+| Ed25519 / P-256 sign/verify | RFC-ACDP-0001 §5.8/11 | `crates/acdp-crypto/src/{sign,verify}.rs`        |
 
 The signature input is the ASCII bytes of the full `"sha256:<hex>"` string —
-**not** the raw 32-byte digest. See `src/crypto/sign.rs` for details.
+**not** the raw 32-byte digest. See `crates/acdp-crypto/src/sign.rs` for details.
 
 ## Examples
 
 ```bash
 cargo run --example producer                       # build a signed request
 cargo run --example consumer --features client     # verify the golden vector
+cargo run --example supersession                   # build a v2 that supersedes v1
+cargo run --example end_to_end --features client,test-transport  # publish→retrieve→verify
 ```
 
 ## Testing
@@ -216,9 +246,21 @@ cargo test --no-default-features                   # core (no HTTP)
 
 The suite includes:
 - Spec golden vectors (`tests/golden_vector.rs` — `sig-001`, `can-001`).
-- Property tests for JCS canonicalization (`proptest`).
+- The fixture-driven conformance suite (`tests/conformance.rs`, plus the
+  TLS-backed `tests/tls_conformance.rs` and the receipt/lifecycle/
+  revocation/witness suites). Point `ACDP_SPEC_DIR` at a spec checkout to
+  run it (see [`docs/conformance.md`](./docs/conformance.md)).
+- The RFC-ACDP-0001 §5.11 verification algorithm, covered per-step
+  (`tests/verify_algorithm.rs` + the offline module in `acdp-verify`).
+- Property tests for JCS canonicalization (`proptest`) and `cargo-fuzz`
+  targets under `fuzz/`.
 - HTTP-mocked tests for `RegistryClient` and `WebResolver` (`wiremock`).
-- Unit tests in every module.
+- Unit tests in every crate.
+
+```bash
+# Conformance against a spec checkout
+ACDP_SPEC_DIR=../agentcontextdistributionprotocol cargo test --test conformance
+```
 
 ## Building docs
 
