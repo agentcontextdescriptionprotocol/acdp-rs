@@ -532,3 +532,80 @@ fn cli_resolve_bad_max_depth_exits_usage_error() {
         "stderr MUST mention the bad flag, got: {stderr}"
     );
 }
+
+// ── offline crypto commands (canonicalize / hash / sign) ─────────────────────
+
+/// The sig-001 ProducerContent: seed=[0;32], minimal first version. The
+/// canonical form, content_hash, and signature are pinned across the
+/// Rust golden_vector suite and both language bindings — the CLI must
+/// reproduce them byte-for-byte or the protocol is broken.
+const GOLDEN_PRODUCER_CONTENT: &str = r#"{"version":1,"supersedes":null,"agent_id":"did:web:agents.example.com:test-producer","contributors":[],"title":"Golden test vector — minimal first version","type":"data_snapshot","data_refs":[],"derived_from":[],"visibility":"public"}"#;
+const GOLDEN_CONTENT_HASH: &str =
+    "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5";
+const GOLDEN_SIGNATURE: &str =
+    "ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ==";
+
+/// `acdp canonicalize` emits the RFC 8785 JCS form (can-001) from stdin.
+#[test]
+fn cli_canonicalize_matches_can001_golden() {
+    let (code, stdout, stderr) = run_cli(&["canonicalize"], Some(GOLDEN_PRODUCER_CONTENT));
+    assert_eq!(code, 0, "canonicalize MUST succeed; stderr={stderr}");
+    let expected = r#"{"agent_id":"did:web:agents.example.com:test-producer","contributors":[],"data_refs":[],"derived_from":[],"supersedes":null,"title":"Golden test vector — minimal first version","type":"data_snapshot","version":1,"visibility":"public"}"#;
+    assert_eq!(stdout.trim_end(), expected, "JCS canonical form drifted");
+}
+
+/// `acdp hash` reproduces the sig-001 content_hash from stdin.
+#[test]
+fn cli_hash_matches_sig001_golden() {
+    let (code, stdout, stderr) = run_cli(&["hash"], Some(GOLDEN_PRODUCER_CONTENT));
+    assert_eq!(code, 0, "hash MUST succeed; stderr={stderr}");
+    assert_eq!(
+        stdout.trim_end(),
+        GOLDEN_CONTENT_HASH,
+        "content_hash drifted"
+    );
+}
+
+/// `acdp sign <seed> <key-id>` reproduces the sig-001 Ed25519 signature
+/// (deterministic over the all-zero seed).
+#[test]
+fn cli_sign_reproduces_sig001_signature() {
+    let seed = "0".repeat(64); // all-zeros test seed
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "sign",
+            &seed,
+            "did:web:agents.example.com:test-producer#key-1",
+        ],
+        Some(GOLDEN_PRODUCER_CONTENT),
+    );
+    assert_eq!(code, 0, "sign MUST succeed; stderr={stderr}");
+    let out: serde_json::Value = serde_json::from_str(&stdout).expect("sign output MUST be JSON");
+    assert_eq!(out["content_hash"], GOLDEN_CONTENT_HASH);
+    assert_eq!(out["signature"]["algorithm"], "ed25519");
+    assert_eq!(out["signature"]["value"], GOLDEN_SIGNATURE);
+}
+
+/// `acdp hash` on malformed stdin JSON exits 1 (an IO/parse error, not a
+/// protocol error) with a message on stderr.
+#[test]
+fn cli_hash_rejects_malformed_stdin() {
+    let (code, stdout, stderr) = run_cli(&["hash"], Some("{not json"));
+    assert_eq!(code, 1, "malformed stdin MUST exit 1; stdout={stdout}");
+    assert!(
+        stderr.contains("invalid JSON") || stderr.contains("acdp:"),
+        "stderr MUST surface a parse error, got: {stderr}"
+    );
+}
+
+/// An unknown subcommand exits 1 and names the offending command.
+#[test]
+fn cli_unknown_subcommand_exits_1() {
+    let (code, stdout, stderr) = run_cli(&["frobnicate"], None);
+    assert_eq!(code, 1, "unknown subcommand MUST exit 1");
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("unknown subcommand") && stderr.contains("frobnicate"),
+        "stderr MUST name the unknown subcommand, got: {stderr}"
+    );
+}
