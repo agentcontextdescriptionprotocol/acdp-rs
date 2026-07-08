@@ -231,8 +231,10 @@ dependencies = [
  "acdp-crypto",
  "acdp-did",
  "acdp-primitives",
+ "acdp-producer",
  "acdp-types",
  "acdp-validation",
+ "chrono",
  "serde_json",
  "tracing",
 ]
