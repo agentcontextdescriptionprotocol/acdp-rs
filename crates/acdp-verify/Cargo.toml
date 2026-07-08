@@ -28,6 +28,15 @@ acdp-did        = { path = "../acdp-did", version = "0.2.2" }
 acdp-validation = { path = "../acdp-validation", version = "0.3.2" }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
+[dev-dependencies]
+# Build valid signed did:key bodies / requests / lifecycle events to
+# exercise the offline verification branches. This is a test-only
+# dependency (acdp-producer sits above acdp-verify at runtime), the same
+# pattern CLAUDE.md documents for the did→crypto and validation→producer
+# dev cycles.
+acdp-producer = { path = "../acdp-producer", version = "0.3.2" }
+chrono = { version = "0.4", default-features = false }
+
 [lints.rust]
 unsafe_code = "forbid"
 
