@@ -72,6 +72,11 @@ jobs:
           test -f pkg/acdp_wasm.js
           test -f pkg/acdp_wasm_bg.wasm
           test -f pkg/acdp_wasm.d.ts
+      # Golden-vector smoke: load the just-built pkg in Node's V8 wasm
+      # engine and verify the sig-001 Ed25519 vector through the published
+      # FFI surface. A broken .wasm fails here, before publish.
+      - name: Smoke test (sig-001 golden vector)
+        run: node scripts/smoke.mjs
       # wasm-pack does not emit `publishConfig`; a scoped package defaults to
       # `restricted`, so add `access: public` (belt-and-suspenders with the
       # `--access public` flag below) plus repository/homepage metadata for

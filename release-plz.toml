@@ -1,0 +1,17 @@
+# release-plz configuration.
+#
+# Previously release-plz ran on pure defaults. This file makes the
+# defaults we rely on explicit and enables a blocking API-compatibility
+# check at release time.
+[workspace]
+# Run cargo-semver-checks inside release-plz when computing the release
+# PR. Unlike the advisory `semver` job in ci.yml (continue-on-error), this
+# runs where the version bumps actually happen, so an API break that rides
+# an unmarked commit blocks the release PR instead of only warning on CI.
+semver_check = true
+
+# Label the release PRs release-plz opens.
+pr_labels = ["release"]
+
+# Create a GitHub Release (tag + notes) for each published version.
+git_release_enable = true

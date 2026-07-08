@@ -80,6 +80,15 @@ jobs:
       - name: Build (zig cross)
         if: ${{ matrix.zig }}
         run: npx napi build --platform --release --target ${{ matrix.target }} --zig
+      # Golden-vector smoke on the one leg whose .node runs natively on its
+      # host (x86_64 linux on ubuntu). index.js loads the local .node, so
+      # this exercises the exact binary about to be published. The darwin
+      # and cross-compiled aarch64 .node files can't execute on their build
+      # hosts, so they're covered by the release-time provenance + the
+      # per-PR bindings.yml suite instead.
+      - name: Smoke test (sig-001 golden vector)
+        if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+        run: node scripts/smoke.mjs
       # Attest the freshly-built native binary BEFORE it leaves this job.
       # Produces a signed SLSA build-provenance statement (stored via the
       # GitHub attestations API) binding this .node's sha256 to this repo,
