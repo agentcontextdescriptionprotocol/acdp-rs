@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-verify"
-version     = "0.3.2"
+version     = "0.3.3"
 edition     = "2021"
 description = "High-level body/publish-request verification (DID resolution + signature) for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"
