@@ -27,7 +27,9 @@ sha2       = "0.10"
 [dev-dependencies]
 # Some validation tests build a request via the producer. acdp-producer
 # depends on acdp-validation at build time; dev-only cycle (allowed).
-acdp-producer = { path = "../acdp-producer", version = "=0.6.0" }
+# Keep PATH-ONLY (no version) — a versioned pin deadlocks `cargo publish`
+# on the cycle (see the note in acdp-did/Cargo.toml).
+acdp-producer = { path = "../acdp-producer" }
 
 [lints.rust]
 unsafe_code = "forbid"
