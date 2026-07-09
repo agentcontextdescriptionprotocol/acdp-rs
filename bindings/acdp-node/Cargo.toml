@@ -26,7 +26,7 @@ acdp        = { path = "../..", default-features = false, features = ["test-tran
 # ^ test-transport: the bindings deliberately re-export allow_test_loopback
 #   on their pinned FFI surface (expected_surface.json) as a HOST-side test
 #   helper; the Rust-side hard gate targets Rust dependency trees.
-napi        = { version = "2.16", features = ["napi8"] }
+napi        = { version = "3.10", features = ["napi8"] }
 napi-derive = "2.16"
 serde_json  = "1"
 base64      = "0.22"
