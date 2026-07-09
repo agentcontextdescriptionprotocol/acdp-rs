@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-cli-v0.2.3...acdp-cli-v0.6.0) - 2026-07-09
+
+### Other
+
+- unify the acdp family to a single lockstep version (0.6.0)
+- expand body materialization and CLI coverage
+
 ## [0.2.3](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-cli-v0.2.2...acdp-cli-v0.2.3) - 2026-07-06
 
 ### Other
