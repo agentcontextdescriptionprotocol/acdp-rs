@@ -752,3 +752,43 @@ async fn cmd_resolve(rest: &[String]) -> Result<(), CliError> {
     println!("{}", serde_json::to_string_pretty(&all)?);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The error → wire-code mapping printed in the failure envelope
+    /// (main's `CliError::Acdp` arm) is the CLI's scriptable contract:
+    /// callers `jq .error.code` to dispatch. Pin representative variants
+    /// plus the catch-all so a reshuffle of the match can't silently
+    /// change a code.
+    #[test]
+    fn classify_maps_representative_variants() {
+        let cases: &[(AcdpError, &str)] = &[
+            (AcdpError::InvalidSignature("x".into()), "invalid_signature"),
+            (AcdpError::SchemaViolation("x".into()), "schema_violation"),
+            (AcdpError::NotFound("x".into()), "not_found"),
+            (AcdpError::NotAuthorized("x".into()), "not_authorized"),
+            (
+                AcdpError::KeyNotAuthorized("x".into()),
+                "key_not_authorized",
+            ),
+            (
+                AcdpError::KeyResolution("x".into()),
+                "key_resolution_failed",
+            ),
+            (
+                AcdpError::UnsupportedAlgorithm("x".into()),
+                "unsupported_algorithm",
+            ),
+            (AcdpError::InvalidReceipt("x".into()), "invalid_receipt"),
+            (AcdpError::PayloadTooLarge("x".into()), "payload_too_large"),
+            // A variant not enumerated in classify falls through to the
+            // internal-error catch-all.
+            (AcdpError::Canonicalization("x".into()), "internal_error"),
+        ];
+        for (err, code) in cases {
+            assert_eq!(classify(err), *code, "{err:?}");
+        }
+    }
+}

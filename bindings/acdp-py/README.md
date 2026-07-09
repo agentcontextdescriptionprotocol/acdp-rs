@@ -2,9 +2,17 @@
 
 Thin PyO3 binding over the [`acdp`](https://crates.io/crates/acdp) Rust
 library. Implements the producer- and consumer-side crypto for the Agent
-Context Distribution Protocol v0.1.0 (RFC-ACDP-0001/0003/0008). HTTP is
-intentionally left to the caller — pair this with `httpx` / `requests`
-for transport.
+Context Distribution Protocol — v0.1.0 core plus the v0.2.0 Trust &
+Hardening surface (RFC-ACDP-0001 through 0015). HTTP is intentionally left
+to the caller — pair this with `httpx` / `requests` for transport.
+
+Package version tracks the binding release line (currently **0.7.0**).
+
+## Install
+
+```bash
+pip install acdp               # from PyPI
+```
 
 ## Install (development)
 
@@ -18,8 +26,29 @@ pytest tests/                  # in-process unit tests, no HTTP
 
 ```bash
 maturin build --release        # produces target/wheels/acdp-*.whl
-pip install target/wheels/acdp-0.1.0-*.whl
+pip install target/wheels/acdp-*.whl
 ```
+
+## Verification surface
+
+Beyond `build_publish_request` / `build_supersede_request` (Ed25519 and
+P-256 producers) and the `verify_content_hash` / `verify_signature`
+basics, `AcdpVerifier` exposes the full 0.2.0 surface:
+
+- `verify_body_offline` / `verify_publish_request_offline` — offline
+  `did:key` verification (no network).
+- `verify_receipt` / `verify_lineage_head_receipt` — registry receipts
+  (RFC-ACDP-0010/0011).
+- `verify_log_checkpoint` / `verify_log_inclusion` /
+  `verify_log_consistency` — transparency log (RFC-ACDP-0012).
+- `verify_lifecycle_event` — lifecycle/retraction (RFC-ACDP-0013).
+- `parse_key_revocation` / `classify_under_revocation` — key revocation
+  (RFC-ACDP-0014).
+- `build_witness_cosignature` / `verify_witness_cosignature` /
+  `evaluate_witness_quorum` — witness cosigning (RFC-ACDP-0015).
+
+`AcdpDid`, `AcdpDidDocument`, `AcdpCanonicalizer`, `AcdpMerkle`, and
+`AcdpSsrfPolicy` are also exported.
 
 ## Quickstart
 

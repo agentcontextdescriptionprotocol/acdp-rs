@@ -519,3 +519,352 @@ pub fn verify_lifecycle_event_offline(
     verify_did_key_envelope(signature, &hash)?;
     Ok(event)
 }
+
+// ── Offline verification tests ───────────────────────────────────────────────
+//
+// These exercise the resolver-free surface (did:key envelope, offline
+// body / publish-request / lifecycle-event verification) and compile
+// without the `client` feature. The resolver-backed 7-step algorithm is
+// covered by `tests/verify_algorithm.rs` at the workspace root, which
+// reuses the TLS DID-document harness.
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+    use acdp_crypto::{P256SigningKey, SigningKey};
+    use acdp_producer::Producer;
+    use acdp_types::body::{Body, DataPeriod};
+    use acdp_types::lifecycle::{LifecycleEvent, LifecycleEventType};
+    use acdp_types::{AgentDid, ContextType, CtxId, LineageId, Visibility};
+
+    const CTX: &str = "acdp://registry.example.com/00000000-0000-4000-8000-000000000000";
+    const LIN: &str = "lin:sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    const EVENT_ID: &str = "00000000-0000-4000-8000-0000000000aa";
+
+    fn ts() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    fn body_of(producer: &Producer) -> Body {
+        let req = producer
+            .publish_request()
+            .title("offline verify test")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid request");
+        Body::from_publish_request(
+            &req,
+            CtxId(CTX.into()),
+            LineageId(LIN.into()),
+            "registry.example.com",
+            ts(),
+        )
+    }
+
+    fn ed25519_body() -> Body {
+        body_of(&Producer::new_did_key(SigningKey::from_bytes(&[1u8; 32])))
+    }
+
+    fn p256_body() -> Body {
+        let key = P256SigningKey::from_bytes(&[2u8; 32]).expect("valid p256 scalar");
+        body_of(&Producer::new_did_key_p256(key).expect("did:key p256 producer"))
+    }
+
+    fn didweb_body() -> Body {
+        body_of(&Producer::new(
+            SigningKey::from_bytes(&[3u8; 32]),
+            AgentDid::new("did:web:agents.example.com:p"),
+            "did:web:agents.example.com:p#key-1",
+        ))
+    }
+
+    // ── verify_did_key_envelope ──────────────────────────────────────────
+
+    #[test]
+    fn did_key_envelope_ed25519_and_p256_happy() {
+        let b = ed25519_body();
+        assert!(verify_did_key_envelope(&b.signature, &b.content_hash).is_ok());
+        let p = p256_body();
+        assert!(verify_did_key_envelope(&p.signature, &p.content_hash).is_ok());
+    }
+
+    #[test]
+    fn did_key_envelope_algorithm_downgrade_rejected() {
+        // An Ed25519 key whose signature claims ecdsa-p256 must not verify
+        // (RFC-ACDP-0008 §3.9 downgrade rejection).
+        let b = ed25519_body();
+        let mut sig = b.signature.clone();
+        sig.algorithm = "ecdsa-p256".into();
+        assert!(matches!(
+            verify_did_key_envelope(&sig, &b.content_hash),
+            Err(AcdpError::InvalidSignature(_))
+        ));
+    }
+
+    #[test]
+    fn did_key_envelope_malformed_key_id_errors() {
+        let b = ed25519_body();
+        let mut sig = b.signature.clone();
+        // Strip the "#<multibase>" fragment: no key to resolve.
+        sig.key_id = sig.key_id.split('#').next().unwrap().to_string();
+        assert!(verify_did_key_envelope(&sig, &b.content_hash).is_err());
+    }
+
+    #[test]
+    fn did_key_envelope_tampered_signature_rejected() {
+        // Substitute a *different* key's valid Ed25519 signature: correct
+        // length and base64, but not a signature by this key over this
+        // hash → InvalidSignature (not a decode/length error).
+        let b = ed25519_body();
+        let other = body_of(&Producer::new_did_key(SigningKey::from_bytes(&[9u8; 32])));
+        let mut sig = b.signature.clone();
+        sig.value = other.signature.value.clone();
+        assert!(matches!(
+            verify_did_key_envelope(&sig, &b.content_hash),
+            Err(AcdpError::InvalidSignature(_))
+        ));
+    }
+
+    // ── verify_body_offline ──────────────────────────────────────────────
+
+    #[test]
+    fn body_offline_happy_ed25519_and_p256() {
+        assert!(verify_body_offline(&ed25519_body()).is_ok());
+        assert!(verify_body_offline(&p256_body()).is_ok());
+    }
+
+    #[test]
+    fn body_offline_structural_failure_precedes_hash() {
+        // An inverted data_period is a structural error. It must be caught
+        // by validate_body BEFORE the content_hash is recomputed — proven
+        // by leaving content_hash intact yet still failing on structure.
+        let mut b = ed25519_body();
+        b.data_period = Some(DataPeriod {
+            start: ts(),
+            end: ts() - chrono::Duration::days(1),
+        });
+        assert!(matches!(
+            verify_body_offline(&b),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn body_offline_rejects_did_web_producer() {
+        assert!(matches!(
+            verify_body_offline(&didweb_body()),
+            Err(AcdpError::KeyResolution(_))
+        ));
+    }
+
+    #[test]
+    fn body_offline_tampered_field_fails_hash() {
+        // Mutating a ProducerContent field (not in the §5.7 exclusion set)
+        // changes the recomputed hash but not the stored content_hash.
+        let mut b = ed25519_body();
+        b.title = "tampered title".into();
+        assert!(verify_body_offline(&b).is_err());
+    }
+
+    #[test]
+    fn body_offline_key_id_did_must_equal_agent_id() {
+        // signature/key_id are in the exclusion set, so swapping key_id to
+        // a different did:key leaves content_hash valid but fails the
+        // agent-binding check.
+        let mut b = ed25519_body();
+        let other = p256_body();
+        b.signature.key_id = other.signature.key_id.clone();
+        assert!(matches!(
+            verify_body_offline(&b),
+            Err(AcdpError::KeyNotAuthorized(_))
+        ));
+    }
+
+    #[test]
+    fn body_offline_fragmentless_key_id_reaches_envelope_error() {
+        // A key_id with no '#fragment' passes the DID-equality check via
+        // the `unwrap_or` fallback, then fails in resolve_did_key_url
+        // (which needs the fragment to recover the key).
+        let mut b = ed25519_body();
+        b.signature.key_id = b.agent_id.as_str().to_string();
+        assert!(verify_body_offline(&b).is_err());
+    }
+
+    // ── verify_publish_request_signature_offline ─────────────────────────
+
+    #[test]
+    fn publish_request_offline_happy() {
+        let producer = Producer::new_did_key(SigningKey::from_bytes(&[4u8; 32]));
+        let req = producer
+            .publish_request()
+            .title("pr offline")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid request");
+        assert!(verify_publish_request_signature_offline(&req).is_ok());
+    }
+
+    #[test]
+    fn publish_request_offline_did_mismatch_and_did_web() {
+        let producer = Producer::new_did_key(SigningKey::from_bytes(&[4u8; 32]));
+        let mut req = producer
+            .publish_request()
+            .title("pr offline")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .expect("valid request");
+        let orig = req.signature.key_id.clone();
+        // DID portion no longer matches agent_id → KeyNotAuthorized.
+        req.signature.key_id = p256_body().signature.key_id.clone();
+        assert!(matches!(
+            verify_publish_request_signature_offline(&req),
+            Err(AcdpError::KeyNotAuthorized(_))
+        ));
+        // A did:web key_id (matching a did:web agent) → KeyResolution.
+        req.agent_id = AgentDid::new("did:web:agents.example.com:p");
+        req.signature.key_id = "did:web:agents.example.com:p#key-1".into();
+        let _ = orig;
+        assert!(matches!(
+            verify_publish_request_signature_offline(&req),
+            Err(AcdpError::KeyResolution(_))
+        ));
+    }
+
+    // ── verify_lifecycle_event_offline ───────────────────────────────────
+
+    fn identity(seed: &[u8; 32]) -> (AgentDid, String) {
+        let key = SigningKey::from_bytes(seed);
+        let did = acdp_did::key::did_key_from_ed25519(&key.verifying_key_bytes());
+        let key_id = acdp_did::key::did_key_url(&did).expect("did:key url");
+        (AgentDid::new(did), key_id)
+    }
+
+    fn signed_event(seed: &[u8; 32], actor: AgentDid, key_id: String) -> serde_json::Value {
+        let event = LifecycleEvent::new(
+            EVENT_ID,
+            CtxId(CTX.into()),
+            LifecycleEventType::Retracted,
+            ts(),
+            actor,
+            Some("superseded".into()),
+        )
+        .expect("valid event")
+        .sign_with(SigningKey::from_bytes(seed), key_id)
+        .expect("signed event");
+        serde_json::to_value(&event).expect("event serializes")
+    }
+
+    #[test]
+    fn lifecycle_offline_happy_producer_actor() {
+        let (actor, key_id) = identity(&[5u8; 32]);
+        let raw = signed_event(&[5u8; 32], actor.clone(), key_id);
+        let out = verify_lifecycle_event_offline(&raw, &CtxId(CTX.into()), &actor, None);
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn lifecycle_offline_registry_actor_accepted() {
+        let (actor, key_id) = identity(&[6u8; 32]);
+        let raw = signed_event(&[6u8; 32], actor.clone(), key_id);
+        // Actor is the registry DID, not the producer.
+        let producer = AgentDid::new("did:key:z6MkOtherProducerDidThatIsNotTheActor");
+        let out = verify_lifecycle_event_offline(
+            &raw,
+            &CtxId(CTX.into()),
+            &producer,
+            Some(actor.as_str()),
+        );
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn lifecycle_offline_unknown_member_rejected() {
+        let (actor, key_id) = identity(&[5u8; 32]);
+        let mut raw = signed_event(&[5u8; 32], actor.clone(), key_id);
+        raw.as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), serde_json::json!(1));
+        assert!(matches!(
+            verify_lifecycle_event_offline(&raw, &CtxId(CTX.into()), &actor, None),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn lifecycle_offline_ctx_id_mismatch_rejected() {
+        let (actor, key_id) = identity(&[5u8; 32]);
+        let raw = signed_event(&[5u8; 32], actor.clone(), key_id);
+        let other =
+            CtxId("acdp://registry.example.com/11111111-1111-4111-8111-111111111111".into());
+        assert!(matches!(
+            verify_lifecycle_event_offline(&raw, &other, &actor, None),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn lifecycle_offline_unauthorized_actor_rejected() {
+        let (actor, key_id) = identity(&[5u8; 32]);
+        let raw = signed_event(&[5u8; 32], actor, key_id);
+        let stranger = AgentDid::new("did:key:z6MkStrangerNeitherProducerNorRegistry");
+        // Neither producer nor (absent) registry.
+        assert!(matches!(
+            verify_lifecycle_event_offline(&raw, &CtxId(CTX.into()), &stranger, None),
+            Err(AcdpError::NotAuthorized(_))
+        ));
+        // Still unauthorized when a *different* registry DID is supplied.
+        assert!(matches!(
+            verify_lifecycle_event_offline(
+                &raw,
+                &CtxId(CTX.into()),
+                &stranger,
+                Some("did:key:z6MkSomeOtherRegistry")
+            ),
+            Err(AcdpError::NotAuthorized(_))
+        ));
+    }
+
+    #[test]
+    fn lifecycle_offline_unsigned_event_rejected() {
+        let (actor, _key_id) = identity(&[5u8; 32]);
+        let event = LifecycleEvent::new(
+            EVENT_ID,
+            CtxId(CTX.into()),
+            LifecycleEventType::Retracted,
+            ts(),
+            actor.clone(),
+            Some("superseded".into()),
+        )
+        .expect("valid event");
+        let raw = serde_json::to_value(&event).expect("serializes");
+        assert!(verify_lifecycle_event_offline(&raw, &CtxId(CTX.into()), &actor, None).is_err());
+    }
+
+    #[test]
+    fn lifecycle_offline_did_web_actor_rejected() {
+        let actor = AgentDid::new("did:web:agents.example.com:p");
+        let key_id = "did:web:agents.example.com:p#key-1".to_string();
+        let raw = signed_event(&[7u8; 32], actor.clone(), key_id);
+        assert!(matches!(
+            verify_lifecycle_event_offline(&raw, &CtxId(CTX.into()), &actor, None),
+            Err(AcdpError::KeyResolution(_))
+        ));
+    }
+
+    #[test]
+    fn lifecycle_offline_mutated_raw_json_fails_signature() {
+        // The preimage is hashed from the RAW wire JSON, so mutating a
+        // non-signature field after signing invalidates the signature.
+        let (actor, key_id) = identity(&[5u8; 32]);
+        let mut raw = signed_event(&[5u8; 32], actor.clone(), key_id);
+        raw.as_object_mut()
+            .unwrap()
+            .insert("reason".into(), serde_json::json!("changed after signing"));
+        assert!(matches!(
+            verify_lifecycle_event_offline(&raw, &CtxId(CTX.into()), &actor, None),
+            Err(AcdpError::InvalidSignature(_))
+        ));
+    }
+}

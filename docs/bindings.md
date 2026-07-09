@@ -1,13 +1,20 @@
 # Language Bindings
 
-The crate ships two native SDKs that reuse the Rust crypto core:
+The crate ships three SDKs that reuse the Rust crypto core:
 
-- **`bindings/acdp-py`** — Python, via [PyO3](https://pyo3.rs) / maturin.
-- **`bindings/acdp-node`** — Node.js, via [NAPI-rs](https://napi.rs).
+- **`bindings/acdp-py`** — Python, via [PyO3](https://pyo3.rs) / maturin
+  (published to PyPI as `acdp`).
+- **`bindings/acdp-node`** — Node.js, via [NAPI-rs](https://napi.rs)
+  (published to npm as `@agentcontextdistributionprotocol/acdp`).
+- **`bindings/acdp-wasm`** — a browser/edge WebAssembly **verifier core**, via
+  `wasm-bindgen` / wasm-pack (published to npm as
+  `@agentcontextdistributionprotocol/acdp-wasm`). Verification-only — no
+  producer/signing surface.
 
-Both implement the same protocol primitives as the Rust crate, so a context
-signed in Python verifies in Node and vice-versa. The protocol contract they
-implement is the same RFC set — see [RFC-ACDP-0001](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/main/rfcs/RFC-ACDP-0001-core.md).
+All implement the same protocol primitives as the Rust crate, so a context
+signed in Python verifies in Node, in the browser, and in Rust. The protocol
+contract they implement is the same RFC set (0001 through 0015) — see
+[RFC-ACDP-0001](https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/blob/main/rfcs/RFC-ACDP-0001-core.md).
 
 ## Design: crypto in Rust, HTTP in the host
 
@@ -38,8 +45,8 @@ host language  ──(JSON string)──►  binding (Rust crypto)  ──(JSON 
 `AcdpProducer` stores a **32-byte seed**, not a live `SigningKey`. `SigningKey`
 is `ZeroizeOnDrop` and not `Clone`, so the binding rebuilds it from the seed for
 each call. The seams that make this work are `SigningKey::seed_bytes()` and
-`SigningKey::sign_string()` in `src/crypto/sign.rs` — they exist specifically to
-support the binding surface.
+`SigningKey::sign_string()` in `crates/acdp-crypto/src/sign.rs` — they exist
+specifically to support the binding surface.
 
 ## Python (`acdp-py`)
 
@@ -72,7 +79,7 @@ cd bindings/acdp-node && npm run build:debug   # or: make sdk-node
 ```
 
 ```js
-const { AcdpProducer, AcdpVerifier } = require('acdp');
+const { AcdpProducer, AcdpVerifier } = require('@agentcontextdistributionprotocol/acdp');
 
 const producer = AcdpProducer.generate(
   'did:web:agents.example.com:my-agent',
@@ -90,6 +97,25 @@ AcdpVerifier.verifySignature(pubKeyB64, sigB64, contentHash);
 ```
 
 The Node API is the same surface in camelCase.
+
+## WebAssembly (`acdp-wasm`)
+
+A verification-only core for browsers and edge runtimes. It exposes the
+consumer-side checks (`verifyContentHash`, `verifySignatureEd25519`,
+`verifyBodyOffline`, receipt/log/lifecycle/witness verification) but no
+producer/signing surface — signing keys should not live in a browser.
+
+```bash
+cd bindings/acdp-wasm && wasm-pack build --target web
+```
+
+```js
+import init, { verifyContentHash } from '@agentcontextdistributionprotocol/acdp-wasm';
+await init();
+const verdict = JSON.parse(verifyContentHash(bodyJson, storedHash));
+```
+
+See `bindings/acdp-wasm/README.md` for the full exported surface.
 
 ## Golden-vector parity
 
@@ -113,6 +139,6 @@ cd bindings/interop && pytest        # or: make interop
 
 Each binding is a **standalone Cargo package** (its own `[workspace]` table)
 that references the parent crate via `path = "../.."`. They are **not** part of
-`cargo test` on the root crate — build each independently with maturin / napi.
-The top-level `Makefile` wraps the common targets: `make sdk-py`, `make
-sdk-node`, `make interop`.
+`cargo test` on the root crate — build each independently with maturin / napi /
+wasm-pack. The top-level `Makefile` wraps the common targets: `make sdk-py`,
+`make sdk-node`, `make interop`.

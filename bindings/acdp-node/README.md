@@ -2,16 +2,27 @@
 
 Thin NAPI-rs binding over the [`acdp`](https://crates.io/crates/acdp)
 Rust library. Implements the producer- and consumer-side crypto for the
-Agent Context Distribution Protocol v0.1.0 (RFC-ACDP-0001/0003/0008).
-HTTP is intentionally left to the caller — pair this with `fetch` /
-`undici` for transport.
+Agent Context Distribution Protocol — v0.1.0 core plus the v0.2.0 Trust &
+Hardening surface (RFC-ACDP-0001 through 0015). HTTP is intentionally left
+to the caller — pair this with `fetch` / `undici` for transport.
+
+Package version tracks the binding release line (currently **0.7.0**).
+
+## Install
+
+```bash
+npm install @agentcontextdistributionprotocol/acdp
+```
+
+Prebuilt native binaries are published for macOS (x64/arm64) and Linux
+(x64/arm64-gnu); the loader package selects the right one at install time.
 
 ## Install (development)
 
 ```bash
 npm install                  # installs @napi-rs/cli
 npm run build:debug          # produces index.js + acdp.<platform>.node
-node --test tests/           # in-process unit tests, no HTTP
+node --test tests/*.mjs      # in-process unit tests, no HTTP
 ```
 
 ## Build a release binary
@@ -45,6 +56,20 @@ AcdpVerifier.verifySignature(
   body.content_hash,
 );
 ```
+
+## Verification surface
+
+`AcdpVerifier` covers the full 0.2.0 surface in addition to the basics
+above: offline `did:key` verification (`verifyBodyOffline`,
+`verifyPublishRequestOffline`), registry receipts (`verifyReceipt`,
+`verifyLineageHeadReceipt`), the transparency log (`verifyLogCheckpoint`,
+`verifyLogInclusion`, `verifyLogConsistency`), lifecycle events
+(`verifyLifecycleEvent`), key revocation (`parseKeyRevocation`,
+`classifyUnderRevocation`), and witness cosigning
+(`buildWitnessCosignature`, `verifyWitnessCosignature`,
+`evaluateWitnessQuorum`). `AcdpP256Producer`, `AcdpDid`,
+`AcdpDidDocument`, `AcdpCanonicalizer`, `AcdpMerkle`, and `AcdpSsrfPolicy`
+are also exported.
 
 ## Design rules
 

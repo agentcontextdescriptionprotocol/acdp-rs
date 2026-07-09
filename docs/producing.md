@@ -53,7 +53,7 @@ let req = producer
     .build()?;
 ```
 
-`.build()` performs four steps in order (`src/producer/builder.rs`):
+`.build()` performs four steps in order (`crates/acdp-producer/src/builder.rs`):
 
 1. Assemble **ProducerContent** (producer-controlled fields only).
 2. Compute `content_hash` = `sha256(JCS(ProducerContent))`.

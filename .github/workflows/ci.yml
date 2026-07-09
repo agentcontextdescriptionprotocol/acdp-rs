@@ -52,9 +52,8 @@ jobs:
             rust: beta
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: master
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
       - run: cargo test --workspace --all-features
@@ -70,6 +69,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
+          # Pinned so a spec-repo push cannot change this repo's CI result
+          # without a commit here. Bump deliberately when adopting new
+          # fixtures. (main HEAD as of 2026-07-06)
+          ref: 4df81332eb3d3710d73b061f6c2b3beae3f7794f
           path: acdp-spec
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -127,6 +130,9 @@ jobs:
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-deny
         with:
           tool: cargo-deny
+      # Sole RUSTSEC advisory gate: `deny check` covers advisories, bans,
+      # licenses, and sources from deny.toml, so a separate cargo-audit job
+      # (which duplicated the RUSTSEC ignore list) is unnecessary.
       - run: cargo deny check
 
   vet:
@@ -148,21 +154,6 @@ jobs:
       # dependency that is not yet vetted fails this job. See
       # docs/supply-chain.md for the certify/exempt contributor workflow.
       - run: cargo vet --locked
-
-  audit:
-    name: cargo-audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2025-0134: rustls-pemfile is "unmaintained" (folded
-          # into rustls-pki-types upstream). Pulled in transitively by
-          # axum-server's tls-rustls feature, which we use only in the
-          # dev-dependency test harness — never propagated to consumers.
-          # Mirrors the same ignore in deny.toml.
-          ignore: RUSTSEC-2025-0134
 
   semver:
     name: cargo-semver-checks (advisory)
