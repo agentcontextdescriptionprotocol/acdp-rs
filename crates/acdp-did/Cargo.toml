@@ -41,8 +41,12 @@ tracing    = { version = "0.1", optional = true, default-features = false, featu
 [dev-dependencies]
 # did:key P256 round-trip test builds a key with acdp-crypto. acdp-crypto
 # depends on acdp-did at build time; this dev-only edge is the allowed
-# dev-dependency cycle.
-acdp-crypto = { path = "../acdp-crypto", version = "=0.6.0" }
+# dev-dependency cycle. Keep it PATH-ONLY (no version): a versioned pin
+# here makes `cargo publish` resolve it from crates.io, which can never
+# succeed for a cyclic pair (acdp-crypto x.y.z isn't on the registry
+# until after acdp-did publishes). Path-only dev-deps are dropped from
+# the published manifest, breaking the deadlock.
+acdp-crypto = { path = "../acdp-crypto" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints.rust]
