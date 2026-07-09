@@ -146,7 +146,7 @@ acdp-server     = { path = "crates/acdp-server", version = "0.3.2", optional = t
 serde         = { version = "1", features = ["derive"] }
 serde_json    = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 sha2          = "0.10"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
 p256          = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 base64        = "0.22"
 hex           = "0.4"
