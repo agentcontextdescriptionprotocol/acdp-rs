@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.3...acdp-v0.6.0) - 2026-07-09
+
+### Added
+
+- *(acdp-wasm)* publish browser wasm binding to npm
+
+### Other
+
+- unify the acdp family to a single lockstep version (0.6.0)
+- commit refreshed cargo-vet imports.lock
+- fix supply-chain gates (crossbeam advisory + stale vet exemptions)
+- update Cargo.lock for acdp-verify dev-dependencies
+- refresh for the 0.2.0 trust & hardening layer and workspace split
+- *(verify)* add direct coverage for the acdp-verify crate
+- fix toolchain bug, pin spec, expand dependabot, add release smoke gates
+
 ## [0.5.3](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.2...acdp-v0.5.3) - 2026-07-06
 
 ### Added
