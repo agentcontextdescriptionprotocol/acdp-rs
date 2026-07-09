@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-did"
-version     = "0.2.2"
+version.workspace = true
 edition     = "2021"
 description = "did:web and did:key resolution for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"
@@ -25,8 +25,8 @@ test-transport = ["acdp-safe-http/test-transport"]
 tracing = ["dep:tracing"]
 
 [dependencies]
-acdp-primitives = { path = "../acdp-primitives", version = "0.4.0" }
-acdp-safe-http  = { path = "../acdp-safe-http", version = "0.2.2" }
+acdp-primitives = { path = "../acdp-primitives", version = "=0.6.0" }
+acdp-safe-http  = { path = "../acdp-safe-http", version = "=0.6.0" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 base64     = "0.22"
@@ -42,7 +42,7 @@ tracing    = { version = "0.1", optional = true, default-features = false, featu
 # did:key P256 round-trip test builds a key with acdp-crypto. acdp-crypto
 # depends on acdp-did at build time; this dev-only edge is the allowed
 # dev-dependency cycle.
-acdp-crypto = { path = "../acdp-crypto" }
+acdp-crypto = { path = "../acdp-crypto", version = "=0.6.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints.rust]

@@ -15,3 +15,52 @@ pr_labels = ["release"]
 
 # Create a GitHub Release (tag + notes) for each published version.
 git_release_enable = true
+
+# Lockstep versioning: the acdp crates are one library split across
+# crates that must be consumed as a coherent set (shared types flow
+# across crate boundaries via acdp-primitives). Independent per-crate
+# versions let a fresh resolver mix release generations and mismatch
+# acdp-primitives majors. Putting every member in one `version_group`
+# makes release-plz assign them all the same next version — bumping the
+# whole family together (even unchanged crates). The version itself lives
+# once in [workspace.package] and each member inherits it. semver_check
+# above still guards real API breaks.
+[[package]]
+name = "acdp"
+version_group = "acdp"
+[[package]]
+name = "acdp-primitives"
+version_group = "acdp"
+[[package]]
+name = "acdp-jcs"
+version_group = "acdp"
+[[package]]
+name = "acdp-safe-http"
+version_group = "acdp"
+[[package]]
+name = "acdp-did"
+version_group = "acdp"
+[[package]]
+name = "acdp-crypto"
+version_group = "acdp"
+[[package]]
+name = "acdp-types"
+version_group = "acdp"
+[[package]]
+name = "acdp-validation"
+version_group = "acdp"
+[[package]]
+name = "acdp-verify"
+version_group = "acdp"
+[[package]]
+name = "acdp-producer"
+version_group = "acdp"
+[[package]]
+name = "acdp-client"
+version_group = "acdp"
+[[package]]
+name = "acdp-server"
+version_group = "acdp"
+[[package]]
+name = "acdp-cli"
+version_group = "acdp"
