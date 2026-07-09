@@ -1,6 +1,6 @@
 [package]
 name        = "acdp-verify"
-version     = "0.3.2"
+version.workspace = true
 edition     = "2021"
 description = "High-level body/publish-request verification (DID resolution + signature) for the Agent Context Distribution Protocol (ACDP)"
 license     = "MIT OR Apache-2.0"
@@ -20,12 +20,12 @@ client = ["acdp-did/client"]
 tracing = ["dep:tracing", "acdp-did/tracing"]
 
 [dependencies]
-acdp-primitives = { path = "../acdp-primitives", version = "0.4.0" }
-acdp-types      = { path = "../acdp-types", version = "0.3.2" }
-acdp-crypto     = { path = "../acdp-crypto", version = "0.1.5" }
+acdp-primitives = { path = "../acdp-primitives", version = "=0.6.0" }
+acdp-types      = { path = "../acdp-types", version = "=0.6.0" }
+acdp-crypto     = { path = "../acdp-crypto", version = "=0.6.0" }
 tracing         = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
-acdp-did        = { path = "../acdp-did", version = "0.2.2" }
-acdp-validation = { path = "../acdp-validation", version = "0.3.2" }
+acdp-did        = { path = "../acdp-did", version = "=0.6.0" }
+acdp-validation = { path = "../acdp-validation", version = "=0.6.0" }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [dev-dependencies]
@@ -34,7 +34,7 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 # dependency (acdp-producer sits above acdp-verify at runtime), the same
 # pattern CLAUDE.md documents for the did→crypto and validation→producer
 # dev cycles.
-acdp-producer = { path = "../acdp-producer", version = "0.3.2" }
+acdp-producer = { path = "../acdp-producer", version = "=0.6.0" }
 chrono = { version = "0.4", default-features = false }
 
 [lints.rust]

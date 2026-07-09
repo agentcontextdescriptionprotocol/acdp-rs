@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acdp"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "acdp-client",
  "acdp-crypto",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-cli"
-version = "0.2.3"
+version = "0.6.0"
 dependencies = [
  "acdp",
  "base64",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-client"
-version = "0.4.1"
+version = "0.6.0"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-crypto"
-version = "0.1.5"
+version = "0.6.0"
 dependencies = [
  "acdp-did",
  "acdp-jcs",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-did"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "acdp-crypto",
  "acdp-primitives",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-jcs"
-version = "0.1.5"
+version = "0.6.0"
 dependencies = [
  "acdp-primitives",
  "hex",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-primitives"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "reqwest",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-producer"
-version = "0.3.2"
+version = "0.6.0"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-safe-http"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "acdp-primitives",
  "reqwest",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-server"
-version = "0.3.2"
+version = "0.6.0"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-types"
-version = "0.3.2"
+version = "0.6.0"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-validation"
-version = "0.3.2"
+version = "0.6.0"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-verify"
-version = "0.3.2"
+version = "0.6.0"
 dependencies = [
  "acdp-crypto",
  "acdp-did",
