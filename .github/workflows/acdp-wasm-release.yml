@@ -23,6 +23,10 @@ on:
       - 'acdp-wasm-v*'
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Release version to stamp + publish (e.g. 0.8.0). Empty = use the manifest version.'
+        type: string
+        default: ''
       dry_run:
         description: 'Build only; skip npm publish'
         type: boolean
@@ -62,6 +66,13 @@ jobs:
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
         with:
           tool: wasm-pack
+      # Stamp the release version (dispatch input, or tag on a tag-push) into
+      # Cargo.toml so wasm-pack emits a pkg at the acdp release version.
+      - name: Stamp release version
+        run: |
+          V="${{ inputs.version }}"; [ -z "$V" ] && V="${GITHUB_REF_NAME#acdp-wasm-v}"
+          echo "stamping version $V"
+          sed -i.bak -E "s/^version[[:space:]]*=.*/version = \"$V\"/" Cargo.toml && rm -f Cargo.toml.bak
       # `--scope agentcontextdistributionprotocol` makes wasm-pack derive the
       # package name `@agentcontextdistributionprotocol/acdp-wasm` from the
       # crate name — the cleanest supported rename (no manual name edit).

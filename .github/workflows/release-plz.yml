@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write # dispatch the SDK binding release workflows
 
 concurrency:
   group: release-plz-${{ github.ref }}
@@ -72,3 +73,20 @@ jobs:
         run: |
           jq -nc --arg v "$VER" --arg e cargo '{event_type:"acdp-released",client_payload:{version:$v,ecosystem:$e}}' \
             | gh api repos/agentcontextdistributionprotocol/acdp-registry-rs/dispatches --method POST --input -
+
+      # Release the language SDKs (PyPI + npm) at the SAME version, so the
+      # whole ecosystem stays in lockstep with the crates. Each binding
+      # release workflow stamps this version into its manifests before
+      # building, so the published artifact version == the acdp version.
+      # workflow_dispatch is exempt from the GITHUB_TOKEN "no recursive
+      # workflow runs" rule, so these dispatched runs DO execute.
+      - name: Release SDK bindings at the acdp version
+        if: ${{ steps.acdp.outputs.released == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.acdp.outputs.version }}
+        run: |
+          for wf in acdp-py-release.yml bindings-release.yml acdp-wasm-release.yml; do
+            echo "dispatching $wf for acdp $VER"
+            gh workflow run "$wf" --ref main -f version="$VER" -f dry_run=false
+          done
