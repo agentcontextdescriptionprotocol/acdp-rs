@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.6.1...acdp-server-v0.6.2) - 2026-07-10
+
+### Added
+
+- *(server)* publish_pinned_verified_in_tenant for operator-pinned keys ([#116](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/116))
+
 ## [0.6.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.3.2...acdp-server-v0.6.1) - 2026-07-09
 
 ### Other
