@@ -51,6 +51,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # getrandom is intentionally DUAL-MAJOR here: 0.2 (with the `js`
+      # feature, for the rand_core/OsRng path) plus a 0.4 alias
+      # (`getrandom_wasm`, with `wasm_js`, for uuid v4). A major bump of
+      # the 0.2 pin drops the `js` feature and breaks the wasm build
+      # (this is what PR #122 did). Keep it pinned; bump by hand if ever
+      # needed.
+      - dependency-name: getrandom
+        update-types: ["version-update:semver-major"]
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
