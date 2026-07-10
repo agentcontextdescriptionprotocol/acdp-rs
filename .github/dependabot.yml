@@ -7,28 +7,33 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      patch-and-minor:
+      minor-and-patch:
         update-types: ["minor", "patch"]
+      major-updates:
+        update-types: ["major"]
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
 
   # The language bindings are standalone [workspace]s (own Cargo.toml,
   # own lockfile), so the root cargo updater does not see their direct
   # third-party deps (pyo3, napi, wasm-bindgen). Watch each separately.
-  # Note: a bump here can trip the blocking cargo-vet gate if the new
-  # crate version isn't yet covered by supply-chain/config.toml.
   - package-ecosystem: cargo
     directory: "/bindings/acdp-py"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      patch-and-minor:
+      minor-and-patch:
         update-types: ["minor", "patch"]
+      major-updates:
+        update-types: ["major"]
 
   - package-ecosystem: cargo
     directory: "/bindings/acdp-node"
@@ -36,8 +41,10 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      patch-and-minor:
+      minor-and-patch:
         update-types: ["minor", "patch"]
+      major-updates:
+        update-types: ["major"]
 
   - package-ecosystem: cargo
     directory: "/bindings/acdp-wasm"
@@ -45,8 +52,10 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      patch-and-minor:
+      minor-and-patch:
         update-types: ["minor", "patch"]
+      major-updates:
+        update-types: ["major"]
 
   # Node binding's npm dev toolchain (@napi-rs/cli).
   - package-ecosystem: npm
@@ -55,5 +64,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      patch-and-minor:
+      minor-and-patch:
         update-types: ["minor", "patch"]
+      major-updates:
+        update-types: ["major"]
