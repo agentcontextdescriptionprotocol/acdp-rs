@@ -162,3 +162,24 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: 'true'
+
+      # Notify the npm consumer (acdp-control-plane) so it opens an auto-bump PR
+      # via acdp-ci's bump-consume. App-authenticated (org secrets) — no PAT.
+      - name: Mint token for acdp-control-plane
+        id: dispatch-token
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.ACDP_BOT_APP_ID }}
+          private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
+          owner: agentcontextdistributionprotocol
+          repositories: acdp-control-plane
+      - name: Dispatch acdp-released (npm)
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          REF: ${{ github.ref_name }}
+        run: |
+          VER="${REF#acdp-node-v}"
+          jq -nc --arg v "$VER" --arg e npm '{event_type:"acdp-released",client_payload:{version:$v,ecosystem:$e}}' \
+            | gh api repos/agentcontextdistributionprotocol/acdp-control-plane/dispatches --method POST --input -
