@@ -153,9 +153,9 @@ acdp-server     = { path = "crates/acdp-server", version = "=0.8.0", optional = 
 [dev-dependencies]
 serde         = { version = "1", features = ["derive"] }
 serde_json    = { version = "1", features = ["preserve_order", "float_roundtrip"] }
-sha2          = "0.10"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-p256          = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+sha2          = "0.11"
+ed25519-dalek = { version = "3", features = ["rand_core"] }
+p256          = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 base64        = "0.22"
 hex           = "0.4"
 bs58          = "0.5"
@@ -165,7 +165,7 @@ url           = "2"
 urlencoding   = "2"
 tokio    = { version = "1", features = ["full"] }
 anyhow   = "1"
-criterion = "0.5"
+criterion = "0.8"
 wiremock = "0.6"
 proptest = "1"
 # TLS test harness — used to mock a `did:web` HTTPS endpoint and a
@@ -173,9 +173,9 @@ proptest = "1"
 # and fed-001..006 can be bound to behavioral assertions without going
 # over the network. Kept in dev-dependencies so they don't propagate to
 # downstream consumers.
-rcgen        = { version = "0.13", default-features = false, features = ["pem", "ring"] }
-axum         = { version = "0.7", default-features = false, features = ["json"] }
-axum-server  = { version = "0.7", default-features = false, features = ["tls-rustls"] }
+rcgen        = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+axum         = { version = "0.8", default-features = false, features = ["json"] }
+axum-server  = { version = "0.8", default-features = false, features = ["tls-rustls"] }
 # rustls 0.23 requires the process to install a crypto provider before
 # the first TLS handshake — there's no auto-detect when more than one
 # backend is in scope. We install `aws-lc-rs` (matches what `axum-server`'s
