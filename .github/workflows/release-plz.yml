@@ -35,6 +35,40 @@ jobs:
         with:
           toolchain: stable
       - uses: MarcoIeni/release-plz-action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # When the `acdp` crate itself publishes (not the other workspace crates),
+      # notify the crate consumer (acdp-registry-rs) so it opens an auto-bump PR
+      # via acdp-ci's bump-consume. App-authenticated (org secrets) — no PAT.
+      - name: Detect acdp crate publish
+        id: acdp
+        if: ${{ steps.release.outputs.releases_created == 'true' }}
+        run: |
+          VER=$(printf '%s' '${{ steps.release.outputs.releases }}' \
+            | jq -r '.[] | select(.package_name=="acdp") | .version' | head -1)
+          if [ -n "$VER" ]; then
+            echo "released=true"  >> "$GITHUB_OUTPUT"
+            echo "version=$VER"   >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Mint token for acdp-registry-rs
+        id: dispatch-token
+        if: ${{ steps.acdp.outputs.released == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.ACDP_BOT_APP_ID }}
+          private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
+          owner: agentcontextdistributionprotocol
+          repositories: acdp-registry-rs
+      - name: Dispatch acdp-released (cargo)
+        if: ${{ steps.acdp.outputs.released == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          VER: ${{ steps.acdp.outputs.version }}
+        run: |
+          jq -nc --arg v "$VER" --arg e cargo '{event_type:"acdp-released",client_payload:{version:$v,ecosystem:$e}}' \
+            | gh api repos/agentcontextdistributionprotocol/acdp-registry-rs/dispatches --method POST --input -

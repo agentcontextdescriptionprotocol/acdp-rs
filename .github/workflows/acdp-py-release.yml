@@ -161,3 +161,24 @@ jobs:
           # the guarantee is visible and cannot silently regress. Viewable on
           # the PyPI release page and via the integrity API.
           attestations: true
+
+      # Notify the Python consumer (acdp-playground) so it opens an auto-bump PR
+      # via acdp-ci's bump-consume. App-authenticated (org secrets) — no PAT.
+      - name: Mint token for acdp-playground
+        id: dispatch-token
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.ACDP_BOT_APP_ID }}
+          private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
+          owner: agentcontextdistributionprotocol
+          repositories: acdp-playground
+      - name: Dispatch acdp-released (uv)
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          REF: ${{ github.ref_name }}
+        run: |
+          VER="${REF#acdp-py-v}"
+          jq -nc --arg v "$VER" --arg e uv '{event_type:"acdp-released",client_payload:{version:$v,ecosystem:$e}}' \
+            | gh api repos/agentcontextdistributionprotocol/acdp-playground/dispatches --method POST --input -
