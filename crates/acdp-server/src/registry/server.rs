@@ -505,6 +505,54 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         self.commit_via_store(req, None, None, None)
     }
 
+    /// **Publish already verified by the caller against an
+    /// operator-pinned key** (e.g. a demo/playground registry's
+    /// out-of-band pinned-key allowlist — a config-supplied public key
+    /// checked instead of a live-resolved DID document).
+    ///
+    /// Unlike [`Self::publish_unverified_for_tests`], this is safe to call
+    /// on a receipts-advertising registry: the caller has ALREADY
+    /// cryptographically verified `req`'s signature against
+    /// `verified_public_key_b64` before calling this method (steps 7–8 are
+    /// the caller's responsibility, not this method's — there is no DID
+    /// document or did:key to resolve for a pinned key, so this crate has
+    /// nothing further to verify), so the fingerprint of that key can be
+    /// attested in the minted receipt (RFC-ACDP-0010 §7: no degraded mode,
+    /// every persisted context must carry a receipt with a genuinely
+    /// resolved key_fingerprint).
+    ///
+    /// `verified_algorithm` MUST be `"ed25519"` or `"ecdsa-p256"` and MUST
+    /// be the algorithm the caller actually verified `verified_public_key_b64`
+    /// against — this method trusts the caller completely for verification;
+    /// it does not re-verify the signature itself, only recomputes the
+    /// fingerprint of the key the caller names.
+    #[doc(hidden)]
+    pub fn publish_pinned_verified_in_tenant(
+        &self,
+        req: &PublishRequest,
+        idempotency_key: Option<&str>,
+        tenant: Option<&str>,
+        verified_public_key_b64: &str,
+        verified_algorithm: &str,
+    ) -> Result<PublishResponse, AcdpError> {
+        self.check_publish_rate_limit(&req.agent_id)?;
+
+        let raw_bytes = serde_json::to_vec(req)?.len();
+        let validator = PublishValidator::for_authority(&self.caps, &self.authority);
+        let _validated = validator.validate_post_schema(req, raw_bytes)?;
+
+        let fingerprint = if self.receipt_signer.is_some() {
+            Some(fingerprint_pinned_key(
+                verified_public_key_b64,
+                verified_algorithm,
+            )?)
+        } else {
+            None
+        };
+
+        self.commit_via_store(req, idempotency_key, tenant, fingerprint)
+    }
+
     /// Rate-limit gate shared by every publish path (RFC-ACDP-0008 §4.3).
     /// Under the `tracing` feature a rejection emits a structured warn
     /// event so operators can see limiter hits per agent.
@@ -1102,6 +1150,33 @@ async fn producer_key_fingerprint(
         resolver,
     )
     .await
+}
+
+/// Fingerprint a base64 public key the caller has already verified a
+/// signature against (an operator-pinned key, not a resolved DID
+/// document) — no resolution involved, just decode + dispatch by
+/// algorithm. Used by [`RegistryServer::publish_pinned_verified_in_tenant`].
+fn fingerprint_pinned_key(public_key_b64: &str, algorithm: &str) -> Result<String, AcdpError> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let raw = STANDARD
+        .decode(public_key_b64)
+        .map_err(|e| AcdpError::KeyResolution(format!("pinned key is not valid base64: {e}")))?;
+    match algorithm {
+        "ed25519" => {
+            let arr: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+                AcdpError::KeyResolution(format!(
+                    "pinned ed25519 key must be 32 bytes, got {}",
+                    raw.len()
+                ))
+            })?;
+            Ok(acdp_crypto::fingerprint::fingerprint_ed25519(&arr))
+        }
+        "ecdsa-p256" => acdp_crypto::fingerprint::fingerprint_p256_sec1(&raw),
+        other => Err(AcdpError::UnsupportedAlgorithm(format!(
+            "cannot fingerprint a pinned key for algorithm '{other}'"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -2128,6 +2203,80 @@ mod tests {
             fresh_resp.registry_receipt.is_some(),
             "new inserts on a receipts registry must mint"
         );
+    }
+
+    /// A pinned-key publish (the caller already verified the signature
+    /// against an operator-pinned key, e.g. a demo registry's
+    /// `playground.pinned_keys` allowlist) mints a receipt whose
+    /// `key_fingerprint` matches the pinned key — proving
+    /// `publish_pinned_verified_in_tenant` is safe on a
+    /// receipts-advertising registry, unlike `publish_unverified_for_tests`.
+    #[test]
+    fn pinned_verified_publish_mints_receipt_with_correct_fingerprint() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let verifying_key_bytes = key.verifying_key_bytes();
+        let pub_b64 = STANDARD.encode(verifying_key_bytes);
+        let did = "did:web:agents.example.com:pinned-agent";
+        let p = Producer::new(key, AgentDid::new(did), format!("{did}#key-1"));
+        let req = p
+            .publish_request()
+            .title("pinned publish")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let mut c = caps();
+        c.acdp_version = "0.2.0".into();
+        let server = RegistryServer::new(InMemoryStore::new(), c, "registry.example.com")
+            .with_receipt_signer(
+                acdp_types::receipt::ReceiptSigner::new(
+                    SigningKey::from_bytes(&[0x22u8; 32]),
+                    "did:web:registry.example.com",
+                    "did:web:registry.example.com#receipt-key-1",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let resp = server
+            .publish_pinned_verified_in_tenant(&req, None, None, &pub_b64, "ed25519")
+            .expect("pinned-verified publish must succeed on a receipts registry");
+        let receipt = resp
+            .registry_receipt
+            .expect("a receipts-advertising registry must mint a receipt");
+        assert_eq!(
+            receipt["key_fingerprint"].as_str().unwrap(),
+            acdp_crypto::fingerprint::fingerprint_ed25519(&verifying_key_bytes)
+        );
+    }
+
+    /// Without a receipt signer configured, `publish_pinned_verified_in_tenant`
+    /// still succeeds — it just mints no receipt (the fingerprint is only
+    /// ever needed for the receipt binding).
+    #[test]
+    fn pinned_verified_publish_without_receipt_signer_succeeds_with_no_receipt() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let key = SigningKey::from_bytes(&[4u8; 32]);
+        let pub_b64 = STANDARD.encode(key.verifying_key_bytes());
+        let did = "did:web:agents.example.com:pinned-agent-2";
+        let p = Producer::new(key, AgentDid::new(did), format!("{did}#key-1"));
+        let req = p
+            .publish_request()
+            .title("pinned publish, no receipts")
+            .context_type(ContextType::DataSnapshot)
+            .visibility(Visibility::Public)
+            .build()
+            .unwrap();
+
+        let server = RegistryServer::new(InMemoryStore::new(), caps(), "registry.example.com");
+        let resp = server
+            .publish_pinned_verified_in_tenant(&req, None, None, &pub_b64, "ed25519")
+            .unwrap();
+        assert!(resp.registry_receipt.is_none());
     }
 
     /// `publish_verified_did_key` refuses did:web producers — they need
