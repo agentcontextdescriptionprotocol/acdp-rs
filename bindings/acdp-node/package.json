@@ -47,9 +47,9 @@
     "registry": "https://registry.npmjs.org/"
   },
   "optionalDependencies": {
-    "@agentcontextdistributionprotocol/acdp-darwin-x64": "0.3.0",
-    "@agentcontextdistributionprotocol/acdp-darwin-arm64": "0.3.0",
-    "@agentcontextdistributionprotocol/acdp-linux-x64-gnu": "0.3.0",
-    "@agentcontextdistributionprotocol/acdp-linux-arm64-gnu": "0.3.0"
+    "@agentcontextdistributionprotocol/acdp-darwin-x64": "0.7.0",
+    "@agentcontextdistributionprotocol/acdp-darwin-arm64": "0.7.0",
+    "@agentcontextdistributionprotocol/acdp-linux-x64-gnu": "0.7.0",
+    "@agentcontextdistributionprotocol/acdp-linux-arm64-gnu": "0.7.0"
   }
 }
