@@ -6,7 +6,7 @@ Context Distribution Protocol — v0.1.0 core plus the v0.2.0 Trust &
 Hardening surface (RFC-ACDP-0001 through 0015). HTTP is intentionally left
 to the caller — pair this with `httpx` / `requests` for transport.
 
-Package version tracks the binding release line (currently **0.7.0**).
+Package version tracks the binding release line (currently **0.8.0**).
 
 ## Install
 

@@ -18,6 +18,10 @@ on:
       - 'acdp-node-v*'
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Release version to stamp + publish (e.g. 0.8.0). Empty = use the manifest version.'
+        type: string
+        default: ''
       dry_run:
         description: 'Build only; skip npm publish'
         type: boolean
@@ -74,6 +78,12 @@ jobs:
           version: 0.13.0
       - name: Install dependencies
         run: npm install
+      - name: Stamp release version
+        run: |
+          V="${{ inputs.version }}"; [ -z "$V" ] && V="${GITHUB_REF_NAME#acdp-node-v}"
+          echo "stamping version $V"
+          jq --arg v "$V" '.version=$v' package.json > package.json.tmp && mv package.json.tmp package.json
+          sed -i.bak -E "s/^version[[:space:]]*=.*/version = \"$V\"/" Cargo.toml && rm -f Cargo.toml.bak
       - name: Build (native)
         if: ${{ !matrix.zig }}
         run: npx napi build --platform --release --target ${{ matrix.target }}
@@ -120,6 +130,13 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      # The published npm version (root loader + per-platform packages) is
+      # read from package.json here, so stamp it in this job too.
+      - name: Stamp release version
+        run: |
+          V="${{ inputs.version }}"; [ -z "$V" ] && V="${GITHUB_REF_NAME#acdp-node-v}"
+          echo "stamping version $V"
+          jq --arg v "$V" '.version=$v' package.json > package.json.tmp && mv package.json.tmp package.json
       - name: Install dependencies
         run: npm install
       - name: Download all .node artifacts
