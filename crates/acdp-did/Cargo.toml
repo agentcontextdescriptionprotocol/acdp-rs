@@ -32,10 +32,10 @@ serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 base64     = "0.22"
 bs58       = "0.5"
 hex        = "0.4"
-p256       = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+p256       = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 urlencoding = "2"
 reqwest    = { version = "0.12", features = ["json", "rustls-tls"], optional = true, default-features = false }
-lru        = { version = "0.16", optional = true }
+lru        = { version = "0.18", optional = true }
 tracing    = { version = "0.1", optional = true, default-features = false, features = ["attributes"] }
 
 [dev-dependencies]
