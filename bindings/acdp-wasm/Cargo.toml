@@ -58,7 +58,7 @@ hex        = "0.4"
 # Both `compile_error!` on wasm32-unknown-unknown without a backend even
 # though verification never draws randomness.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom      = { version = "0.2", features = ["js"] }
+getrandom      = { version = "0.4", features = ["js"] }
 getrandom_wasm = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 # uuid v4 (acdp-primitives) needs its OWN wasm randomness feature on top
 # of the getrandom backend above: without `js` it emits its own
