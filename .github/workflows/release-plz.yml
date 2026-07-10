@@ -35,6 +35,33 @@ jobs:
         with:
           toolchain: stable
       - uses: MarcoIeni/release-plz-action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        id: release-plz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      # When this run actually publishes a new `acdp` to crates.io, tell
+      # acdp-registry-rs immediately so it opens a bump PR instead of waiting up
+      # to a week for its Dependabot cargo run. Fires only for the `acdp` crate;
+      # other workspace crates (acdp-types, acdp-client, …) don't trigger it.
+      - name: Detect acdp release
+        id: acdp
+        if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          version=$(printf '%s' "$RELEASES" | jq -r '.[] | select(.package_name == "acdp") | .version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -n "$version" ]; then
+            echo "acdp $version published — will notify acdp-registry-rs"
+          else
+            echo "no acdp release in this run"
+          fi
+      - name: Notify acdp-registry-rs
+        if: ${{ steps.acdp.outputs.version != '' }}
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ secrets.ACDP_REGISTRY_SYNC_TOKEN }}
+          repository: agentcontextdistributionprotocol/acdp-registry-rs
+          event-type: acdp-released
+          client-payload: '{"version": "${{ steps.acdp.outputs.version }}"}'
