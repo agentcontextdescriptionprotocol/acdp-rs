@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.6.2...acdp-server-v0.8.0) - 2026-07-10
+
+### Other
+
+- unify the whole ecosystem to 0.8.0 and auto-release the SDKs ([#127](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/127))
+
 ## [0.6.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.6.1...acdp-server-v0.6.2) - 2026-07-10
 
 ### Added
