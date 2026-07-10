@@ -51,8 +51,8 @@ jobs:
       id-token: write # OIDC: npm provenance + SLSA build-provenance attestation
       attestations: write # write the SLSA provenance attestation
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -108,7 +108,7 @@ jobs:
       # subject-path is resolved from GITHUB_WORKSPACE (uses: steps ignore the
       # job-level defaults.run.working-directory).
       - name: Attest build provenance (.wasm)
-        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        uses: actions/attest-build-provenance@v4 # first-party, major tag
         with:
           subject-path: bindings/acdp-wasm/pkg/acdp_wasm_bg.wasm
       - name: List what will be published

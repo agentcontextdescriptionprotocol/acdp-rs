@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'agentcontextdistributionprotocol' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -59,7 +59,7 @@ jobs:
       - name: Mint token for acdp-registry-rs
         id: dispatch-token
         if: ${{ steps.acdp.outputs.released == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.ACDP_BOT_APP_ID }}
           private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
