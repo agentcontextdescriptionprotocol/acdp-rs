@@ -30,7 +30,7 @@ url    = "2"
 tokio      = { version = "1", features = ["full"] }
 serde_json = "1"
 wiremock   = "0.6"
-base64     = "0.22"
+base64     = "0.23"
 
 [lints.rust]
 unsafe_code = "forbid"
