@@ -60,8 +60,8 @@ jobs:
             # Cross-compiled with zig so we don't need an arm64 runner.
             zig: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -73,7 +73,7 @@ jobs:
           workspaces: bindings/acdp-node
       - name: Install zig (cross targets)
         if: ${{ matrix.zig }}
-        uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1.2.2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.13.0
       - name: Install dependencies
@@ -107,11 +107,11 @@ jobs:
       # subject-path is resolved from GITHUB_WORKSPACE (uses: steps ignore
       # the job-level defaults.run.working-directory).
       - name: Attest build provenance (.node)
-        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        uses: actions/attest-build-provenance@v4 # first-party, major tag
         with:
           subject-path: bindings/acdp-node/*.node
       - name: Upload .node artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bindings-${{ matrix.target }}
           path: bindings/acdp-node/*.node
@@ -125,8 +125,8 @@ jobs:
       contents: read
       id-token: write # npm provenance
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -140,7 +140,7 @@ jobs:
       - name: Install dependencies
         run: npm install
       - name: Download all .node artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: bindings/acdp-node/artifacts
           pattern: bindings-*
@@ -185,7 +185,7 @@ jobs:
       - name: Mint token for acdp-control-plane
         id: dispatch-token
         if: ${{ github.event_name == 'push' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.ACDP_BOT_APP_ID }}
           private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
