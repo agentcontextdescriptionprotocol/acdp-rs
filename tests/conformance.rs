@@ -133,6 +133,148 @@ fn all_conformance_fixtures_parse_as_valid_json() {
     );
 }
 
+/// The fixture families acdp-rs currently accounts for, reviewed by hand on every
+/// deliberate spec-pin bump (RS-3/RS-8/RS-5, etc.). A brand-new family appearing in the
+/// spec's own `registries/profiles.json` `fixture_families` registry must be added here
+/// (with dedicated test coverage) or excused below before
+/// `all_conformance_fixtures_are_bucketed_into_known_families` will pass again — that
+/// forcing function is the entire point (RS-2, gates SPEC-9 per hazard H8).
+const KNOWN_FAMILIES: &[&str] = &[
+    "body",
+    "can",
+    "caps",
+    "cur",
+    "data-ref",
+    "data-ref-ssrf",
+    "did-ssrf",
+    "dk",
+    "err",
+    "fed",
+    "fp",
+    "idem",
+    "lc",
+    "lhr",
+    "lin",
+    "log",
+    "meta",
+    "pub",
+    "rate",
+    "rcpt",
+    "ret",
+    "rev",
+    "rot",
+    "schema",
+    "sig",
+    "status",
+    "vis",
+    "wit",
+];
+
+/// Families in [`KNOWN_FAMILIES`] with no dedicated fixture-driven test today, and why.
+/// Every entry here must also appear in `KNOWN_FAMILIES`
+/// (see `excused_families_are_a_subset_of_known_families`).
+const EXCUSED: &[(&str, &str)] = &[];
+
+/// Longest-prefix match of a fixture `id` against a family list, mirroring the spec's own
+/// `scripts/check-consistency.py::check_families` (spec repo, ~line 79): sort candidates by
+/// length descending and take the first one that is a true `-`-delimited prefix of `id`. A
+/// naive split-on-first-hyphen would mis-bucket `data-ref-ssrf-001` as `data` (or
+/// `data-ref`), and `did-ssrf-001` as `did`.
+fn bucket_family<'a>(id: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    let mut ordered: Vec<&str> = candidates.to_vec();
+    ordered.sort_by_key(|fam| std::cmp::Reverse(fam.len()));
+    ordered
+        .into_iter()
+        .find(|fam| id.starts_with(&format!("{fam}-")))
+}
+
+#[test]
+fn fixture_family_bucketing_prefers_longest_match() {
+    let candidates = ["data-ref", "data-ref-ssrf", "did", "did-ssrf"];
+    assert_eq!(
+        bucket_family("data-ref-ssrf-001", &candidates),
+        Some("data-ref-ssrf")
+    );
+    assert_eq!(bucket_family("data-ref-001", &candidates), Some("data-ref"));
+    assert_eq!(bucket_family("did-ssrf-001", &candidates), Some("did-ssrf"));
+    assert_eq!(bucket_family("did-001", &candidates), Some("did"));
+    assert_eq!(bucket_family("unrelated-001", &candidates), None);
+}
+
+#[test]
+fn excused_families_are_a_subset_of_known_families() {
+    for (family, reason) in EXCUSED {
+        assert!(
+            KNOWN_FAMILIES.contains(family),
+            "EXCUSED family '{family}' (reason: {reason}) is not in KNOWN_FAMILIES — an \
+             excused family must still be one we consciously account for"
+        );
+    }
+}
+
+/// RS-2 — fails the moment the spec's fixture set contains a family this repo hasn't
+/// consciously accounted for (via `KNOWN_FAMILIES` test coverage, or a documented
+/// `EXCUSED` reason). Supersedes the bare `count >= 93` floor above with per-family
+/// coverage: that floor has ~44 fixtures of slack today, so a whole family could vanish
+/// without it noticing.
+#[test]
+fn all_conformance_fixtures_are_bucketed_into_known_families() {
+    let Some(root) = spec_root() else {
+        eprintln!("ACDP spec not found; skipping fixture-family coverage test");
+        return;
+    };
+    let dir = root.join("schemas/conformance");
+    let profiles_path = root.join("registries/profiles.json");
+    let profiles = read_json(&profiles_path);
+    let spec_families: Vec<&str> = profiles
+        .get("fixture_families")
+        .and_then(|v| v.as_object())
+        .unwrap_or_else(|| {
+            panic!(
+                "{} missing 'fixture_families' object",
+                profiles_path.display()
+            )
+        })
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut observed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(&dir).expect("conformance dir readable") {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let v = read_json(&path);
+        let id = v
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("fixture {} missing string 'id'", path.display()));
+        let family = bucket_family(id, &spec_families).unwrap_or_else(|| {
+            panic!(
+                "fixture {} (id '{id}') doesn't match any family in {}'s fixture_families \
+                 (known: {})",
+                path.display(),
+                profiles_path.display(),
+                spec_families.join(", ")
+            )
+        });
+        observed.insert(family);
+    }
+
+    let unaccounted: Vec<&str> = observed
+        .into_iter()
+        .filter(|family| !KNOWN_FAMILIES.contains(family))
+        .collect();
+    assert!(
+        unaccounted.is_empty(),
+        "fixture families with real fixtures on disk but not in KNOWN_FAMILIES or EXCUSED \
+         (tests/conformance.rs): {} — add test coverage or an EXCUSED entry with a reason",
+        unaccounted.join(", ")
+    );
+}
+
 /// FEAT-03 — capabilities conformance fixtures (caps-001..006).
 #[test]
 fn capabilities_conformance_fixtures() {

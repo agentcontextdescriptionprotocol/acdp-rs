@@ -5,9 +5,10 @@
 
 PY_DIR    := bindings/acdp-py
 NODE_DIR  := bindings/acdp-node
+WASM_DIR  := bindings/acdp-wasm
 INTEROP   := bindings/interop
 
-.PHONY: help test sdk-py sdk-node interop sdk-all clean-bindings ci-bindings
+.PHONY: help test sdk-py sdk-node interop sdk-all clean-bindings ci-bindings audit-bindings
 
 help:
 	@echo "Targets:"
@@ -16,6 +17,7 @@ help:
 	@echo "  sdk-node      - npm install + napi build:debug + node --test in $(NODE_DIR)"
 	@echo "  sdk-all       - build both SDKs (no tests)"
 	@echo "  interop       - sdk-py + sdk-node + pytest $(INTEROP)"
+	@echo "  audit-bindings - cargo-deny advisories ($(PY_DIR), $(NODE_DIR), $(WASM_DIR)) + npm audit"
 	@echo "  ci-bindings   - what bindings.yml runs locally"
 	@echo "  clean-bindings - rm bindings/**/target node_modules and built artifacts"
 
@@ -55,8 +57,16 @@ sdk-node-build:
 interop: sdk-py-build sdk-node-build
 	cd $(INTEROP) && pytest
 
+# ── Supply-chain scanning ───────────────────────────────────────────────
+# Mirrors bindings.yml's bindings-deny + bindings-npm-audit jobs.
+audit-bindings:
+	cargo deny --manifest-path $(PY_DIR)/Cargo.toml --config deny.toml check advisories
+	cargo deny --manifest-path $(NODE_DIR)/Cargo.toml --config deny.toml check advisories
+	cargo deny --manifest-path $(WASM_DIR)/Cargo.toml --config deny.toml check advisories
+	cd $(NODE_DIR) && npm install && npm audit
+
 # What the CI workflow runs locally. Useful before pushing.
-ci-bindings: test sdk-py sdk-node interop
+ci-bindings: test sdk-py sdk-node interop audit-bindings
 
 # ── Cleanup ─────────────────────────────────────────────────────────────
 clean-bindings:

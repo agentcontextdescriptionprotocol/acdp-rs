@@ -970,18 +970,37 @@ fn phase12_fixtures_present_in_spec() {
 }
 
 fn spec_root() -> Option<std::path::PathBuf> {
+    let require = std::env::var("ACDP_REQUIRE_CONFORMANCE").is_ok();
+
     if let Ok(env) = std::env::var("ACDP_SPEC_DIR") {
         let p = std::path::PathBuf::from(env);
         if p.exists() {
             return Some(p);
         }
+        assert!(
+            !require,
+            "ACDP_REQUIRE_CONFORMANCE is set but ACDP_SPEC_DIR '{}' does not exist",
+            p.display()
+        );
+    } else {
+        assert!(
+            !require,
+            "ACDP_REQUIRE_CONFORMANCE is set but ACDP_SPEC_DIR is not"
+        );
     }
+
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let sibling = manifest_dir
-        .parent()?
-        .join("agentcontextdistributionprotocol");
-    if sibling.exists() {
-        return Some(sibling);
+    if let Some(sibling) = manifest_dir
+        .parent()
+        .map(|p| p.join("agentcontextdistributionprotocol"))
+    {
+        if sibling.exists() {
+            return Some(sibling);
+        }
     }
+    assert!(
+        !require,
+        "ACDP_REQUIRE_CONFORMANCE is set but no ACDP spec checkout could be located"
+    );
     None
 }

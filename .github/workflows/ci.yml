@@ -85,7 +85,7 @@ jobs:
         env:
           ACDP_SPEC_DIR: ${{ github.workspace }}/acdp-spec
           ACDP_REQUIRE_CONFORMANCE: "1"
-        run: cargo test -p acdp --all-features --test conformance
+        run: cargo test --workspace --all-features
 
   msrv:
     name: MSRV (1.86)
