@@ -71,8 +71,8 @@ jobs:
           repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
           # Pinned so a spec-repo push cannot change this repo's CI result
           # without a commit here. Bump deliberately when adopting new
-          # fixtures. (main HEAD as of 2026-07-06)
-          ref: f5b66b8f86f48ba16f79bba95eb246d6acb43989
+          # fixtures. (main HEAD as of 2026-08-28)
+          ref: bff3cf3afbdcea619834916e8f0bcac7e82ba658
           path: acdp-spec
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
