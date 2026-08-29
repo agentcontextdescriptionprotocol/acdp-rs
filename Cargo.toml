@@ -53,9 +53,9 @@ tracing = [
 # Opts into the SSRF-relaxed test-only constructors
 # (`SsrfPolicy::allow_test_loopback`, `RegistryClient::{with_root_cert_pem,
 # with_test_transport, with_test_endpoint}`, `WebResolver::with_test_endpoint`).
-# Without it those constructors are deprecated; in 0.4.0 they will be
-# compiled out entirely unless this feature is enabled. Never enable in
-# production builds.
+# Without it those constructors do not exist at all: each is
+# `#[cfg(feature = "test-transport")]`-gated, not merely deprecated.
+# Never enable in production builds.
 test-transport = [
     "acdp-safe-http/test-transport",
     "acdp-did/test-transport",

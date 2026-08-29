@@ -50,3 +50,7 @@ test-transport = ["acdp/test-transport"]
 name              = "cli"
 path              = "tests/cli.rs"
 required-features = ["test-transport"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

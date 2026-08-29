@@ -7,8 +7,10 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.86-blue)](https://blog.rust-lang.org/2025/04/03/Rust-1.86.0.html)
 
 Reference Rust library for the **Agent Context Distribution Protocol** —
-ACDP v0.1.0 Final plus the v0.2.0 Trust & Hardening layer and the 0.3/0.4
-drafts (`ACDP_VERSION` is `0.2.0`).
+ACDP v0.1.0 Final, the v0.2.0 Trust & Hardening layer, v0.3.0 (lineage-head
+receipts, transparency log, lifecycle/retraction, key revocation), and
+v0.4.0 (witness cosigning, RFC-ACDP-0015, promoted to Final 2026-08) —
+all wire-frozen (`ACDP_VERSION` is `0.4.0`).
 
 ACDP lets agents publish immutable, producer-signed context descriptors,
 retrieve and verify them locally, discover them by keyword, and follow signed
@@ -158,8 +160,8 @@ println!("content_hash: {}", req.content_hash);
 #### `acdp_version` field
 
 Since 0.2.0 the builder **emits `acdp_version` explicitly by default**
-(`"0.2.0"`, the value of `acdp::ACDP_VERSION`) — the omission default is closed
-for 0.2.0 builders. Consumers still treat an absent field as `"0.1.0"`
+(`"0.4.0"`, the value of `acdp::ACDP_VERSION`) — the omission default is closed
+for 0.2.0+ builders. Consumers still treat an absent field as `"0.1.0"`
 (RFC-ACDP-0001 §6). To reproduce the 0.1.x omitted form, opt out:
 
 ```rust,ignore

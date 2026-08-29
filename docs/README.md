@@ -1,6 +1,6 @@
 # acdp — Library Documentation
 
-**Crate**: `acdp` &nbsp;|&nbsp; **Protocol**: ACDP v0.1.0 Final + v0.2.0 Trust & Hardening (`ACDP_VERSION` = `0.2.0`) &nbsp;|&nbsp; **Language**: Rust (MSRV 1.86)
+**Crate**: `acdp` &nbsp;|&nbsp; **Protocol**: ACDP v0.1.0 Final through v0.4.0 (`ACDP_VERSION` = `0.4.0`) &nbsp;|&nbsp; **Language**: Rust (MSRV 1.86)
 
 This is the reference Rust implementation of the **Agent Context Distribution
 Protocol**. ACDP lets agents publish immutable, producer-signed context
@@ -48,6 +48,7 @@ normative protocol rules. For those, each page links to the relevant RFC.
 |---|---|
 | [CLI reference](cli.md) | The `acdp` binary (`cli` feature) — 11 subcommands for capabilities, retrieve, publish, validate, hash, sign, resolve. |
 | [Language bindings](bindings.md) | The Python (`acdp-py`) and Node (`acdp-node`) SDKs and the JSON-across-FFI design. |
+| [Release runbook](release-runbook.md) | Tagging/publishing the crate family and the three language bindings, and the tag-triggered-workflow hazard (H11) to mind when tagging retroactively. |
 | [Conformance & testing](conformance.md) | Running the spec golden vectors and the conformance fixture suite via `ACDP_SPEC_DIR`. |
 | [Supply-chain security](supply-chain.md) | Build provenance (npm/PyPI/GitHub attestations), the Action-pinning policy, the `cargo vet` contributor workflow, and the `cargo deny` + `cargo audit` posture. |
 

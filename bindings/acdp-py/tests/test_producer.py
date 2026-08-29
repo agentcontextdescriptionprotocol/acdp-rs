@@ -96,11 +96,12 @@ def test_golden_content_hash():
 
 
 def test_default_emits_acdp_version_and_changes_hash():
-    """The builder emits `acdp_version: "0.2.0"` explicitly by
-    default. The omitted and explicit forms are distinct JCS preimages,
-    so the default build of the sig-001 fields must carry the field AND
-    hash differently from the pinned golden vector — while still
-    self-verifying."""
+    """The builder emits `acdp_version` explicitly by default, tracking
+    the newest Final wire line (`"0.4.0"` as of RFC-ACDP-0015's
+    promotion). The omitted and explicit forms are distinct JCS
+    preimages, so the default build of the sig-001 fields must carry
+    the field AND hash differently from the pinned golden vector —
+    while still self-verifying."""
     seed = bytes(32)
     p = acdp.AcdpProducer.from_seed(
         seed,
@@ -112,7 +113,7 @@ def test_default_emits_acdp_version_and_changes_hash():
         context_type="data_snapshot",
     )
     req = json.loads(raw)
-    assert req["acdp_version"] == "0.2.0"
+    assert req["acdp_version"] == "0.4.0"
     assert req["content_hash"] != (
         "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5"
     )
