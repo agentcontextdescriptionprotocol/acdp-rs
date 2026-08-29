@@ -75,10 +75,6 @@ const REGISTRY_ASSIGNED_CTX_ID: &str =
 const REGISTRY_ASSIGNED_LINEAGE: &str =
     "lin:sha256:6af6229c1c6a4a119695c77e47f6554941aebce3d25ba8567e2ae6ffbb6059cb";
 
-/// rev-002 receipt-attested publish times.
-const BEFORE_T: &str = "2026-04-16T10:30:15.123Z";
-const AFTER_T: &str = "2026-05-03T09:00:00.000Z";
-
 fn at(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
@@ -438,9 +434,89 @@ fn spec_root() -> Option<PathBuf> {
 }
 
 // ── rev-002: §7 boundary matrix (pure classification) ───────────────────────
+//
+// RS-5: driven from `rev-002-before-after-boundary.json`'s `input` matrix
+// rather than hand-copied constants — see `rev_002_fixture()` /
+// `rev_002_revocation_from_fixture()` below. Editing the fixture's
+// `revocation.revoked_key_fingerprint`, `revocation.compromised_since`, or
+// `registry_receipt.created_at_by_scenario.{A,B}` changes what these tests
+// actually exercise, because both the signed revocation body AND the
+// classifier inputs are built from those parsed values, not from module
+// constants that merely happen to match.
 
-fn golden_revocation() -> KeyRevocation {
-    KeyRevocation::from_body(&golden_body()).unwrap()
+/// Load the rev-002 fixture, honoring the require-mode gate — mirrors
+/// the inline pattern in `rev_001_fixture_file_cross_check` above (this
+/// file has no shared `require_conformance()` helper the way
+/// `tests/conformance.rs` does).
+fn rev_002_fixture() -> Option<serde_json::Value> {
+    let require = std::env::var("ACDP_REQUIRE_CONFORMANCE").is_ok();
+    let Some(root) = spec_root() else {
+        assert!(!require, "ACDP_REQUIRE_CONFORMANCE set but spec not found");
+        eprintln!("ACDP spec not found; skipping rev-002 fixture-driven scenario tests");
+        return None;
+    };
+    let path = root.join("schemas/conformance/rev-002-before-after-boundary.json");
+    if !path.exists() {
+        assert!(
+            !require,
+            "ACDP_REQUIRE_CONFORMANCE set but {} is missing",
+            path.display()
+        );
+        eprintln!("rev-002 fixture not present; skipping");
+        return None;
+    }
+    Some(serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap())
+}
+
+/// Look up a required string field by JSON path, panicking with the
+/// path on any shape drift — loud failure beats a silent `None`
+/// mis-driving a scenario test.
+fn json_str<'a>(v: &'a serde_json::Value, path: &[&str]) -> &'a str {
+    let mut cur = v;
+    for key in path {
+        cur = cur
+            .get(key)
+            .unwrap_or_else(|| panic!("rev-002 fixture missing {path:?} (stopped at '{key}')"));
+    }
+    cur.as_str()
+        .unwrap_or_else(|| panic!("rev-002 fixture {path:?} is not a string"))
+}
+
+/// Build a producer-signed revocation from the fixture's own
+/// `input.revocation` values (fingerprint + compromise boundary),
+/// rather than the module-level `K1_FP`/`T` constants — this is what
+/// makes the scenario tests below actually depend on the fixture's
+/// content, not just its presence.
+fn rev_002_revocation_from_fixture(fixture: &serde_json::Value) -> KeyRevocation {
+    let revoked_fp = json_str(fixture, &["input", "revocation", "revoked_key_fingerprint"]);
+    let compromised_since = json_str(fixture, &["input", "revocation", "compromised_since"]);
+    let metadata = json!({
+        "revoked_key_fingerprint": revoked_fp,
+        "compromised_since": compromised_since,
+        "reason": REASON,
+    });
+    let req = Producer::new(
+        SigningKey::from_bytes(&K2_SEED),
+        AgentDid::new(PRODUCER_DID),
+        format!("{PRODUCER_DID}#key-2"),
+    )
+    .publish_request()
+    .acdp_version("0.3.0")
+    .title(TITLE)
+    .summary(SUMMARY)
+    .context_type(ContextType::KeyRevocation)
+    .visibility(Visibility::Public)
+    .metadata(metadata)
+    .build()
+    .expect("the rev-002-driven revocation request must pass builder validation");
+    let body = Body::from_publish_request(
+        &req,
+        CtxId(REGISTRY_ASSIGNED_CTX_ID.into()),
+        LineageId(REGISTRY_ASSIGNED_LINEAGE.into()),
+        "registry.example.com",
+        at("2026-05-02T08:00:00.000Z"),
+    );
+    KeyRevocation::from_body(&body).unwrap()
 }
 
 /// Scenario A — receipt-attested publish time strictly before T:
@@ -448,7 +524,20 @@ fn golden_revocation() -> KeyRevocation {
 /// status is distinguishable from every other verdict.
 #[test]
 fn rev_002_a_before_t_is_pre_compromise_historical() {
-    let verdict = classify_under_revocation(&[golden_revocation()], K1_FP, Some(at(BEFORE_T)))
+    let Some(fixture) = rev_002_fixture() else {
+        return;
+    };
+    let revoked_fp = json_str(
+        &fixture,
+        &["input", "body_under_test", "signer_key_fingerprint"],
+    );
+    let before_t = json_str(
+        &fixture,
+        &["input", "registry_receipt", "created_at_by_scenario", "A"],
+    );
+    let revocation = rev_002_revocation_from_fixture(&fixture);
+
+    let verdict = classify_under_revocation(&[revocation], revoked_fp, Some(at(before_t)))
         .unwrap()
         .expect("the revocation names K1 — it must produce a verdict");
     assert_eq!(
@@ -464,9 +553,27 @@ fn rev_002_a_before_t_is_pre_compromise_historical() {
 /// Scenario B — at or after T: fail closed despite the valid receipt.
 #[test]
 fn rev_002_b_at_or_after_t_fails_closed() {
-    for when in [AFTER_T, T] {
-        let err = classify_under_revocation(&[golden_revocation()], K1_FP, Some(at(when)))
-            .expect_err("at/after the boundary must fail closed");
+    let Some(fixture) = rev_002_fixture() else {
+        return;
+    };
+    let revoked_fp = json_str(
+        &fixture,
+        &["input", "body_under_test", "signer_key_fingerprint"],
+    );
+    let compromised_since = json_str(&fixture, &["input", "revocation", "compromised_since"]);
+    let after_t = json_str(
+        &fixture,
+        &["input", "registry_receipt", "created_at_by_scenario", "B"],
+    );
+    let revocation = rev_002_revocation_from_fixture(&fixture);
+
+    for when in [after_t, compromised_since] {
+        let err = classify_under_revocation(
+            std::slice::from_ref(&revocation),
+            revoked_fp,
+            Some(at(when)),
+        )
+        .expect_err("at/after the boundary must fail closed");
         assert!(matches!(err, AcdpError::KeyNotAuthorized(_)), "got {err:?}");
     }
 }
@@ -476,7 +583,16 @@ fn rev_002_b_at_or_after_t_fails_closed() {
 /// used — there is no parameter through which to pass it).
 #[test]
 fn rev_002_c_unverifiable_time_fails_closed() {
-    let err = classify_under_revocation(&[golden_revocation()], K1_FP, None)
+    let Some(fixture) = rev_002_fixture() else {
+        return;
+    };
+    let revoked_fp = json_str(
+        &fixture,
+        &["input", "body_under_test", "signer_key_fingerprint"],
+    );
+    let revocation = rev_002_revocation_from_fixture(&fixture);
+
+    let err = classify_under_revocation(&[revocation], revoked_fp, None)
         .expect_err("receipt-less revoked-key context must fail closed under strict");
     assert!(matches!(err, AcdpError::KeyNotAuthorized(_)), "got {err:?}");
 }
@@ -487,6 +603,14 @@ fn rev_002_c_unverifiable_time_fails_closed() {
 /// K1-self-signed "revocation" is unverified, triggering none of §7.
 #[test]
 fn rev_002_d_trust_classes_distinguishable() {
+    let Some(fixture) = rev_002_fixture() else {
+        return;
+    };
+    let revoked_fp = json_str(
+        &fixture,
+        &["input", "body_under_test", "signer_key_fingerprint"],
+    );
+
     // Registry-attested form: agent_id is the registry,
     // revoked_key_controller (REQUIRED here) names the producer.
     let mut body = golden_body();
@@ -507,7 +631,7 @@ fn rev_002_d_trust_classes_distinguishable() {
         "did:web:registry.example.com"
     );
 
-    let producer_signed = golden_revocation();
+    let producer_signed = rev_002_revocation_from_fixture(&fixture);
     assert_eq!(
         producer_signed.trust_class,
         RevocationTrustClass::ProducerSigned
@@ -519,15 +643,31 @@ fn rev_002_d_trust_classes_distinguishable() {
 
     // A "revocation" signed by K1 itself: §5 step 2 rejects it before
     // it can ever enter the §7 classifier.
-    let err = producer_signed.check_not_self_signed(K1_FP).unwrap_err();
+    let err = producer_signed
+        .check_not_self_signed(revoked_fp)
+        .unwrap_err();
     assert!(matches!(err, AcdpError::KeyNotAuthorized(_)), "got {err:?}");
 }
 
 /// §4 earliest-T monotonicity across a revocation lineage: a
-/// supersession can widen but never quietly shrink the window.
+/// supersession can widen but never quietly shrink the window. Not one
+/// of rev-002's own A/B/C/D scenarios, but driven from the same
+/// fixture-sourced fingerprint/boundary for consistency.
 #[test]
 fn rev_002_earliest_boundary_across_lineage() {
-    let head = golden_revocation();
+    let Some(fixture) = rev_002_fixture() else {
+        return;
+    };
+    let revoked_fp = json_str(
+        &fixture,
+        &["input", "body_under_test", "signer_key_fingerprint"],
+    );
+    let before_t = json_str(
+        &fixture,
+        &["input", "registry_receipt", "created_at_by_scenario", "A"],
+    );
+
+    let head = rev_002_revocation_from_fixture(&fixture);
     // A superseding revocation that moved T EARLIER (widening).
     let mut widened = head.clone();
     widened.compromised_since = at("2026-04-01T00:00:00.000Z");
@@ -535,13 +675,14 @@ fn rev_002_earliest_boundary_across_lineage() {
 
     // A publish time before the head's T but after the widened T is
     // inside the effective window.
-    let err = classify_under_revocation(&lineage, K1_FP, Some(at(BEFORE_T)))
+    let err = classify_under_revocation(&lineage, revoked_fp, Some(at(before_t)))
         .expect_err("the earliest compromised_since across the lineage is effective");
     assert!(matches!(err, AcdpError::KeyNotAuthorized(_)), "got {err:?}");
 
     // Strictly before both boundaries still verifies.
     assert_eq!(
-        classify_under_revocation(&lineage, K1_FP, Some(at("2026-03-01T00:00:00.000Z"))).unwrap(),
+        classify_under_revocation(&lineage, revoked_fp, Some(at("2026-03-01T00:00:00.000Z")))
+            .unwrap(),
         Some(KeyAuthorization::HistoricallyAuthorizedPreCompromise)
     );
 }
