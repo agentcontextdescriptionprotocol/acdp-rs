@@ -50,6 +50,7 @@ fn sample_publish_request() -> PublishRequest {
         data_period: None,
         metadata: None,
         schema_uri: None,
+        anchors: None,
         lineage_id: None,
     }
 }

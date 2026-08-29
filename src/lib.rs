@@ -117,9 +117,9 @@ pub use acdp_primitives::{ACDP_SCHEMA_NAMESPACE, ACDP_VERSION};
 // ── Convenience re-exports ────────────────────────────────────────────────────
 pub use error::{AcdpError, SupersessionReason};
 pub use types::{
-    AgentDid, Body, CapabilitiesDocument, ContentHash, ContextType, CtxId, DataRef, DataRefType,
-    FullContext, KeyRevocation, LifecycleEvent, LifecycleEventType, LineageId, Location,
-    LogCheckpoint, LogConsistencyProof, LogCosignature, LogInclusion, LogLeaf, PublishRequest,
-    PublishResponse, RegistryState, RevocationTrustClass, SearchParams, SearchResponse, Status,
-    Visibility, WireError, WitnessSigner, WitnessedCheckpoint,
+    AgentDid, AnchorEntry, Body, CapabilitiesDocument, ContentHash, ContextType, CtxId, DataRef,
+    DataRefType, FullContext, KeyRevocation, LifecycleEvent, LifecycleEventType, LineageId,
+    Location, LogCheckpoint, LogConsistencyProof, LogCosignature, LogInclusion, LogLeaf,
+    PublishRequest, PublishResponse, RegistryState, RevocationTrustClass, SearchParams,
+    SearchResponse, Status, Visibility, WireError, WitnessSigner, WitnessedCheckpoint,
 };

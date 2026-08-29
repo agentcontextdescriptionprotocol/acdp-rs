@@ -1179,6 +1179,7 @@ mod tests {
             data_period: None,
             metadata: None,
             schema_uri: None,
+            anchors: None,
             extensions: Default::default(),
         }
     }

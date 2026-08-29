@@ -1,3 +1,4 @@
+use crate::anchor::AnchorEntry;
 use crate::data_ref::DataRef;
 use crate::serde_helpers::de_present;
 use acdp_primitives::primitives::*;
@@ -94,6 +95,19 @@ pub struct Body {
         skip_serializing_if = "Option::is_none"
     )]
     pub schema_uri: Option<String>,
+    /// Typed, content-addressed references to external (non-ACDP)
+    /// artifacts this body genesis-links to (RFC-ACDP-0016, 0.5.0).
+    /// Absent-when-empty: a producer with no anchors MUST omit this
+    /// field entirely, never send `[]` — enforced at runtime by
+    /// `acdp-validation`, not by this type (an empty `Some(vec![])` is
+    /// representable so validation can reject it with a clear error
+    /// rather than the type silently normalizing it away).
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub anchors: Option<Vec<AnchorEntry>>,
 
     /// Forward-compatible carry-through of unknown producer-controlled
     /// fields (e.g. v0.1's `priority`). Including these in the typed
@@ -168,6 +182,7 @@ impl Body {
             data_period: req.data_period.clone(),
             metadata: req.metadata.clone(),
             schema_uri: req.schema_uri.clone(),
+            anchors: req.anchors.clone(),
             // The publish schema is CLOSED (deny_unknown_fields), so a
             // fresh body starts with no extension fields.
             extensions: Default::default(),
