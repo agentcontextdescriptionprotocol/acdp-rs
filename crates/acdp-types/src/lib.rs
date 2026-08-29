@@ -8,6 +8,7 @@
 //! [`acdp-primitives`](https://docs.rs/acdp-primitives) and are re-exported
 //! here under the historical `primitives` path.
 
+pub mod anchor;
 pub mod body;
 pub mod capabilities;
 pub mod cosignature;
@@ -27,6 +28,7 @@ pub use acdp_primitives::primitives;
 pub(crate) use acdp_primitives::serde_helpers;
 
 pub use acdp_primitives::wire_error::{WireError, WireErrorBody};
+pub use anchor::AnchorEntry;
 pub use body::{Body, DataPeriod, FullContext, RegistryState, Signature};
 pub use capabilities::{CapabilitiesDocument, Limits};
 pub use cosignature::{LogCosignature, WitnessSigner, WitnessedCheckpoint, COSIGNATURE_VERSION};

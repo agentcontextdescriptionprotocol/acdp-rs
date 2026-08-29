@@ -21,6 +21,7 @@
 
 use acdp_crypto::try_canonicalize_value;
 use acdp_primitives::error::AcdpError;
+use acdp_types::anchor::AnchorEntry;
 use acdp_types::body::Body;
 use acdp_types::data_ref::{DataRef, EmbeddedContent, EmbeddedEncoding, Location};
 use acdp_types::primitives::{
@@ -46,6 +47,7 @@ const MAX_METADATA_PROPERTIES: usize = 100;
 const MAX_METADATA_DEPTH: usize = 8;
 const MAX_METADATA_JCS_BYTES: usize = 65_536;
 const MAX_URI_LEN: usize = 4096;
+const MAX_ANCHORS: usize = 100;
 const MAX_EMBEDDED_BYTES: usize = 65_536;
 const ED25519_SIG_B64_LEN: usize = 88;
 const ECDSA_P256_SIG_B64_LEN: usize = 88;
@@ -230,6 +232,10 @@ pub fn validate_publish_request(req: &PublishRequest) -> Result<(), AcdpError> {
         validate_data_ref(dr)?;
     }
 
+    if let Some(anchors) = &req.anchors {
+        validate_anchors(anchors)?;
+    }
+
     validate_signature_length(&req.signature.algorithm, &req.signature.value)?;
     validate_did_key_key_id_form(&req.signature.key_id)?;
     ContentHash::parse(req.content_hash.as_str())?;
@@ -352,6 +358,10 @@ fn validate_body_inner(body: &Body, check_embedded_hashes: bool) -> Result<(), A
         } else {
             validate_data_ref_structural(dr)?;
         }
+    }
+
+    if let Some(anchors) = &body.anchors {
+        validate_anchors(anchors)?;
     }
 
     validate_signature_length(&body.signature.algorithm, &body.signature.value)?;
@@ -525,6 +535,32 @@ fn is_dotted_namespace_scheme(s: &str) -> bool {
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     })
+}
+
+/// Validate `Body::anchors` / `PublishRequest::anchors`
+/// (RFC-ACDP-0016 §4). Called only when the field is `Some` — an
+/// absent field needs no validation, and the caller is responsible for
+/// the absent-vs-null distinction (`de_present` on the field itself).
+fn validate_anchors(anchors: &[AnchorEntry]) -> Result<(), AcdpError> {
+    if anchors.is_empty() {
+        return Err(AcdpError::SchemaViolation(
+            "anchors MUST be omitted entirely (never sent as an empty array) when there is \
+             nothing to anchor — the absent-when-empty convention (RFC-ACDP-0016 \u{a7}4)"
+                .into(),
+        ));
+    }
+    validate_unique_array("anchors", anchors, MAX_ANCHORS)?;
+    for anchor in anchors {
+        if !is_dotted_namespace_scheme(&anchor.scheme) {
+            return Err(AcdpError::SchemaViolation(format!(
+                "anchor scheme '{}' must match ^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$ \
+                 (RFC-ACDP-0016 \u{a7}4)",
+                anchor.scheme
+            )));
+        }
+        ContentHash::parse(anchor.content_hash.as_str())?;
+    }
+    Ok(())
 }
 
 fn validate_embedded(emb: &EmbeddedContent) -> Result<(), AcdpError> {

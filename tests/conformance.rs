@@ -140,6 +140,7 @@ fn all_conformance_fixtures_parse_as_valid_json() {
 /// `all_conformance_fixtures_are_bucketed_into_known_families` will pass again — that
 /// forcing function is the entire point (RS-2, gates SPEC-9 per hazard H8).
 const KNOWN_FAMILIES: &[&str] = &[
+    "anc",
     "body",
     "can",
     "caps",
@@ -975,6 +976,7 @@ fn body_with_origin_registry(origin_registry: &str) -> Body {
         data_period: None,
         metadata: None,
         schema_uri: None,
+        anchors: None,
         extensions: Default::default(),
     }
 }
@@ -1419,6 +1421,130 @@ fn can_008_body_roundtrip_preserves_unknown_producer_field() {
     assert_eq!(
         digest, expected_hash,
         "Body round-trip MUST produce the fixture hash — unknown fields must be preserved"
+    );
+}
+
+/// anc-004 — the `can-*`-equivalent executed golden vector for
+/// RFC-ACDP-0016 (0.5.0): `content_hash` over a body carrying `anchors`,
+/// proving the field enters the JCS preimage exactly like any other
+/// producer-controlled field (§5). Not picked up by
+/// `can_vectors_match_expected_hash` (that scan is `can-`/`lin-`-prefixed
+/// filenames only), so bound explicitly here.
+#[test]
+fn anc_004_content_hash_with_anchors_golden_fixture() {
+    use sha2::{Digest, Sha256};
+    let Some(root) = spec_root() else { return };
+    let path = root.join("schemas/conformance/anc-004-content-hash-with-anchors.json");
+    if fixture_missing(&path) {
+        return;
+    }
+    let fixture = read_json(&path);
+    let vector = &fixture["vectors"][0];
+    let input = &vector["input"];
+    let expected = &vector["expected"];
+    let expected_canonical = expected["canonical_form"].as_str().unwrap();
+    let expected_hash = expected["sha256_hex"].as_str().unwrap();
+
+    let bytes = acdp::crypto::canonicalize_value(input);
+    assert_eq!(
+        std::str::from_utf8(&bytes).unwrap(),
+        expected_canonical,
+        "anc-004: canonical_form mismatch"
+    );
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    assert_eq!(digest, expected_hash, "anc-004: sha256 mismatch");
+
+    let content_hash = acdp::crypto::compute_content_hash(input).unwrap();
+    assert_eq!(
+        content_hash.as_str(),
+        expected["content_hash_field_value"].as_str().unwrap(),
+        "anc-004: content_hash field value mismatch"
+    );
+}
+
+/// RS-8 — companion to anc-004: prove the TYPED `Body`/`PublishRequest`
+/// structs (not just a raw JSON value) round-trip `anchors`
+/// byte-exactly through the `content_hash` preimage. Self-contained
+/// (no spec fixture needed — anc-004's own `input` is a minimal
+/// ProducerContent slice, not a fully valid Body, so it's unsuitable
+/// for a real Body<->JSON round trip): builds a request through the
+/// real producer path, materializes it into a stored `Body`, sends
+/// that through a full serialize→deserialize cycle, and asserts the
+/// recomputed hash still matches what was actually signed. This is
+/// what actually proves `Body::anchors`'s serde shape doesn't silently
+/// diverge from the wire form (e.g. via reordering, a dropped `uri`,
+/// or falling through to `extensions` instead of the typed field) —
+/// mirrors `can_008_body_roundtrip_preserves_unknown_producer_field`,
+/// but for a first-class typed field rather than the `extensions`
+/// catch-all.
+#[test]
+fn anchors_field_roundtrips_through_typed_body() {
+    use acdp::crypto::SigningKey;
+    use acdp::producer::Producer;
+    use acdp::types::anchor::AnchorEntry;
+    use acdp::types::primitives::ContentHash;
+    use acdp::types::{ContextType, CtxId, LineageId, Visibility};
+
+    let anchor = AnchorEntry {
+        scheme: "macp.commitment".into(),
+        content_hash: ContentHash::parse(
+            "sha256:fa8fe6b9143b469866d31de09b81928cc44d226ed935162cd346ae80d14fd200",
+        )
+        .unwrap(),
+        uri: Some("https://example.com/commitments/1".into()),
+        extensions: Default::default(),
+    };
+
+    let req = Producer::new(
+        SigningKey::from_bytes(&[9u8; 32]),
+        acdp::types::AgentDid::new("did:web:agents.example.com:test-producer"),
+        "did:web:agents.example.com:test-producer#key-1",
+    )
+    .publish_request()
+    .acdp_version("0.5.0")
+    .title("settlement finalized")
+    .context_type(ContextType::DataSnapshot)
+    .visibility(Visibility::Public)
+    .anchors(vec![anchor.clone()])
+    .build()
+    .expect("a well-formed anchor must build");
+
+    let signed_hash = req.content_hash.clone();
+
+    let body = Body::from_publish_request(
+        &req,
+        CtxId("acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into()),
+        LineageId(
+            "lin:sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+        ),
+        "registry.example.com",
+        chrono::Utc::now(),
+    );
+    assert_eq!(
+        body.anchors.as_deref(),
+        Some([anchor].as_slice()),
+        "anchors must materialize into the stored Body unchanged"
+    );
+    assert!(
+        !body.extensions.contains_key("anchors"),
+        "anchors is a typed field — it must not also fall into the extensions catch-all"
+    );
+
+    // The actual round trip: serialize the stored Body to JSON, parse
+    // it back into a fresh Body, and recompute content_hash. Anything
+    // that reorders, drops, or renames a field inside `anchors` during
+    // this cycle would change the JCS bytes and this would fail.
+    let wire = serde_json::to_value(&body).unwrap();
+    let round_tripped: Body =
+        serde_json::from_value(wire).expect("Body with anchors must round-trip through JSON");
+    let recomputed =
+        acdp::crypto::compute_content_hash(&serde_json::to_value(&round_tripped).unwrap())
+            .expect("recompute content_hash from the round-tripped Body");
+
+    assert_eq!(
+        recomputed, signed_hash,
+        "anchors must round-trip byte-exactly through Body \u{2192} JSON \u{2192} Body \u{2192} \
+         content_hash preimage"
     );
 }
 

@@ -485,6 +485,7 @@ async fn fetch_report_happy_path() {
         data_period: req.data_period.clone(),
         metadata: req.metadata.clone(),
         schema_uri: req.schema_uri.clone(),
+        anchors: req.anchors.clone(),
         extensions: Default::default(),
     };
     let full = FullContext {
@@ -603,6 +604,7 @@ async fn verification_policy_validate_body_schema_off_skips_structural_check() {
         data_period: None,
         metadata: None,
         schema_uri: None,
+        anchors: None,
         extensions: Default::default(),
     };
     let body_value = serde_json::to_value(&body).unwrap();
@@ -750,6 +752,7 @@ async fn fetch_report_records_embedded_hash_failure() {
         data_period: None,
         metadata: None,
         schema_uri: None,
+        anchors: None,
         extensions: Default::default(),
     };
 
@@ -880,6 +883,7 @@ async fn fetch_report_diagnose_records_forged_signature() {
         data_period: None,
         metadata: None,
         schema_uri: None,
+        anchors: None,
         extensions: Default::default(),
     };
     let body_value = serde_json::to_value(&body).unwrap();

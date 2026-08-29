@@ -3,6 +3,7 @@
 use acdp_crypto::sign::{AcdpSigningKey, P256SigningKey};
 use acdp_crypto::{compute_content_hash, SigningKey};
 use acdp_primitives::error::AcdpError;
+use acdp_types::anchor::AnchorEntry;
 use acdp_types::body::{Body, DataPeriod, Signature};
 use acdp_types::data_ref::DataRef;
 use acdp_types::primitives::*;
@@ -210,6 +211,7 @@ pub struct RequestBuilder<'a> {
     metadata: Option<serde_json::Value>,
     schema_uri: Option<String>,
     acdp_version: Option<String>,
+    anchors: Option<Vec<AnchorEntry>>,
 }
 
 use acdp_primitives::time::trunc_ms;
@@ -236,6 +238,7 @@ impl<'a> RequestBuilder<'a> {
             data_period: None,
             metadata: None,
             schema_uri: None,
+            anchors: None,
             // ACDP 0.2 (trust & hardening, WS-D1): emit the protocol
             // version explicitly by default. An absent `acdp_version`
             // and an explicit one produce different content_hash values
@@ -341,6 +344,17 @@ impl<'a> RequestBuilder<'a> {
     /// JSON Schema URI describing the metadata shape.
     pub fn schema_uri(mut self, u: impl Into<String>) -> Self {
         self.schema_uri = Some(u.into());
+        self
+    }
+
+    /// Typed external anchors (RFC-ACDP-0016, 0.5.0): content-addressed
+    /// references to non-ACDP artifacts this body genesis-links to.
+    /// Per the absent-when-empty convention, an empty `Vec` here is
+    /// rejected at [`Self::build`] time (`schema_violation`) rather
+    /// than silently omitted — call this only when there is at least
+    /// one anchor to send.
+    pub fn anchors(mut self, a: Vec<AnchorEntry>) -> Self {
+        self.anchors = Some(a);
         self
     }
 
@@ -482,6 +496,9 @@ impl<'a> RequestBuilder<'a> {
         if let Some(v) = &self.schema_uri {
             pc.insert("schema_uri".into(), json!(v));
         }
+        if let Some(v) = &self.anchors {
+            pc.insert("anchors".into(), json!(v));
+        }
 
         let producer_content_value = Value::Object(pc);
 
@@ -520,6 +537,7 @@ impl<'a> RequestBuilder<'a> {
             data_period: self.data_period,
             metadata: self.metadata,
             schema_uri: self.schema_uri,
+            anchors: self.anchors,
             lineage_id: self.expected_lineage_id,
         };
         // Final schema-conformance check before emission.
@@ -800,6 +818,7 @@ mod tests {
             data_period: None,
             metadata: None,
             schema_uri: None,
+            anchors: None,
             extensions: Default::default(),
         };
         let _state = RegistryState {

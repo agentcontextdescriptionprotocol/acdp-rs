@@ -1,3 +1,4 @@
+use crate::anchor::AnchorEntry;
 use crate::body::{DataPeriod, Signature};
 use crate::data_ref::DataRef;
 use crate::serde_helpers::de_present;
@@ -99,6 +100,16 @@ pub struct PublishRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub schema_uri: Option<String>,
+    /// Typed, content-addressed references to external (non-ACDP)
+    /// artifacts this body genesis-links to (RFC-ACDP-0016, 0.5.0).
+    /// See [`crate::body::Body::anchors`] for the absent-when-empty
+    /// convention this field follows.
+    #[serde(
+        default,
+        deserialize_with = "de_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub anchors: Option<Vec<AnchorEntry>>,
 }
 
 /// Successful publish response (HTTP 201).
