@@ -37,7 +37,7 @@ acdp-safe-http  = { path = "../acdp-safe-http", version = "=0.8.1" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 chrono     = { version = "0.4", features = ["serde"] }
-base64     = "0.22"
+base64     = "0.23"
 uuid       = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
