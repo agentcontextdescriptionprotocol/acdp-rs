@@ -37,9 +37,9 @@ create_exception!(
 
 /// Build a [`DidResolutionError`] carrying the stable reason on `.reason`.
 fn did_err(reason: &str, detail: impl Into<String>) -> PyErr {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let err = DidResolutionError::new_err(detail.into());
-        match err.value_bound(py).setattr("reason", reason) {
+        match err.value(py).setattr("reason", reason) {
             Ok(()) => err,
             Err(set_err) => set_err,
         }

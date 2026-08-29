@@ -305,7 +305,7 @@ version = "0.13.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.h2]]
-version = "0.4.13"
+version = "0.4.19"
 criteria = "safe-to-deploy"
 
 [[exemptions.half]]
@@ -396,10 +396,6 @@ criteria = "safe-to-deploy"
 version = "1.2.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.indexmap]]
-version = "2.14.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.ipnet]]
 version = "2.12.0"
 criteria = "safe-to-deploy"
@@ -441,7 +437,7 @@ version = "0.4.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.lru]]
-version = "0.16.4"
+version = "0.18.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.lru-slab]]
@@ -638,10 +634,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.sec1]]
 version = "0.7.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.semver]]
-version = "1.0.28"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde]]
@@ -1010,8 +1002,4 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zerovec-derive]]
 version = "0.11.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.zmij]]
-version = "1.0.21"
 criteria = "safe-to-deploy"

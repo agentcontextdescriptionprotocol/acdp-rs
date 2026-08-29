@@ -45,30 +45,26 @@ fn acdp(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<safe_http::PyAcdpSsrfPolicy>()?;
     m.add_class::<did::PyAcdpDid>()?;
     m.add_class::<did::PyAcdpDidDocument>()?;
-    m.add(
-        "SsrfRejected",
-        m.py().get_type_bound::<safe_http::SsrfRejected>(),
-    )?;
+    m.add("SsrfRejected", m.py().get_type::<safe_http::SsrfRejected>())?;
     m.add(
         "DidResolutionError",
-        m.py().get_type_bound::<did::DidResolutionError>(),
+        m.py().get_type::<did::DidResolutionError>(),
     )?;
     m.add(
         "InvalidLogProof",
-        m.py().get_type_bound::<errors::InvalidLogProof>(),
+        m.py().get_type::<errors::InvalidLogProof>(),
     )?;
     m.add(
         "ImmutableField",
-        m.py().get_type_bound::<errors::ImmutableField>(),
+        m.py().get_type::<errors::ImmutableField>(),
     )?;
     m.add(
         "InvalidLifecycleTransition",
-        m.py()
-            .get_type_bound::<errors::InvalidLifecycleTransition>(),
+        m.py().get_type::<errors::InvalidLifecycleTransition>(),
     )?;
     m.add(
         "InvalidWitnessCosignature",
-        m.py().get_type_bound::<errors::InvalidWitnessCosignature>(),
+        m.py().get_type::<errors::InvalidWitnessCosignature>(),
     )?;
     Ok(())
 }

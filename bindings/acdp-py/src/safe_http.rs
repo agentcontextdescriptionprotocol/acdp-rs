@@ -31,12 +31,12 @@ create_exception!(
 /// Convert a Rust [`SsrfRejection`] into an [`SsrfRejected`] Python
 /// exception, attaching the stable reason code as `.reason`.
 fn ssrf_err(rej: SsrfRejection) -> PyErr {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let err = SsrfRejected::new_err(rej.detail);
         // Attach the machine-readable reason for programmatic handling.
         // If the attribute set ever fails, surface that error instead of
         // silently dropping the reason.
-        match err.value_bound(py).setattr("reason", rej.reason.as_str()) {
+        match err.value(py).setattr("reason", rej.reason.as_str()) {
             Ok(()) => err,
             Err(set_err) => set_err,
         }

@@ -206,3 +206,47 @@ jobs:
       - name: Cross-language interop + parity pytest
         working-directory: bindings/interop
         run: pytest -v
+
+  bindings-deny:
+    name: cargo-deny (bindings, ${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # RS-10: the workspace `exclude`s bindings/, so the root `deny` job
+        # (ci.yml) never sees these graphs.
+        dir: [bindings/acdp-py, bindings/acdp-node, bindings/acdp-wasm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      # Same install mechanism as ci.yml's `deny` job (see its comment for
+      # why not EmbarkStudios/cargo-deny-action).
+      - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-deny
+        with:
+          tool: cargo-deny
+      # advisories only (not bare `check`): the root deny.toml's
+      # [licenses]/[bans]/[sources] policy was never audited against the
+      # bindings' transitive graphs, so keep this gate narrowly about
+      # vulnerabilities, matching what RS-10 actually asks for. The
+      # lockfiles are gitignored (.gitignore:8-13) — this resolves a fresh
+      # graph from each manifest's version constraints every run, so an
+      # unrelated transitive dependency landing a new RUSTSEC advisory can
+      # turn this red with no code change here; that's expected for a
+      # supply-chain gate, not a flake to silence.
+      - run: cargo deny --manifest-path ${{ matrix.dir }}/Cargo.toml check --config deny.toml advisories
+
+  bindings-npm-audit:
+    name: npm audit (acdp-node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # No committed package-lock.json (.gitignore:23) — `npm install`
+      # resolves fresh, same reproducibility caveat as bindings-deny above.
+      - working-directory: bindings/acdp-node
+        run: npm install
+      - working-directory: bindings/acdp-node
+        run: npm audit

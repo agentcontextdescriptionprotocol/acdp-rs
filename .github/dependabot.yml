@@ -58,6 +58,15 @@ updates:
       # the 0.2 pin drops the `js` feature and breaks the wasm build
       # (this is what PR #122 did). Keep it pinned; bump by hand if ever
       # needed.
+      #
+      # This rule alone does not retroactively cancel an in-flight
+      # Dependabot run: #133's run started before this ignore rule merged
+      # and created the PR ~3 minutes after (20:13Z vs. this rule's 20:09Z
+      # merge) — config is read at run start, so an already-running scan
+      # isn't re-evaluated against it. #133 then auto-merged minutes later
+      # DESPITE its own acdp-wasm CI check showing FAILURE 28 seconds
+      # before the merge — that's the real gap (auto-merge not gating on
+      # every bindings.yml job), not a flaw in this ignore rule itself.
       - dependency-name: getrandom
         update-types: ["version-update:semver-major"]
     groups:

@@ -5,6 +5,22 @@ Independently versioned from the Rust crates (this package is
 in lock-step with the Node SDK (`bindings/acdp-node`) — the interop
 suite fails if the two versions or API surfaces drift.
 
+## Unreleased
+
+### Security
+
+- Bumped the `pyo3` dependency from 0.22 to 0.29, clearing three RUSTSEC
+  advisories present in the published wheel's dependency graph:
+  RUSTSEC-2025-0020 (buffer overflow, fixed 0.24.1), RUSTSEC-2026-0176
+  (out-of-bounds `PyList`/`PyTuple` iterator read, introduced in 0.24.0
+  and fixed 0.29.0), and RUSTSEC-2026-0177 (missing `Sync` bound on
+  `PyCFunction::new_closure`, fixed 0.29.0). None of the affected APIs
+  are used by this binding's own code; verified via `cargo deny check
+  advisories` and the full 172-test suite passing unmodified, including
+  the golden-vector parity constant (`sha256:f170150d…`). No public API
+  or Python-version-support change — `abi3-py39` and
+  `requires-python = ">=3.9"` are unaffected.
+
 ## 0.7.0 — 2026-07-05
 
 ACDP 0.4 transparency-log **witness cosignatures** (RFC-ACDP-0015),

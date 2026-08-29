@@ -36,7 +36,7 @@ acdp       = { path = "../..", default-features = false, features = ["test-trans
 # platform that runs on CPython 3.9+ via the stable ABI, instead of one
 # wheel per interpreter version. Keeps the release matrix to one build
 # per OS/arch and matches `requires-python = ">=3.9"` in pyproject.toml.
-pyo3       = { version = "0.22", features = ["abi3-py39"] }
+pyo3       = { version = "0.29", features = ["abi3-py39"] }
 serde_json = "1"
 base64     = "0.22"
 # Used only to parse the `expires_at` RFC 3339 string into the
@@ -55,12 +55,3 @@ hex        = "0.4"
 lto           = true
 codegen-units = 1
 strip         = "symbols"
-
-# pyo3 0.22's `create_exception!` macro expands `#[cfg(feature = "gil-refs")]`
-# guards referencing pyo3's own (deprecated) feature; rustc's
-# `unexpected_cfgs` lint then fires at the macro call sites in THIS crate,
-# which never declares that feature. Registering the value silences the
-# false positive without enabling anything; the entry becomes obsolete on
-# the pyo3 0.23+ upgrade (which removes the gil-refs feature entirely).
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gil-refs"))'] }
