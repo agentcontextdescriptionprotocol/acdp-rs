@@ -64,11 +64,12 @@ test('golden content_hash + signature match sig-001', () => {
   );
 });
 
-test('default publish emits acdp_version "0.2.0" explicitly (distinct preimage)', () => {
-  // ACDP 0.2 SDK default: `acdp_version: "0.2.0"` is emitted. Consumers
-  // treat the absent field as "0.1.0" (RFC-ACDP-0001 §6), but absent and
-  // explicit are different JCS preimages — so the same body hashes
-  // differently from the sig-001 omitted form.
+test('default publish emits acdp_version "0.4.0" explicitly (distinct preimage)', () => {
+  // ACDP 0.2+ SDK default: `acdp_version` is emitted explicitly, tracking
+  // the newest Final wire line ("0.4.0" as of RFC-ACDP-0015's promotion).
+  // Consumers treat the absent field as "0.1.0" (RFC-ACDP-0001 §6), but
+  // absent and explicit are different JCS preimages — so the same body
+  // hashes differently from the sig-001 omitted form.
   const p = AcdpProducer.fromSeed(
     Buffer.alloc(32, 0),
     'did:web:agents.example.com:test-producer',
@@ -79,7 +80,7 @@ test('default publish emits acdp_version "0.2.0" explicitly (distinct preimage)'
     contextType: 'data_snapshot',
   });
   const req = JSON.parse(raw);
-  assert.equal(req.acdp_version, '0.2.0');
+  assert.equal(req.acdp_version, '0.4.0');
   assert.notEqual(
     req.content_hash,
     'sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5',
