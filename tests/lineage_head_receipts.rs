@@ -138,7 +138,7 @@ async fn start_harness(caps_json: serde_json::Value) -> Harness {
             get(move || async move { Json(registry_doc) }),
         )
         .route(
-            "/lineages/:lineage_id/current",
+            "/lineages/{lineage_id}/current",
             get({
                 let current = current_json.clone();
                 move |Path(_lineage_id): Path<String>| {

@@ -61,21 +61,32 @@ impl TlsTestServer {
         let cert_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("rcgen self-signed cert");
         let cert_pem = cert_key.cert.pem().into_bytes();
-        // rcgen 0.13 names the KeyPair field `key_pair` (was `signing_key`
-        // in 0.12). Both APIs return the PEM-encoded private key.
-        let key_pem = cert_key.key_pair.serialize_pem().into_bytes();
+        // rcgen 0.14 renamed the field back to `signing_key` (it was
+        // `key_pair` in 0.13, `signing_key` in 0.12). Both APIs return
+        // the PEM-encoded private key.
+        let key_pem = cert_key.signing_key.serialize_pem().into_bytes();
         let config = RustlsConfig::from_pem(cert_pem.clone(), key_pem)
             .await
             .expect("rustls config");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind random port");
+        // Tokio now refuses to register a blocking socket from inside
+        // an async context (tokio-rs/tokio#7172); axum-server 0.8's
+        // `from_tcp_rustls` converts this std listener into a Tokio one
+        // inside the spawned task below, so it must already be
+        // non-blocking before we hand it off.
+        listener
+            .set_nonblocking(true)
+            .expect("set listener non-blocking");
         let addr = listener.local_addr().expect("local_addr");
         let router = build_router(addr.port());
 
         let handle = tokio::spawn(async move {
-            let _ = axum_server::from_tcp_rustls(listener, config)
-                .serve(router.into_make_service())
-                .await;
+            // axum-server 0.8 made `from_tcp_rustls` fallible (it now
+            // configures the rustls acceptor eagerly instead of lazily).
+            let server =
+                axum_server::from_tcp_rustls(listener, config).expect("configure rustls acceptor");
+            let _ = server.serve(router.into_make_service()).await;
         });
 
         // Wait until the kernel actually accepts a TCP connection on

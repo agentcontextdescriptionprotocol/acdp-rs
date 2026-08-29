@@ -99,7 +99,7 @@ async fn start_harness(registry_receipt_pub: &[u8; 32], producer_pub: &[u8; 32])
             }),
         )
         .route(
-            "/contexts/:id",
+            "/contexts/{id}",
             get({
                 let ctx = context_json.clone();
                 move || {

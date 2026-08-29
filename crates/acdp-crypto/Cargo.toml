@@ -30,7 +30,12 @@ base64        = "0.23"
 hex           = "0.4"
 bs58          = "0.5"
 zeroize       = { version = "1", features = ["derive"] }
-rand_core     = { version = "0.6", features = ["std"] }
+rand_core     = "0.10"
+# `rand_core` 0.10 dropped `OsRng` entirely; `getrandom`'s `sys_rng`
+# feature provides the replacement (`SysRng`, wrapped in
+# `rand_core::UnwrapErr` to get the infallible `CryptoRng` impl
+# `ed25519_dalek`/`ecdsa`'s key-generation APIs require).
+getrandom     = { version = "0.4", features = ["sys_rng"] }
 
 [lints.rust]
 unsafe_code = "forbid"

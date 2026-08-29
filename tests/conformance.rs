@@ -1141,7 +1141,7 @@ fn can_vectors_match_expected_hash() {
                     got_canonical, canonical,
                     "{name} vector {i}: canonical_form mismatch"
                 );
-                let digest = format!("{:x}", Sha256::digest(&bytes));
+                let digest = hex::encode(Sha256::digest(&bytes));
                 assert_eq!(digest, hex_hash, "{name} vector {i}: sha256 mismatch");
                 checked += 1;
             }
@@ -1417,7 +1417,7 @@ fn can_008_body_roundtrip_preserves_unknown_producer_field() {
         m.remove(k);
     }
     let canonical = acdp::crypto::canonicalize_value(&prod_content);
-    let digest = format!("{:x}", Sha256::digest(&canonical));
+    let digest = hex::encode(Sha256::digest(&canonical));
     assert_eq!(
         digest, expected_hash,
         "Body round-trip MUST produce the fixture hash — unknown fields must be preserved"
@@ -1451,7 +1451,7 @@ fn anc_004_content_hash_with_anchors_golden_fixture() {
         expected_canonical,
         "anc-004: canonical_form mismatch"
     );
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = hex::encode(Sha256::digest(&bytes));
     assert_eq!(digest, expected_hash, "anc-004: sha256 mismatch");
 
     let content_hash = acdp::crypto::compute_content_hash(input).unwrap();
@@ -1568,7 +1568,7 @@ fn can_009_exclusion_set_keys_by_name_not_by_typed_knowledge() {
     let producer_content = &vector["input"];
     let bytes = acdp::crypto::canonicalize_value(producer_content);
     assert_eq!(std::str::from_utf8(&bytes).unwrap(), canonical_expected);
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = hex::encode(Sha256::digest(&bytes));
     assert_eq!(digest, hex_expected);
 }
 
