@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Conformance evidence
+
+RS-4 (family plan `agentcontextdistributionprotocol/plans/siblings/acdp-rs.md`): the Rust
+half of RFC-ACDP-0015's Final-promotion evidence-input contract (SPEC-1), recording the
+require-mode conformance run at the pin bumped by RS-3 (#159).
+
+- **Crate / tag:** `acdp` (workspace-lockstep) `v0.8.1` — the currently released tag; the
+  pending `v0.8.2` release PR (#154) had not merged at the time of this run.
+- **Pinned spec SHA:** `bff3cf3afbdcea619834916e8f0bcac7e82ba658` (spec `main` as of
+  2026-08-28).
+- **Command:** `ACDP_SPEC_DIR=<pinned spec checkout> ACDP_REQUIRE_CONFORMANCE=1 cargo test
+  --workspace --all-features` — 658 passed, 0 failed, exit 0.
+- **Executed `wit-*` fixtures** (RFC-ACDP-0015 witness cosigning, the promotion-gating
+  family): `wit_001_cosignature_golden_fixture`, `wit_002_consistency_refusal_fixture`,
+  `wit_003_quorum_verification_fixture`, `wit_004_cosignature_key_mismatch_fixture` — all
+  executed (not skipped), confirmed via `ACDP_REQUIRE_CONFORMANCE=1`'s hard-fail-on-missing
+  behavior.
+- **Also executed** (previously CI-silent, closed by RS-1/#153): `tests/transparency_log.rs`
+  (`log_*`), `tests/key_revocation.rs` (`rev_*`), `tests/lifecycle.rs` (`lc_*`) — all green.
+- **CI run:** https://github.com/agentcontextdistributionprotocol/acdp-rs/actions/runs/33232085544/job/99046540516
+  (the `conformance (spec fixtures)` job on PR #159, which carried this exact pin and
+  command; the PR itself is a pure pin bump with no test/fixture changes, so this run is the
+  authoritative in-CI execution of the run recorded above).
+
 ## [0.8.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.8.0...acdp-v0.8.1) - 2026-07-10
 
 ### Other
