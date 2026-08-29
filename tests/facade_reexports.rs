@@ -15,7 +15,7 @@ use acdp::{
 
 #[test]
 fn protocol_constants_are_reexported() {
-    assert_eq!(acdp::ACDP_VERSION, "0.2.0");
+    assert_eq!(acdp::ACDP_VERSION, "0.4.0");
     assert!(acdp::ACDP_SCHEMA_NAMESPACE.starts_with("https://"));
 }
 

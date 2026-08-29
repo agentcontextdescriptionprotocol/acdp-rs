@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`ACDP_VERSION` default bumped `0.2.0` → `0.4.0`** (RS-11, family plan
+  `agentcontextdistributionprotocol/plans/siblings/acdp-rs.md`). `RequestBuilder`
+  has emitted `acdp_version` explicitly by default since the 0.2.0 line (WS-D1); that
+  default tracked the wrong constant once RFC-ACDP-0011..0014 (0.3.0) and
+  RFC-ACDP-0015 witness cosigning (0.4.0, promoted to Final 2026-08) shipped in this
+  crate — a default-using producer was stamping `0.2.0` on bodies the crate already
+  fully supports minting/verifying at 0.4.0. `ACDP_VERSION` now tracks the newest
+  Final wire line, matching the design intent ("remove the omitted-vs-explicit
+  ambiguity for everything built going forward").
+  **Producer-visible behavior change:** any caller relying on the *implicit* default
+  remaining `"0.2.0"` — rather than calling `.acdp_version(...)` /
+  `.omit_acdp_version()` explicitly — will see their next default-built
+  `content_hash` change (the JCS preimage includes `acdp_version`), and the emitted
+  value move to `"0.4.0"`. A registry that hasn't adopted 0.4.0-line semantics yet
+  should pin the version it expects explicitly rather than relying on the crate's
+  default. No schema/validation requirement is newly triggered by this (there is no
+  version-gated *required* field for produced bodies at 0.3.0 or 0.4.0 in this
+  crate's `acdp-validation` — only `CapabilitiesDocument.acdp_version >= 0.3.0`
+  gates a requirement, and that's a registry's own capabilities document, not a
+  producer's request). See `ASSUMPTIONS.md` for the alternative considered
+  (feature-derived default) and why it was rejected.
+
 ### Conformance evidence
 
 RS-4 (family plan `agentcontextdistributionprotocol/plans/siblings/acdp-rs.md`): the Rust

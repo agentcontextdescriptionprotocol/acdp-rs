@@ -16,9 +16,9 @@ rust-version = "1.86"
 tracing = ["dep:tracing", "acdp-did/tracing"]
 # Opts into the SSRF-relaxed test-only constructors
 # (`RegistryClient::{with_root_cert_pem, with_test_transport,
-# with_test_endpoint}`). Without it those constructors are deprecated;
-# in 0.4.0 they will be compiled out entirely unless this feature is
-# enabled. Never enable in production builds.
+# with_test_endpoint}`). Without it those constructors do not exist at
+# all: each is `#[cfg(feature = "test-transport")]`-gated, not merely
+# deprecated. Never enable in production builds.
 test-transport = ["acdp-safe-http/test-transport", "acdp-did/test-transport"]
 
 [dependencies]
@@ -52,3 +52,7 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

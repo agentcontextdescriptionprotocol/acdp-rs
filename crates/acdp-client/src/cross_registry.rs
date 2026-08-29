@@ -406,11 +406,80 @@ impl CrossRegistryResolver {
         cache.insert(authority.to_string(), (caps.clone(), Instant::now(), ttl));
         Ok(caps)
     }
+
+    /// Return the capabilities document already cached for `authority`
+    /// from a prior walk, without fetching.
+    ///
+    /// `resolve`/`walk_derived_from` fetch and cache a foreign registry's
+    /// capabilities internally (via the private `capabilities_for`) but
+    /// never exposed the result, so a caller that also needs that document
+    /// (e.g. to check a profile the resolver itself didn't need) had no
+    /// way to read it back and had to issue a second, duplicate fetch.
+    /// Returns `None` if the resolver has never cached an entry for this
+    /// authority, or if the cached entry's per-response TTL has elapsed —
+    /// this is a cache peek, not a fetch-or-refresh, so a stale entry is
+    /// reported as absent rather than silently returned.
+    pub fn cached_capabilities(&self, authority: &str) -> Option<CapabilitiesDocument> {
+        let cache = self.caps_cache.lock().unwrap();
+        cache
+            .get(authority)
+            .and_then(|(caps, fetched_at, ttl)| (fetched_at.elapsed() < *ttl).then(|| caps.clone()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_caps() -> CapabilitiesDocument {
+        serde_json::from_value(serde_json::json!({
+            "acdp_version": "0.4.0",
+            "registry_did": "did:web:registry.example.com",
+            "supported_signature_algorithms": ["ed25519"],
+            "supported_did_methods": ["did:web"],
+            "profiles": ["acdp-registry-core"],
+            "limits": {"max_payload_bytes": 1_048_576, "max_embedded_bytes": 65536},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn cached_capabilities_returns_none_when_never_fetched() {
+        let resolver = CrossRegistryResolver::new();
+        assert!(resolver
+            .cached_capabilities("registry.example.com")
+            .is_none());
+    }
+
+    #[test]
+    fn cached_capabilities_returns_fresh_entry_without_fetching() {
+        let resolver = CrossRegistryResolver::new();
+        resolver.caps_cache.lock().unwrap().insert(
+            "registry.example.com".to_string(),
+            (test_caps(), Instant::now(), Duration::from_secs(300)),
+        );
+        let caps = resolver
+            .cached_capabilities("registry.example.com")
+            .expect("entry was just seeded fresh");
+        assert_eq!(caps.registry_did, "did:web:registry.example.com");
+    }
+
+    #[test]
+    fn cached_capabilities_reports_expired_entry_as_absent() {
+        let resolver = CrossRegistryResolver::new();
+        // `checked_sub` avoids a debug-mode underflow panic if the test
+        // runs within 60s of process start.
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("test host uptime exceeds 60s");
+        resolver.caps_cache.lock().unwrap().insert(
+            "registry.example.com".to_string(),
+            (test_caps(), long_ago, Duration::from_secs(1)),
+        );
+        assert!(resolver
+            .cached_capabilities("registry.example.com")
+            .is_none());
+    }
 
     #[test]
     fn allowlist_rejects_outside_authorities() {

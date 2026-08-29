@@ -18,9 +18,9 @@ rust-version = "1.86"
 # work without it.
 client = ["dep:reqwest", "dep:tokio"]
 # Opts into the SSRF-relaxed test-only constructors (e.g.
-# `SsrfPolicy::allow_test_loopback`). Without it those constructors are
-# deprecated; in 0.4.0 they will be compiled out entirely unless this
-# feature is enabled. Never enable in production builds.
+# `SsrfPolicy::allow_test_loopback`). Without it those constructors do
+# not exist at all: each is `#[cfg(feature = "test-transport")]`-gated,
+# not merely deprecated. Never enable in production builds.
 test-transport = []
 
 [dependencies]
@@ -34,3 +34,7 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

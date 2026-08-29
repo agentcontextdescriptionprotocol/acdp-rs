@@ -176,3 +176,44 @@
   Verified via a dedicated Phase 4 + Opus gate: native tests, wasm32 debug+release builds,
   `wasm-pack test --node`, and `cargo deny check advisories` all pass; `acdp-wasm` is now
   included in the `bindings-deny` job's matrix and the `audit-bindings` Makefile target.
+
+## RS-11: `ACDP_VERSION` default bump — constant bump vs. feature-derived
+- **Plan:** `agentcontextdistributionprotocol/plans/siblings/acdp-rs.md` (RS-11, Wave 4)
+- **Assumed:** the plan explicitly left the mechanism open ("decide the default stamp
+  deliberately — constant bump or feature-derived") without naming a preferred answer,
+  so this was a real fork requiring a judgment call, not a defaultable question with an
+  obvious answer stated elsewhere.
+- **Chose:** a straight constant bump, `ACDP_VERSION = "0.2.0"` → `"0.4.0"`
+  (`crates/acdp-primitives/src/lib.rs:43`) — no cargo feature in this crate gates 0.3.0-
+  vs-0.4.0-line wire support; every RFC-0011..0015 type is always compiled in, so
+  "feature-derived" has nothing to condition on. The newest Final line is exactly what
+  the WS-D1 "explicit by default" design intended the constant to track.
+- **Alternatives:** (1) feature-derived default (rejected — no feature boundary exists
+  to derive from in this crate today; would require inventing cargo features purely to
+  serve this switch, which is speculative machinery for a problem that doesn't exist
+  yet); (2) leave the constant at `0.2.0` and only fix the stale "drafts" wording
+  (rejected — the plan explicitly flagged this as a real drift: "a defaults-using
+  producer can't legitimately carry 0.3.0-line fields," which is still true today with
+  0.4.0 now Final too); (3) stop and ask before touching the default (considered, but
+  the plan's own framing — "decide... deliberately... changelog it," not "ask the human"
+  — plus this session's established convention of proceeding on costly-but-reversible,
+  non-one-way-door changes with documentation rather than blocking, argued for
+  proceeding here).
+- **Blast radius if wrong:** moderate, not severe, and cheaply reversible. Verified
+  before making the change: no test in this repo asserts a fixed golden `content_hash`
+  for a *default*-built (no explicit `.acdp_version(...)`/`.omit_acdp_version()`) request
+  — the two golden vectors that pin exact hashes (sig-001, sig-003) both call one of
+  those two explicit overrides, so they're unaffected. No `acdp-validation` rule imposes
+  a new *required* field on a produced body at 0.3.0/0.4.0 (the only version gate,
+  `caps.acdp_version >= 0.3.0 ⇒ supports_idempotency_key`, is on a registry's
+  `CapabilitiesDocument`, not a producer's request) — so a bare `.build()` call still
+  succeeds. The real exposure is ecosystem-wide: sibling repos that build a default
+  `PublishRequest` (e.g. `acdp-playground`, `acdp-control-plane`) will start emitting
+  `acdp_version: "0.4.0"` bodies the next time they pick up this crate version, and any
+  registry pinned to reject or mis-handle that value would need updating first. If this
+  turns out to be premature, reverting is a one-line constant change plus a follow-up
+  changelog entry — not a schema or API removal.
+- **Status:** UNCONFIRMED — flagged prominently in the PR body for human review; this is
+  the one item from this wave's batch that most warrants a deliberate look before/at the
+  next crate release, since it changes wire output for every default-configured producer
+  across the family, not just this repo.
