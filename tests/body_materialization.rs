@@ -14,7 +14,9 @@
 
 use acdp::crypto::SigningKey;
 use acdp::producer::Producer;
+use acdp::types::anchor::AnchorEntry;
 use acdp::types::body::{Body, DataPeriod};
+use acdp::types::primitives::ContentHash;
 use acdp::types::{AgentDid, ContextType, CtxId, LineageId, PublishRequest, Visibility};
 use chrono::{TimeZone, Utc};
 
@@ -71,6 +73,12 @@ fn every_publish_request_field_transfers_to_the_body() {
         .data_period(DataPeriod { start, end })
         .metadata(serde_json::json!({"k": "v", "n": 1}))
         .schema_uri("https://schemas.example.com/guard/v1")
+        .anchors(vec![AnchorEntry {
+            scheme: "macp.commitment".into(),
+            content_hash: ContentHash::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            uri: Some("https://example.com/commitments/guard".into()),
+            extensions: Default::default(),
+        }])
         .build()
         .expect("valid request");
 
@@ -160,6 +168,7 @@ fn unset_optional_fields_are_absent_from_the_body() {
         "data_period",
         "metadata",
         "schema_uri",
+        "anchors",
     ] {
         assert!(
             !body_map.contains_key(key),
