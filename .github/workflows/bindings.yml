@@ -234,7 +234,7 @@ jobs:
       # unrelated transitive dependency landing a new RUSTSEC advisory can
       # turn this red with no code change here; that's expected for a
       # supply-chain gate, not a flake to silence.
-      - run: cargo deny --manifest-path ${{ matrix.dir }}/Cargo.toml --config deny.toml check advisories
+      - run: cargo deny --manifest-path ${{ matrix.dir }}/Cargo.toml check --config deny.toml advisories
 
   bindings-npm-audit:
     name: npm audit (acdp-node)

@@ -60,9 +60,9 @@ interop: sdk-py-build sdk-node-build
 # ── Supply-chain scanning ───────────────────────────────────────────────
 # Mirrors bindings.yml's bindings-deny + bindings-npm-audit jobs.
 audit-bindings:
-	cargo deny --manifest-path $(PY_DIR)/Cargo.toml --config deny.toml check advisories
-	cargo deny --manifest-path $(NODE_DIR)/Cargo.toml --config deny.toml check advisories
-	cargo deny --manifest-path $(WASM_DIR)/Cargo.toml --config deny.toml check advisories
+	cargo deny --manifest-path $(PY_DIR)/Cargo.toml check --config deny.toml advisories
+	cargo deny --manifest-path $(NODE_DIR)/Cargo.toml check --config deny.toml advisories
+	cargo deny --manifest-path $(WASM_DIR)/Cargo.toml check --config deny.toml advisories
 	cd $(NODE_DIR) && npm install && npm audit
 
 # What the CI workflow runs locally. Useful before pushing.
