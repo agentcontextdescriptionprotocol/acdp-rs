@@ -71,10 +71,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 18 (Maintenance LTS through 2025-04), 20 (LTS), 22 (LTS) —
-        # 22 catches `node --test tests/` regressions where bare dir
-        # paths started failing with MODULE_NOT_FOUND.
-        node: ['18', '20', '22']
+        # 20 (LTS), 22 (LTS) — 22 catches `node --test tests/`
+        # regressions where bare dir paths started failing with
+        # MODULE_NOT_FOUND. 18 dropped: `@napi-rs/cli` 3.x's
+        # `@inquirer/core` dependency imports `node:util`'s
+        # `styleText`, added in Node 20.17/22.13+ and absent in 18
+        # (already EOL since 2025-04) — `napi build` can no longer
+        # run there at all. `engines.node` in package.json matches.
+        node: ['20', '22']
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
