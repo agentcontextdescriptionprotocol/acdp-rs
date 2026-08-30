@@ -27,6 +27,59 @@ failed retroactive-tag run does **not** spuriously trigger a downstream auto-bum
 there. Still, don't rely on "it'll just fail safely" as the plan — pick one of the three
 options below deliberately.
 
+## Automated tag-on-publish (as of 2026-08-30)
+
+`release-plz.yml` has a "Release SDK bindings at the acdp version" step that dispatches
+all three binding release workflows (`acdp-py-release.yml`, `bindings-release.yml`,
+`acdp-wasm-release.yml`) via `workflow_dispatch -f dry_run=false` whenever the core
+`acdp` crate itself releases — that's the SDK cascade referenced throughout this doc.
+
+As of 2026-08-30, each of those three workflows now pushes its own matching git tag
+(`acdp-py-v$VER` / `acdp-node-v$VER` / `acdp-wasm-v$VER`) automatically, in a "Tag the
+release" step that runs immediately after a successful `workflow_dispatch`-triggered
+publish (gated on `github.event_name == 'workflow_dispatch' && !inputs.dry_run`, so it
+never fires on an actual tag push — the tag already exists in that case — or on a dry
+run — nothing was published). This closes the root cause behind the "Why this exists"
+section above: a `workflow_dispatch` publish can no longer land without a tag.
+
+That same "Tag the release" step also fails the job if the `version` input was left
+blank on a manual dispatch — deliberately, since a blank version can't be turned into a
+sane tag name. This runs *after* the publish itself, so a manual non-dry-run dispatch
+with a blank `version` will now publish successfully and then fail the job at the tag
+step (a previously-green pattern that is red now). Always pass an explicit
+`-f version=...` on a manual non-dry-run dispatch.
+
+**This does not retire the manual tag-push instructions elsewhere in this document**
+(Steps 1–2 below, and the RS-8 addendum's Steps further down). Those remain exactly what
+you want for the **manual** release path — a human deliberately dispatching a workflow
+or pushing a tag themselves outside the automated cascade, e.g. testing a binding
+release before the core crate is ready to cut, or recovering from a failed automated
+cascade. The automated tagging above is simply no longer the *only* path that produces
+a correctly-tagged release; it's the path the SDK cascade takes by default.
+
+Two deliberate scope limits on this automation, so this doc doesn't imply broader
+coverage than what actually shipped:
+
+- **Consumer-bump notification stays manual-path-only.** The new tag push does not
+  itself re-trigger the workflow that pushed it — a `GITHUB_TOKEN`-authored push does
+  not start new workflow runs. `release-plz.yml`'s own comment notes the opposite case:
+  `workflow_dispatch` is *exempt* from that "no recursive workflow runs" rule, which is
+  why the SDK cascade's dispatched runs execute at all — but a plain tag push (like the
+  one the new "Tag the release" step performs here) gets no such exemption, so it does
+  not start a new run. That means the push-gated
+  consumer-notification dispatch steps (`acdp-py-release.yml` / `bindings-release.yml`,
+  gated `if: github.event_name == 'push'`, which notify `acdp-playground` and
+  `acdp-control-plane` respectively) still only fire on an actual tag-push trigger,
+  never on the automated `workflow_dispatch` cascade. Downstream consumer-bump
+  notification remains a manual-path-only concern; this automation does not close that
+  separate gap.
+- **A partial-failure recovery re-run correctly skips the tag step.** The "Tag the
+  release" step uses a plain `if:` (carrying only its own gate above), which implicitly
+  requires `success()` on everything before it in the job. If an earlier step in that
+  publish job fails — including on a partial-failure recovery re-run — the tag step is
+  skipped. This is intentional, not a bug: an incomplete publish should not get tagged
+  as if it fully succeeded.
+
 ## Current state (verified 2026-08-29 — re-check before acting)
 
 The sibling plan (`agentcontextdistributionprotocol/plans/siblings/acdp-rs.md`, RS-6)
@@ -38,7 +91,11 @@ PyPI/npm state as of this runbook is materially ahead of what the plan assumed:
 | `acdp` crate (this repo) | `acdp-v0.8.1` | — | `0.8.1` (`Cargo.toml` workspace version) |
 | `acdp-node` (npm `@agentcontextdistributionprotocol/acdp`) | `acdp-node-v0.7.0` | **0.7.0, 0.8.0, 0.8.1** — 0.8.0 and 0.8.1 both published tag-less via `workflow_dispatch` on 2026-07-10 (runs at commits `c2a89032` and `c4c9be8d`) | `0.8.0` (`bindings/acdp-node/package.json`, stale relative to what's already published) |
 | `acdp-py` (PyPI `acdp`) | `acdp-py-v0.7.0` | **0.7.0, 0.8.0, 0.8.1** — 0.8.0 and 0.8.1 both published tag-less via `workflow_dispatch` on 2026-07-10, same two commits as node | `0.8.0` (`bindings/acdp-py/Cargo.toml`, stale) |
-| `acdp-wasm` (npm `@agentcontextdistributionprotocol/acdp-wasm`) | `acdp-wasm-v0.7.0` | **0.7.0, 0.8.0** — the 0.8.0 `workflow_dispatch` at commit `be72ca24` succeeded; a same-day follow-up attempt at 0.8.1 (commit `c4c9be8d`, run `29129059112`) **failed** during `cargo metadata` on a `getrandom` version conflict (`acdp-wasm` required `getrandom ^0.4` with feature `js`, which only exists on `0.2.x`) — that bug was the dual-major `getrandom` pin mixup fixed later by PR #153 (commit `c55eacd`, 2026-08-28). **0.8.1 was never published for wasm.** | `0.8.0` (`bindings/acdp-wasm/Cargo.toml`, matches the last successful publish) |
+| `acdp-wasm` (npm `@agentcontextdistributionprotocol/acdp-wasm`) | `acdp-wasm-v0.7.0` | **0.7.0, 0.8.0** — the 0.8.0 `workflow_dispatch` at commit `be72ca24` succeeded; a same-day follow-up attempt at 0.8.1 (commit `c4c9be8d`, run `29129059112`) **failed** during `cargo metadata` on a `getrandom` version conflict (`acdp-wasm` required `getrandom ^0.4` with feature `js`, which only exists on `0.2.x`) — that bug was the dual-major `getrandom` pin mixup fixed later by PR #153 (commit `c55eacd`, 2026-08-28). **0.8.1 was never published for wasm** *(stale as of 2026-08-30 — a 0.8.1 retry did later succeed, tagged `acdp-wasm-v0.8.1`, and npm now holds `0.7.0` through `0.8.4`; see the manifest column and re-run `npm view`/`git tag` before trusting this cell)*. | `0.8.4` (`bindings/acdp-wasm/Cargo.toml`, bumped as of 2026-08-30 to match npm's actual latest published version, `0.8.4` — the bump is purely cosmetic per the workflow's re-stamp-at-build-time design and not itself a publish; see "Automated tag-on-publish" above) |
+
+Per "Automated tag-on-publish" above, any future `workflow_dispatch` publish (manual or
+via the automated cascade) now tags itself automatically; no human backfill should be
+needed going forward for new releases.
 
 Re-run these checks before executing anything below — another session or the bot may
 have moved the state again:
@@ -107,9 +164,14 @@ This is the one artifact that genuinely isn't at the family version yet.
    # expect: getrandom = { version = "0.2", features = ["js"] }
    #         getrandom_wasm = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
    ```
-2. Bump `bindings/acdp-wasm/Cargo.toml`'s `version` to `0.8.1` (the workflow re-stamps
-   this from the tag name at build time regardless, but committing it keeps the working
-   tree honest — open a small PR for this one-line bump, same as any other code change).
+2. Bumping `bindings/acdp-wasm/Cargo.toml`'s `version` ahead of a release is **optional,
+   low-priority cleanup**, same as the equivalent node/py manifest bump in Step 3 below
+   — the workflow re-stamps this from the tag name at build time regardless, so the
+   committed value is never functionally required for a publish to succeed; it only
+   keeps the working tree honest for a human reader. (As of 2026-08-30, the manifest
+   already reads `0.8.4`, ahead of any version this Step 2 was originally written
+   against — bump it again to whatever version you're actually releasing before
+   dispatching, or skip it and let the workflow's re-stamp handle it.)
 3. Re-enable just the wasm workflow and do a dry run first, to catch any other drift
    before spending a real publish attempt:
    ```bash
