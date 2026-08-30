@@ -146,18 +146,20 @@ jobs:
           pattern: bindings-*
           merge-multiple: true
       - name: Scaffold per-platform npm package dirs
-        run: npx napi create-npm-dir -t .
+        run: npx napi create-npm-dirs
       - name: Assemble per-platform npm dirs
-        run: npx napi artifacts --dir artifacts
+        run: npx napi artifacts --output-dir artifacts
       - name: List what will be published
         run: ls -R npm && ls -la *.node 2>/dev/null || true
-      # `napi prepublish` only publishes the per-platform binary packages
+      # `napi pre-publish` only publishes the per-platform binary packages
       # (acdp-darwin-arm64, …). It does NOT publish the root loader package
       # (@agentcontextdistributionprotocol/acdp) — that has to be published
-      # with `npm publish`. We do both, as two steps.
+      # with `npm publish`. We do both, as two steps. `--gh-release` is opt-in
+      # in napi-cli 3.x (default off), so omitting it already skips the
+      # GitHub release napi-cli would otherwise try to create.
       - name: Publish platform packages
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
-        run: npx napi prepublish -t npm --skip-gh-release
+        run: npx napi pre-publish --npm-dir npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
