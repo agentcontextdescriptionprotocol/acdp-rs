@@ -154,12 +154,14 @@ jobs:
       # `napi pre-publish` only publishes the per-platform binary packages
       # (acdp-darwin-arm64, …). It does NOT publish the root loader package
       # (@agentcontextdistributionprotocol/acdp) — that has to be published
-      # with `npm publish`. We do both, as two steps. `--gh-release` is opt-in
-      # in napi-cli 3.x (default off), so omitting it already skips the
-      # GitHub release napi-cli would otherwise try to create.
+      # with `npm publish`. We do both, as two steps. `--gh-release` defaults
+      # to true in napi-cli 3.x (unlike the removed `--skip-gh-release`'s
+      # implication) and fails outright here since our tags aren't paired
+      # with a matching "release commit" napi-cli can find — pass
+      # `--no-gh-release` to keep the old skip-gh-release behavior.
       - name: Publish platform packages
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
-        run: npx napi pre-publish --npm-dir npm
+        run: npx napi pre-publish --npm-dir npm --no-gh-release
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
