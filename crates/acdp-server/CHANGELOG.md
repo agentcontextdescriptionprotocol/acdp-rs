@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.8.2...acdp-server-v0.8.3) - 2026-08-30
+
+### Added
+
+- *(bindings)* expose anchors (RFC-ACDP-0016) in acdp-py and acdp-node ([#175](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/175))
+
 ## [0.8.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.8.1...acdp-server-v0.8.2) - 2026-08-30
 
 ### Added
