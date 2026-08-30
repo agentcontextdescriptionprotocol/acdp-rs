@@ -213,10 +213,10 @@
   registry pinned to reject or mis-handle that value would need updating first. If this
   turns out to be premature, reverting is a one-line constant change plus a follow-up
   changelog entry — not a schema or API removal.
-- **Status:** UNCONFIRMED — flagged prominently in the PR body for human review; this is
-  the one item from this wave's batch that most warrants a deliberate look before/at the
-  next crate release, since it changes wire output for every default-configured producer
-  across the family, not just this repo.
+- **Status:** CONFIRMED (2026-08-30) — see DECISIONS.md. Confirmed as-is: the constant
+  bump has already shipped in two releases (0.8.2, 0.8.3) with no reported breakage; no
+  golden vector or validation rule regressed. Reverting now would itself be a second
+  wire-behavior change, so the bump stands.
 
 ## anchors supersede-settability (RS-8 binding follow-up)
 - **Plan:** plans/rs8-bindings-anchors.md

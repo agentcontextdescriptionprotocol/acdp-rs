@@ -123,3 +123,26 @@ Two side findings surfaced during this recommendation, both acted on before ship
    RS-8/PR #169, not this branch) — a lifecycle envelope carrying an `anchors` member
    gets a generic `schema_violation` instead of the correct `immutable_field`. User
    verdict: fix now, same PR.
+
+## 2026-08-30 — RS-11: `ACDP_VERSION` default bump (constant bump vs. feature-derived)
+
+**Assumption:** `crates/acdp-primitives/src/lib.rs:51`'s default `ACDP_VERSION` constant
+was bumped from `"0.2.0"` to `"0.4.0"` (PR #164, merged 2026-08-28) — every producer that
+builds a `PublishRequest` without an explicit `.acdp_version(...)` now stamps `0.4.0`
+instead of `0.2.0`. The plan (RS-11, Wave 4) left the mechanism open and flagged this as
+the item most warranting deliberate human review before/at the next crate release, since
+it changes wire output ecosystem-wide, not just in this repo.
+
+**Analysis at reconciliation time:** the change has already shipped in two releases
+(0.8.2 on 2026-08-28, 0.8.3 on 2026-08-30) with no reported breakage. No golden vector
+(`sig-001`, `sig-003`) regressed — both pin an explicit version override. No
+`acdp-validation` rule imposes a new required field on a producer at 0.3.0/0.4.0. The
+only real exposure is downstream consumers (`acdp-playground`, `acdp-control-plane`, or
+any other sibling repo relying on the un-pinned default) picking up `0.4.0`-stamped
+bodies on their next crate bump — reverting now would itself be a second wire-behavior
+change, not a neutral no-op, so standing pat is the lower-churn option.
+
+**User verdict:** Confirm as-is.
+
+**Status:** CONFIRMED (2026-08-30) — no code change; `ASSUMPTIONS.md` entry updated to
+CONFIRMED.
