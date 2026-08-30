@@ -161,8 +161,10 @@ jobs:
     if: ${{ github.event_name == 'push' || !inputs.dry_run }}
     environment: pypi
     permissions:
+      contents: write # push the release tag
       id-token: write # PyPI trusted publishing (OIDC)
     steps:
+      - uses: actions/checkout@v7
       - name: Download all wheels + sdist
         uses: actions/download-artifact@v8
         with:
@@ -201,3 +203,20 @@ jobs:
           VER="${REF#acdp-py-v}"
           jq -nc --arg v "$VER" --arg e uv '{event_type:"acdp-released",client_payload:{version:$v,ecosystem:$e}}' \
             | gh api repos/agentcontextdistributionprotocol/acdp-playground/dispatches --method POST --input -
+
+      # Only a workflow_dispatch publish needs a tag created here — a tag
+      # push already has the tag, and a dry_run never actually published.
+      - name: Tag the release
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          # This step only ever runs on workflow_dispatch (see the `if:` above) — on
+          # that trigger GITHUB_REF_NAME is the dispatched ref (e.g. "main"), never a
+          # tag name, so there is no sane fallback to derive a version from it. Fail
+          # fast instead of tagging something like "acdp-py-vmain".
+          if [ -z "$V" ]; then echo "::error::version input is required to tag a release" >&2; exit 1; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "acdp-py-v${V}" -m "acdp-py v${V}"
+          git push origin "acdp-py-v${V}"
