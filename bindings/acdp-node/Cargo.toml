@@ -26,10 +26,10 @@ acdp        = { path = "../..", default-features = false, features = ["test-tran
 # ^ test-transport: the bindings deliberately re-export allow_test_loopback
 #   on their pinned FFI surface (expected_surface.json) as a HOST-side test
 #   helper; the Rust-side hard gate targets Rust dependency trees.
-napi        = { version = "2.16", features = ["napi8"] }
-napi-derive = "2.16"
+napi        = { version = "3.12", features = ["napi8"] }
+napi-derive = "3.6"
 serde_json  = "1"
-base64      = "0.22"
+base64      = "0.23"
 # Used only to parse the `expiresAt` RFC 3339 string into the
 # `DateTime<Utc>` the builder expects. `serde` feature matches the
 # parent crate so the parsed value round-trips identically.
