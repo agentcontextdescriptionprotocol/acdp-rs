@@ -141,20 +141,31 @@ already effectively true, just needed the tag) and `UI-1` (wasm bump + tagged re
 are unblocked, and `CI-3` (tag-triggered publish = propagation head) can record this as
 the policy going forward.
 
-## RS-8 binding follow-up release (`anchors`, RFC-ACDP-0016) — not yet executed
+## RS-8 binding follow-up release (`anchors`, RFC-ACDP-0016) — DONE (2026-08-30)
 
-**Human-assisted, same caveat as above: no step here has been run by an agent.**
-This section covers the release for `plans/rs8-bindings-anchors.md` — exposing the
-`anchors` field (added to the core crates in RS-8, PR #169) through both language
-bindings. Source is complete and tested (both bindings' unit/integration suites, the
-`bindings/interop/` cross-language parity suite, and a core-crate fix to
-`Producer::new_version_from` that this work surfaced — see `ASSUMPTIONS.md`'s "anchors
-supersede-settability" entry). **No tag has been pushed and no publish has happened —
-this section is the plan for a human to execute, not a record of something done.**
+PR #175 merged to `main` as `510ca40` (2026-08-30). Both dry runs went green
+(`acdp-py-release.yml`, `bindings-release.yml`, `-f version=0.8.3`), then real tags
+`acdp-py-v0.8.3` and `acdp-node-v0.8.3` were pushed against `510ca40`. Both release
+workflows completed successfully — `acdp` `0.8.3` is live on PyPI, and
+`@agentcontextdistributionprotocol/acdp` `0.8.3` plus all four platform packages
+(`acdp-darwin-arm64`, `acdp-darwin-x64`, `acdp-linux-x64-gnu`, `acdp-linux-arm64-gnu`)
+are live on npm. Verified via real `pip install acdp==0.8.3` / `npm install
+@agentcontextdistributionprotocol/acdp@0.8.3` installs plus an end-to-end
+publish-request-with-`anchors` + `verify_content_hash` smoke test against each
+installed package, not just the registry listing.
 
-### Current state (re-verified 2026-08-29, don't trust the numbers below without
-re-checking — this exact drift pattern, an untagged `workflow_dispatch` publish
-leaving `git tag` behind reality, is already why this runbook exists)
+One transient hiccup, not a real failure: `acdp-linux-x64-gnu@0.8.3`'s versioned
+registry endpoint 404'd for about a minute after the CI publish step reported success
+(the CI log showed the correct `+ @agentcontextdistributionprotocol/acdp-linux-x64-gnu@0.8.3`
+line) — the same npm read-replica propagation lag this runbook's own earlier section
+already diagnosed for a different package. Resolved on its own; no republish needed.
+
+`acdp-py`/`acdp-node` are now genuinely in lock-step at `0.8.3` (previously drifted,
+`0.8.1`/`0.8.2` respectively — see the superseded "Current state" section below, kept
+for historical context on the drift pattern rather than deleted).
+
+### Current state (as of 2026-08-29, BEFORE the above — historical, do not use for a
+future release; re-check `git tag` / the registries fresh each time)
 
 | Artifact | Latest git tag | Actually live | Committed manifest |
 |---|---|---|---|
