@@ -89,7 +89,7 @@ jobs:
         run: npx napi build --platform --release --target ${{ matrix.target }}
       - name: Build (zig cross)
         if: ${{ matrix.zig }}
-        run: npx napi build --platform --release --target ${{ matrix.target }} --zig
+        run: npx napi build --platform --release --target ${{ matrix.target }} --cross-compile
       # Golden-vector smoke on the one leg whose .node runs natively on its
       # host (x86_64 linux on ubuntu). index.js loads the local .node, so
       # this exercises the exact binary about to be published. The darwin
