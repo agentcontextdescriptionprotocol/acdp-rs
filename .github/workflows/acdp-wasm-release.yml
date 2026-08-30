@@ -51,8 +51,8 @@ jobs:
       id-token: write # OIDC: npm provenance + SLSA build-provenance attestation
       attestations: write # write the SLSA provenance attestation
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -60,7 +60,7 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           workspaces: bindings/acdp-wasm
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
@@ -108,7 +108,7 @@ jobs:
       # subject-path is resolved from GITHUB_WORKSPACE (uses: steps ignore the
       # job-level defaults.run.working-directory).
       - name: Attest build provenance (.wasm)
-        uses: actions/attest-build-provenance@v2 # first-party, major tag
+        uses: actions/attest-build-provenance@v4 # first-party, major tag
         with:
           subject-path: bindings/acdp-wasm/pkg/acdp_wasm_bg.wasm
       - name: List what will be published

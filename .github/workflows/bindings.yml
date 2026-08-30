@@ -33,17 +33,17 @@ jobs:
       matrix:
         python: ['3.9', '3.11', '3.13']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           # Standalone [workspace] in each binding's Cargo.toml, so a
           # separate cache key keeps the bindings' target/ dirs from
           # competing with the root crate's.
           workspaces: bindings/acdp-py
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       # `maturin develop` requires an active venv/conda env — it refuses
@@ -80,14 +80,14 @@ jobs:
         # run there at all. `engines.node` in package.json matches.
         node: ['20', '22']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           workspaces: bindings/acdp-node
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
       - name: Install @napi-rs/cli
@@ -106,12 +106,12 @@ jobs:
     name: acdp-wasm (wasm32 verifier core)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The golden-parity test (sig-001 + wit-001) reads the canonical
       # spec fixtures; check them out so ACDP_REQUIRE_CONFORMANCE can make
       # a missing fixture a hard failure rather than a silent skip.
       - name: Check out the ACDP spec
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: agentcontextdistributionprotocol/agentcontextdistributionprotocol
           # Pinned so a spec-repo push cannot flip this job's result without
@@ -126,7 +126,7 @@ jobs:
           # stays wasm-clean" invariant: a tokio/reqwest/ring-flavoured
           # dependency creeping into a core crate breaks it here.
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           workspaces: bindings/acdp-wasm
       # 1. Native golden-vector parity: the same pure `core` functions the
@@ -171,19 +171,19 @@ jobs:
     runs-on: ubuntu-latest
     needs: [acdp-py, acdp-node]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           workspaces: |
             bindings/acdp-py
             bindings/acdp-node
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
       # `maturin develop` requires an active venv — see acdp-py job.
@@ -220,7 +220,7 @@ jobs:
         # (ci.yml) never sees these graphs.
         dir: [bindings/acdp-py, bindings/acdp-node, bindings/acdp-wasm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
@@ -244,8 +244,8 @@ jobs:
     name: npm audit (acdp-node)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
       # No committed package-lock.json (.gitignore:23) — `npm install`
