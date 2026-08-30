@@ -149,7 +149,7 @@ pub fn did_key_from_ed25519(public_key: &[u8; 32]) -> String {
 pub fn did_key_from_p256_sec1(sec1: &[u8]) -> Result<String, AcdpError> {
     let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(sec1)
         .map_err(|e| AcdpError::KeyResolution(format!("p256 SEC1 parse: {e}")))?;
-    let compressed = vk.to_encoded_point(true);
+    let compressed = vk.to_sec1_point(true);
     let mut prefixed = Vec::with_capacity(2 + 33);
     prefixed.extend_from_slice(&MULTICODEC_P256);
     prefixed.extend_from_slice(compressed.as_bytes());
@@ -200,7 +200,7 @@ mod tests {
                 // Decompressing must give back the original point.
                 let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&k).unwrap();
                 assert_eq!(
-                    vk.to_encoded_point(false).as_bytes(),
+                    vk.to_sec1_point(false).as_bytes(),
                     key.verifying_key_sec1().as_slice()
                 );
             }

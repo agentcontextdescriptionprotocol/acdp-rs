@@ -49,7 +49,13 @@ impl SigningKey {
     /// previously-stored key material. Do not persist the raw 32-byte
     /// seed in cleartext — use a key vault or HSM.
     pub fn generate() -> Self {
-        Self(DalekSigningKey::generate(&mut rand_core::OsRng))
+        // `rand_core` 0.10 dropped `OsRng`; `getrandom::SysRng` is the
+        // replacement, wrapped in `UnwrapErr` to get the infallible
+        // `CryptoRng` this API requires (panics on OS RNG failure,
+        // matching the old `OsRng`'s behavior).
+        Self(DalekSigningKey::generate(&mut rand_core::UnwrapErr(
+            getrandom::SysRng,
+        )))
     }
 
     /// Sign the ASCII bytes of the full `content_hash` string per §5.8.
@@ -122,7 +128,14 @@ impl P256SigningKey {
     /// Recommended for production callers; `from_bytes` is for loading
     /// previously-stored key material.
     pub fn generate() -> Self {
-        Self(p256::ecdsa::SigningKey::random(&mut rand_core::OsRng))
+        use p256::elliptic_curve::Generate;
+        // `SigningKey::random` is deprecated in favor of the `Generate`
+        // trait (ecdsa 0.17); `rand_core` 0.10 also dropped `OsRng` — see
+        // the sibling `SigningKey::generate` above for the `UnwrapErr`
+        // rationale.
+        Self(p256::ecdsa::SigningKey::generate_from_rng(
+            &mut rand_core::UnwrapErr(getrandom::SysRng),
+        ))
     }
 
     /// Construct from 32 raw scalar bytes (big-endian).
@@ -200,12 +213,12 @@ impl P256SigningKey {
     /// `publicKeyJwk` (after splitting into the `x` / `y` halves) or
     /// `publicKeyMultibase` representation.
     pub fn verifying_key_sec1(&self) -> Vec<u8> {
-        // `VerifyingKey::to_encoded_point` is delegated from the
+        // `VerifyingKey::to_sec1_point` is delegated from the
         // `elliptic_curve::sec1::ToEncodedPoint` trait — inherent in the
         // crate's public surface, no extra `use` needed.
         self.0
             .verifying_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec()
     }

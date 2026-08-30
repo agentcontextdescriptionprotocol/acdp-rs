@@ -260,7 +260,7 @@ fn check_sha256(bytes: &[u8], declared: &ContentHash) -> Result<(), AcdpError> {
             declared.as_str()
         )));
     };
-    let got = format!("{:x}", Sha256::digest(bytes));
+    let got = hex::encode(Sha256::digest(bytes));
     if got != declared_hex {
         // BUG-02: a content-hash mismatch on external data is a
         // data-reference-level integrity failure, not a body-level hash
@@ -297,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_and_verify_uri_ref_passes_with_matching_hash() {
         let bytes = b"hello-world".to_vec();
-        let hash = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let hash = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
         let dr = DataRef::uri_verified(
             DataRefType::RawData,
             "https://example.com/data",

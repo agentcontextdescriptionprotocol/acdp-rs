@@ -27,7 +27,7 @@ pub fn fingerprint_ed25519(public_key: &[u8; 32]) -> String {
 pub fn fingerprint_p256_sec1(sec1: &[u8]) -> Result<String, AcdpError> {
     let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(sec1)
         .map_err(|e| AcdpError::KeyResolution(format!("p256 SEC1 parse: {e}")))?;
-    let compressed = vk.to_encoded_point(true);
+    let compressed = vk.to_sec1_point(true);
     Ok(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(compressed.as_bytes()))
@@ -117,7 +117,7 @@ mod tests {
         let key = crate::sign::P256SigningKey::generate();
         let uncompressed = key.verifying_key_sec1();
         let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&uncompressed).unwrap();
-        let compressed = vk.to_encoded_point(true);
+        let compressed = vk.to_sec1_point(true);
 
         let fp_a = fingerprint_p256_sec1(&uncompressed).unwrap();
         let fp_b = fingerprint_p256_sec1(compressed.as_bytes()).unwrap();

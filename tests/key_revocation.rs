@@ -779,7 +779,7 @@ async fn start_harness(registry_receipt_pub: &[u8; 32], producer_pub: &[u8; 32])
             }),
         )
         .route(
-            "/contexts/:id",
+            "/contexts/{id}",
             get({
                 let ctx = context_json.clone();
                 move || {
@@ -1092,7 +1092,7 @@ async fn find_revocations_returns_only_verified() {
             }),
         )
         .route(
-            "/contexts/:id",
+            "/contexts/{id}",
             get({
                 let contexts = contexts.clone();
                 move |axum::extract::Path(id): axum::extract::Path<String>| {
