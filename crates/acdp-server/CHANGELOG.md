@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.8.1...acdp-server-v0.8.2) - 2026-08-30
+
+### Added
+
+- *(types)* add anchors support (RFC-ACDP-0016, 0.5.0) ([#169](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/169))
+
+### Other
+
+- *(deps)* bump the major-updates group across 1 directory with 9 updates ([#157](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/157))
+- W4-RS hygiene batch (RS-6/7/9/11/12) ([#164](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/164))
+
 ## [0.8.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.8.0...acdp-server-v0.8.1) - 2026-07-10
 
 ### Other
