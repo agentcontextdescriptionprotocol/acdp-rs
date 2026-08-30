@@ -145,15 +145,16 @@ impl Producer {
     ///
     /// Pre-fills supersedes / version / expected_lineage_id (same as
     /// `supersede_body`) plus title, context_type, contributors,
-    /// data_refs, derived_from, visibility, audience, description,
-    /// summary, tags, domain, expires_at, data_period, metadata,
-    /// schema_uri, and acdp_version.
+    /// data_refs, anchors, derived_from, visibility, audience,
+    /// description, summary, tags, domain, expires_at, data_period,
+    /// metadata, schema_uri, and acdp_version.
     pub fn new_version_from(&self, previous: &Body) -> RequestBuilder<'_> {
         let mut b = self.supersede_body(previous);
         b.title = Some(previous.title.clone());
         b.context_type = Some(previous.context_type.clone());
         b.contributors = previous.contributors.clone();
         b.data_refs = previous.data_refs.clone();
+        b.anchors = previous.anchors.clone();
         b.derived_from = previous.derived_from.clone();
         b.visibility = previous.visibility.clone();
         b.audience = previous.audience.clone();
@@ -355,6 +356,21 @@ impl<'a> RequestBuilder<'a> {
     /// one anchor to send.
     pub fn anchors(mut self, a: Vec<AnchorEntry>) -> Self {
         self.anchors = Some(a);
+        self
+    }
+
+    /// Unset `anchors` entirely (the field is omitted from the wire).
+    ///
+    /// Needed specifically on the [`Producer::new_version_from`] path:
+    /// that constructor carries the previous version's `anchors`
+    /// forward by default (matching every other producer-controlled
+    /// field), so a version that genuinely has none of its own has no
+    /// other way to say so — `.anchors(vec![])` is rejected at
+    /// [`Self::build`] time by the same absent-when-empty rule that
+    /// makes an *empty* anchors array meaningless on the wire. Takes
+    /// precedence over a prior `.anchors(...)` call in the same chain.
+    pub fn clear_anchors(mut self) -> Self {
+        self.anchors = None;
         self
     }
 
@@ -837,6 +853,139 @@ mod tests {
         assert_eq!(req.version, 3);
         assert_eq!(req.supersedes.as_ref().unwrap(), &prev.ctx_id);
         assert_eq!(req.lineage_id.as_ref(), Some(&prev.lineage_id));
+    }
+
+    /// `new_version_from` (unlike `supersede_body`'s blank slate) MUST
+    /// carry every producer-controlled field from `previous` forward,
+    /// including `anchors` — a field added after this function was
+    /// written (RFC-ACDP-0016) that was silently missing from the
+    /// carry-over list until this test.
+    #[test]
+    fn new_version_from_carries_anchors_forward() {
+        use acdp_types::body::{Body, RegistryState, Signature};
+        use chrono::TimeZone;
+        let anchor = AnchorEntry {
+            scheme: "macp.commitment".into(),
+            content_hash: ContentHash(
+                "sha256:fa8fe6b9143b469866d31de09b81928cc44d226ed935162cd346ae80d14fd200".into(),
+            ),
+            uri: None,
+            extensions: Default::default(),
+        };
+        let prev = Body {
+            ctx_id: CtxId(
+                "acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into(),
+            ),
+            lineage_id: LineageId(
+                "lin:sha256:b14ccd2a8b34530309255db68c151a10689b6a82feb30aff9222d54fdd871720"
+                    .into(),
+            ),
+            origin_registry: "registry.example.com".into(),
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            content_hash: ContentHash("sha256:abcd".repeat(8) + "abcd"),
+            signature: Signature {
+                algorithm: "ed25519".into(),
+                key_id: "did:web:agents.example.com:test-producer#key-1".into(),
+                value: "A".repeat(88),
+            },
+            version: 1,
+            supersedes: None,
+            agent_id: AgentDid::new("did:web:agents.example.com:test-producer"),
+            contributors: vec![],
+            title: "v1".into(),
+            context_type: ContextType::DataSnapshot,
+            data_refs: vec![],
+            derived_from: vec![],
+            visibility: Visibility::Public,
+            audience: None,
+            acdp_version: None,
+            description: None,
+            summary: None,
+            tags: None,
+            domain: None,
+            expires_at: None,
+            data_period: None,
+            metadata: None,
+            schema_uri: None,
+            anchors: Some(vec![anchor.clone()]),
+            extensions: Default::default(),
+        };
+        let _state = RegistryState {
+            status: Status::Active,
+            lifecycle_events: None,
+            extensions: Default::default(),
+        };
+
+        let p = test_producer();
+        // No explicit .anchors(...) override — relying entirely on the
+        // carry-over.
+        let req = p.new_version_from(&prev).build().unwrap();
+        assert_eq!(req.anchors, Some(vec![anchor]));
+    }
+
+    /// `clear_anchors()` is the only way to produce a version with NO
+    /// anchors after `new_version_from` has carried a previous version's
+    /// anchors forward — `.anchors(vec![])` is rejected by the
+    /// absent-when-empty rule, so a dedicated unset method is required.
+    #[test]
+    fn clear_anchors_unsets_a_carried_over_value() {
+        use acdp_types::body::{Body, RegistryState, Signature};
+        use chrono::TimeZone;
+        let anchor = AnchorEntry {
+            scheme: "macp.commitment".into(),
+            content_hash: ContentHash(
+                "sha256:fa8fe6b9143b469866d31de09b81928cc44d226ed935162cd346ae80d14fd200".into(),
+            ),
+            uri: None,
+            extensions: Default::default(),
+        };
+        let prev = Body {
+            ctx_id: CtxId(
+                "acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into(),
+            ),
+            lineage_id: LineageId(
+                "lin:sha256:b14ccd2a8b34530309255db68c151a10689b6a82feb30aff9222d54fdd871720"
+                    .into(),
+            ),
+            origin_registry: "registry.example.com".into(),
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            content_hash: ContentHash("sha256:abcd".repeat(8) + "abcd"),
+            signature: Signature {
+                algorithm: "ed25519".into(),
+                key_id: "did:web:agents.example.com:test-producer#key-1".into(),
+                value: "A".repeat(88),
+            },
+            version: 1,
+            supersedes: None,
+            agent_id: AgentDid::new("did:web:agents.example.com:test-producer"),
+            contributors: vec![],
+            title: "v1".into(),
+            context_type: ContextType::DataSnapshot,
+            data_refs: vec![],
+            derived_from: vec![],
+            visibility: Visibility::Public,
+            audience: None,
+            acdp_version: None,
+            description: None,
+            summary: None,
+            tags: None,
+            domain: None,
+            expires_at: None,
+            data_period: None,
+            metadata: None,
+            schema_uri: None,
+            anchors: Some(vec![anchor]),
+            extensions: Default::default(),
+        };
+        let _state = RegistryState {
+            status: Status::Active,
+            lifecycle_events: None,
+            extensions: Default::default(),
+        };
+
+        let p = test_producer();
+        let req = p.new_version_from(&prev).clear_anchors().build().unwrap();
+        assert_eq!(req.anchors, None);
     }
 
     #[test]

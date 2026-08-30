@@ -463,6 +463,54 @@ def test_extended_body_fields_are_byte_identical_across_bindings(node):
     assert py_req["expires_at"] == node_req["expires_at"]
 
 
+def test_anchors_are_byte_identical_across_bindings(node):
+    """`anchors` (RFC-ACDP-0016) lands in the content_hash preimage; both
+    bindings must parse and canonicalize it identically, so the hash and
+    signature match byte-for-byte. Exercises `uri` (present), and TWO
+    `extensions` keys (via `#[serde(flatten)]`) in deliberately
+    non-alphabetical insertion order — JCS re-sorts object keys before
+    hashing, so this also guards against either binding's JSON layer
+    (de)serializing extensions in a way that silently reorders or drops
+    one before it reaches the canonicalizer."""
+    anchors = json.dumps(
+        [
+            {
+                "scheme": "macp.commitment",
+                "content_hash": "sha256:fa8fe6b9143b469866d31de09b81928cc44d226ed935162cd346ae80d14fd200",
+                "uri": "https://example.com/commitments/1",
+                "note": "cross-binding interop fixture",
+                "confidence": "high",
+            }
+        ]
+    )
+
+    py_raw = _python_publish(
+        {
+            "title": "Anchored body",
+            "context_type": "data_snapshot",
+            "anchors": anchors,
+        }
+    )
+    node_raw = _node_publish(
+        node,
+        {
+            "title": "Anchored body",
+            "contextType": "data_snapshot",
+            "anchors": anchors,
+        },
+    )
+    py_req = json.loads(py_raw)
+    node_req = json.loads(node_raw)
+    assert py_req["content_hash"] == node_req["content_hash"]
+    assert py_req["signature"]["value"] == node_req["signature"]["value"]
+    # And the field itself — including both flattened extension keys —
+    # round-tripped identically on both sides.
+    assert py_req["anchors"] == node_req["anchors"]
+    assert py_req["anchors"][0]["uri"] == "https://example.com/commitments/1"
+    assert py_req["anchors"][0]["note"] == "cross-binding interop fixture"
+    assert py_req["anchors"][0]["confidence"] == "high"
+
+
 # ── AcdpCanonicalizer cross-language parity ──────────────────────────────
 
 # JCS is deterministic, so both bindings MUST emit byte-identical

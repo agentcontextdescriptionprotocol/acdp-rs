@@ -7,6 +7,26 @@ suite fails if the two versions or API surfaces drift.
 
 ## Unreleased
 
+### Added
+
+- **`anchors`** (RFC-ACDP-0016): `build_publish_request` and
+  `build_supersede_request`, on both `AcdpProducer` and
+  `AcdpP256Producer`, accept a new optional `anchors` parameter — a
+  JSON-encoded array of `{scheme, content_hash, uri?, ...extensions}` objects,
+  following the same JSON-string-in / JSON-string-out convention as
+  `data_refs`. Semantic validation (scheme format, content-hash shape,
+  the `MAX_ANCHORS` cap) is enforced by the existing core
+  `RequestBuilder::build()` path, not re-implemented in this binding.
+  Verified: the field participates in the `content_hash` preimage
+  exactly like `data_refs` (round-trips through
+  `AcdpVerifier.verify_content_hash`). `build_supersede_request` also
+  gains a `clear_anchors` boolean parameter (takes precedence over
+  `anchors`, mirroring `omit_acdp_version`'s precedence over
+  `acdp_version`) — the only way to produce a version with no anchors
+  after a previous version had some, since omitting `anchors` carries
+  the old value forward and an empty array is rejected by the
+  absent-when-empty rule.
+
 ### Security
 
 - Bumped the `pyo3` dependency from 0.22 to 0.29, clearing three RUSTSEC

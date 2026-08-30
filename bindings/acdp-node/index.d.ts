@@ -842,6 +842,12 @@ export interface PublishOpts {
    */
   dataRefs?: string
   /**
+   * External anchors (RFC-ACDP-0016) — a JSON-encoded array of
+   * `{scheme, content_hash, uri?}` objects. Part of ProducerContent,
+   * so it is included in the content_hash preimage.
+   */
+  anchors?: string
+  /**
    * RFC 3339 timestamp after which the conclusions should no longer be
    * relied upon. Truncated to millisecond precision.
    */
@@ -931,6 +937,20 @@ export interface SupersedeOpts {
    * carried-over data refs when present).
    */
   dataRefs?: string
+  /**
+   * JSON-encoded array of `{scheme, content_hash, uri?}` anchor
+   * objects (RFC-ACDP-0016; replaces the carried-over anchors when
+   * present).
+   */
+  anchors?: string
+  /**
+   * Unset `anchors` entirely (the only way to produce a version with
+   * none, since omitting `anchors` carries the previous version's
+   * value forward and `anchors: "[]"` is rejected by the
+   * absent-when-empty rule). Takes precedence over `anchors`,
+   * mirroring `omitAcdpVersion`'s precedence over `acdpVersion`.
+   */
+  clearAnchors?: boolean
   /** RFC 3339 expiry timestamp. */
   expiresAt?: string
   /** JSON object `{"start": <rfc3339>, "end": <rfc3339>}`. */

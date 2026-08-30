@@ -2,7 +2,7 @@
 //! conversions mirror what serde does at deserialize time so JS callers
 //! get the same validation Rust callers do.
 
-use acdp::types::{ContextType, DataPeriod, DataRef, LineageId, Visibility};
+use acdp::types::{AnchorEntry, ContextType, DataPeriod, DataRef, LineageId, Visibility};
 use chrono::{DateTime, Utc};
 use napi::bindgen_prelude::*;
 
@@ -29,6 +29,16 @@ pub(crate) fn parse_visibility(s: &str) -> Result<Visibility> {
 /// the same field validation Rust callers get.
 pub(crate) fn parse_data_refs(s: &str) -> Result<Vec<DataRef>> {
     serde_json::from_str(s).map_err(|e| Error::from_reason(format!("invalid dataRefs JSON: {e}")))
+}
+
+/// Parse a JSON-encoded `AnchorEntry[]` string into the typed vector
+/// (RFC-ACDP-0016). Each element MUST satisfy the `acdp-anchor-entry`
+/// schema; serde applies the same field validation Rust callers get.
+/// Semantic validation (scheme format, content_hash parseability, the
+/// `MAX_ANCHORS` cap) happens downstream in `RequestBuilder::build()`,
+/// not here — this only rejects malformed JSON.
+pub(crate) fn parse_anchors(s: &str) -> Result<Vec<AnchorEntry>> {
+    serde_json::from_str(s).map_err(|e| Error::from_reason(format!("invalid anchors JSON: {e}")))
 }
 
 /// Parse a JSON-encoded `{ "start": <rfc3339>, "end": <rfc3339> }`

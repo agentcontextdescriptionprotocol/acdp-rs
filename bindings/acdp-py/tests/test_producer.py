@@ -520,6 +520,198 @@ def test_invalid_data_refs_json_rejected():
         )
 
 
+# ── anchors (RFC-ACDP-0016) ──────────────────────────────────────────────
+
+_WELL_FORMED_ANCHOR = {
+    "scheme": "macp.commitment",
+    "content_hash": "sha256:fa8fe6b9143b469866d31de09b81928cc44d226ed935162cd346ae80d14fd200",
+}
+
+
+def test_publish_with_anchors():
+    """`anchors` crosses the boundary as a JSON string, lands correctly in
+    the request, and stays inside the content_hash preimage."""
+    p = _producer()
+    raw = p.build_publish_request(
+        title="Anchored context",
+        context_type="data_snapshot",
+        anchors=json.dumps([_WELL_FORMED_ANCHOR]),
+    )
+    req = json.loads(raw)
+    assert req["anchors"][0]["scheme"] == "macp.commitment"
+    assert req["anchors"][0]["content_hash"] == _WELL_FORMED_ANCHOR["content_hash"]
+    # anchors is part of ProducerContent → must be in the hash preimage.
+    assert acdp.AcdpVerifier.verify_content_hash(raw, req["content_hash"])
+
+
+def test_supersede_with_anchors():
+    """`anchors` is also settable on a supersession request (unlike
+    `derived_from`, which is publish-only) — it describes evidence about
+    *this version's* content, not an immutable lineage fact. Also
+    verifies the override (not just the carry-over) participates in the
+    content_hash preimage."""
+    p = _producer()
+    v1 = json.loads(p.build_publish_request(title="Original", context_type="data_snapshot"))
+    body = {
+        **v1,
+        "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:" + "a" * 64,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+    v2_raw = p.build_supersede_request(
+        previous_body_json=json.dumps(body),
+        title="Updated",
+        anchors=json.dumps([_WELL_FORMED_ANCHOR]),
+    )
+    v2 = json.loads(v2_raw)
+    assert v2["anchors"][0]["scheme"] == "macp.commitment"
+    assert acdp.AcdpVerifier.verify_content_hash(v2_raw, v2["content_hash"])
+
+
+def test_supersede_carries_anchors_forward_when_not_overridden():
+    """Omitting `anchors` on a supersede call carries the previous
+    version's anchors forward, exactly like every other producer-
+    controlled field (`new_version_from`'s contract)."""
+    p = _producer()
+    v1 = json.loads(
+        p.build_publish_request(
+            title="Original",
+            context_type="data_snapshot",
+            anchors=json.dumps([_WELL_FORMED_ANCHOR]),
+        )
+    )
+    body = {
+        **v1,
+        "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:" + "a" * 64,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+    v2 = json.loads(
+        p.build_supersede_request(previous_body_json=json.dumps(body), title="Updated")
+    )
+    assert v2["anchors"][0]["scheme"] == "macp.commitment"
+
+
+def test_supersede_clear_anchors():
+    """`clear_anchors=True` is the only way to produce a version with NO
+    anchors after a previous version had some — omitting `anchors`
+    carries the old value forward, and `anchors="[]"` is rejected by the
+    absent-when-empty rule (see test_invalid_anchors_empty_array_rejected)."""
+    p = _producer()
+    v1 = json.loads(
+        p.build_publish_request(
+            title="Original",
+            context_type="data_snapshot",
+            anchors=json.dumps([_WELL_FORMED_ANCHOR]),
+        )
+    )
+    body = {
+        **v1,
+        "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:" + "a" * 64,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+    v2 = json.loads(
+        p.build_supersede_request(
+            previous_body_json=json.dumps(body), title="Updated", clear_anchors=True
+        )
+    )
+    assert "anchors" not in v2
+
+
+def test_supersede_clear_anchors_takes_precedence_over_anchors():
+    """If both `anchors` and `clear_anchors=True` are passed, clearing
+    wins — mirroring `omit_acdp_version`'s precedence over `acdp_version`."""
+    p = _producer()
+    v1 = json.loads(p.build_publish_request(title="Original", context_type="data_snapshot"))
+    body = {
+        **v1,
+        "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:" + "a" * 64,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+    v2 = json.loads(
+        p.build_supersede_request(
+            previous_body_json=json.dumps(body),
+            title="Updated",
+            anchors=json.dumps([_WELL_FORMED_ANCHOR]),
+            clear_anchors=True,
+        )
+    )
+    assert "anchors" not in v2
+
+
+def test_p256_publish_and_supersede_with_anchors():
+    """The extended body fields are shared logic (`apply_publish_fields`/
+    `apply_supersede_fields`); confirm the P-256 producer gets `anchors`
+    too, not just Ed25519."""
+    p = _p256_producer()
+    raw = p.build_publish_request(
+        title="Anchored context",
+        context_type="data_snapshot",
+        anchors=json.dumps([_WELL_FORMED_ANCHOR]),
+    )
+    req = json.loads(raw)
+    assert req["anchors"][0]["scheme"] == "macp.commitment"
+    assert acdp.AcdpVerifier.verify_content_hash(raw, req["content_hash"])
+
+    body = {
+        **req,
+        "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+        "lineage_id": "lin:sha256:" + "a" * 64,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+    v2 = json.loads(
+        p.build_supersede_request(
+            previous_body_json=json.dumps(body),
+            title="Updated",
+            anchors=json.dumps([_WELL_FORMED_ANCHOR]),
+        )
+    )
+    assert v2["anchors"][0]["scheme"] == "macp.commitment"
+
+
+def test_invalid_anchors_json_rejected():
+    p = _producer()
+    with pytest.raises(ValueError, match=r"(?i)anchors"):
+        p.build_publish_request(
+            title="t", context_type="data_snapshot", anchors="[not-json"
+        )
+
+
+def test_invalid_anchors_empty_array_rejected():
+    """`anchors: []` is rejected by the absent-when-empty convention
+    (RFC-ACDP-0016 §4) — surfaced via the same core validation path as
+    other semantic anchors failures, not the JSON-parse helper."""
+    p = _producer()
+    with pytest.raises(RuntimeError, match=r"(?i)anchors|omitted"):
+        p.build_publish_request(
+            title="t", context_type="data_snapshot", anchors="[]"
+        )
+
+
+def test_invalid_anchors_semantics_rejected():
+    """Well-formed JSON but a semantically invalid anchor (bad `scheme`
+    format) must be rejected by the existing core validation path
+    (`RequestBuilder::build()` -> `RuntimeError`, per this binding's
+    existing blanket error mapping for build() failures), NOT by the
+    JSON-parse helper (which raises `ValueError`) — pinning the distinct
+    exception types is what actually catches a regression where
+    validation gets duplicated/moved into `parse_anchors`."""
+    p = _producer()
+    with pytest.raises(RuntimeError, match=r"(?i)scheme"):
+        p.build_publish_request(
+            title="t",
+            context_type="data_snapshot",
+            anchors=json.dumps([{**_WELL_FORMED_ANCHOR, "scheme": "NOT VALID"}]),
+        )
+
+
 def test_invalid_expires_at_rejected():
     p = _producer()
     with pytest.raises(Exception, match=r"(?i)rfc 3339|timestamp|invalid"):

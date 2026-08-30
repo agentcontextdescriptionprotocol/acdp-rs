@@ -423,6 +423,160 @@ test('invalid dataRefs JSON is rejected', () => {
   );
 });
 
+// ── anchors (RFC-ACDP-0016) ──────────────────────────────────────────────
+
+const WELL_FORMED_ANCHOR = {
+  scheme: 'macp.commitment',
+  content_hash:
+    'sha256:fa8fe6b9143b469866d31de09b81928cc44d226ed935162cd346ae80d14fd200',
+};
+
+test('publish with anchors stays in the hash preimage', () => {
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const raw = p.buildPublishRequest({
+    title: 'Anchored context',
+    contextType: 'data_snapshot',
+    anchors: JSON.stringify([WELL_FORMED_ANCHOR]),
+  });
+  const req = JSON.parse(raw);
+  assert.equal(req.anchors[0].scheme, 'macp.commitment');
+  assert.equal(req.anchors[0].content_hash, WELL_FORMED_ANCHOR.content_hash);
+  // anchors is part of ProducerContent → must re-verify.
+  assert.equal(AcdpVerifier.verifyContentHash(raw, req.content_hash), true);
+});
+
+test('supersede with anchors', () => {
+  // anchors is settable on supersede too (unlike derivedFrom, which is
+  // publish-only) — it describes evidence about this version's content,
+  // not an immutable lineage fact.
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const v1 = JSON.parse(
+    p.buildPublishRequest({ title: 'v1', contextType: 'data_snapshot' }),
+  );
+  const body = {
+    ...v1,
+    ctx_id: 'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+    origin_registry: 'registry.example.com',
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+  const v2 = JSON.parse(
+    p.buildSupersedeRequest(JSON.stringify(body), {
+      title: 'v2',
+      anchors: JSON.stringify([WELL_FORMED_ANCHOR]),
+    }),
+  );
+  assert.equal(v2.anchors[0].scheme, 'macp.commitment');
+});
+
+test('invalid anchors JSON is rejected', () => {
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  assert.throws(() =>
+    p.buildPublishRequest({
+      title: 't',
+      contextType: 'data_snapshot',
+      anchors: '[not-json',
+    }),
+  );
+});
+
+test('empty anchors array is rejected (absent-when-empty convention)', () => {
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  assert.throws(() =>
+    p.buildPublishRequest({
+      title: 't',
+      contextType: 'data_snapshot',
+      anchors: '[]',
+    }),
+  );
+});
+
+test('supersede carries anchors forward when not overridden', () => {
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const v1 = JSON.parse(
+    p.buildPublishRequest({
+      title: 'v1',
+      contextType: 'data_snapshot',
+      anchors: JSON.stringify([WELL_FORMED_ANCHOR]),
+    }),
+  );
+  const body = {
+    ...v1,
+    ctx_id: 'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+    origin_registry: 'registry.example.com',
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+  const v2 = JSON.parse(
+    p.buildSupersedeRequest(JSON.stringify(body), { title: 'v2' }),
+  );
+  assert.equal(v2.anchors[0].scheme, 'macp.commitment');
+});
+
+test('clearAnchors is the only way to produce a version with no anchors', () => {
+  // Omitting anchors carries the old value forward (previous test); an
+  // empty array is rejected by the absent-when-empty rule; clearAnchors
+  // is the explicit unset signal.
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const v1 = JSON.parse(
+    p.buildPublishRequest({
+      title: 'v1',
+      contextType: 'data_snapshot',
+      anchors: JSON.stringify([WELL_FORMED_ANCHOR]),
+    }),
+  );
+  const body = {
+    ...v1,
+    ctx_id: 'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+    origin_registry: 'registry.example.com',
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+  const v2 = JSON.parse(
+    p.buildSupersedeRequest(JSON.stringify(body), {
+      title: 'v2',
+      clearAnchors: true,
+    }),
+  );
+  assert.equal('anchors' in v2, false);
+});
+
+test('clearAnchors takes precedence over anchors', () => {
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const v1 = JSON.parse(
+    p.buildPublishRequest({ title: 'v1', contextType: 'data_snapshot' }),
+  );
+  const body = {
+    ...v1,
+    ctx_id: 'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+    origin_registry: 'registry.example.com',
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+  const v2 = JSON.parse(
+    p.buildSupersedeRequest(JSON.stringify(body), {
+      title: 'v2',
+      anchors: JSON.stringify([WELL_FORMED_ANCHOR]),
+      clearAnchors: true,
+    }),
+  );
+  assert.equal('anchors' in v2, false);
+});
+
+test('semantically invalid anchors is rejected', () => {
+  // Well-formed JSON but a bad `scheme` format — must be rejected by the
+  // existing core validation path (RequestBuilder::build()), not
+  // silently accepted by the JSON-parse helper.
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  assert.throws(() =>
+    p.buildPublishRequest({
+      title: 't',
+      contextType: 'data_snapshot',
+      anchors: JSON.stringify([{ ...WELL_FORMED_ANCHOR, scheme: 'NOT VALID' }]),
+    }),
+  );
+});
+
 test('invalid expiresAt timestamp is rejected', () => {
   const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
   assert.throws(() =>

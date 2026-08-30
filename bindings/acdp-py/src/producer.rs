@@ -23,8 +23,8 @@ use pyo3::prelude::*;
 use zeroize::Zeroizing;
 
 use crate::helpers::{
-    parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id, parse_timestamp,
-    parse_visibility,
+    parse_anchors, parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id,
+    parse_timestamp, parse_visibility,
 };
 
 /// Apply the `acdp_version` controls shared by every build path.
@@ -53,7 +53,7 @@ fn apply_acdp_version(
 }
 
 /// Apply the optional first-version `Body` fields shared by the Ed25519
-/// and P-256 publish paths. The complex fields (`data_refs`,
+/// and P-256 publish paths. The complex fields (`data_refs`, `anchors`,
 /// `data_period`, `expires_at`, `expected_lineage_id`) cross the FFI
 /// boundary as JSON / RFC 3339 strings and are parsed into typed values
 /// here so both producers behave identically.
@@ -69,6 +69,7 @@ fn apply_publish_fields(
     schema_uri: Option<String>,
     contributors: Option<Vec<String>>,
     data_refs: Option<String>,
+    anchors: Option<String>,
     expires_at: Option<String>,
     data_period: Option<String>,
     expected_lineage_id: Option<String>,
@@ -107,6 +108,9 @@ fn apply_publish_fields(
     if let Some(dr) = data_refs {
         b = b.data_refs(parse_data_refs(&dr)?);
     }
+    if let Some(a) = anchors {
+        b = b.anchors(parse_anchors(&a)?);
+    }
     if let Some(e) = expires_at {
         b = b.expires_at(parse_timestamp(&e)?);
     }
@@ -122,6 +126,13 @@ fn apply_publish_fields(
 /// Apply the optional override fields shared by the supersession paths.
 /// Any field left `None` is carried over from the previous body by
 /// `new_version_from`.
+///
+/// `clear_anchors=True` unsets `anchors` entirely (the only way to
+/// produce a version with none, since `new_version_from` otherwise
+/// carries the previous version's `anchors` forward, and `anchors=[]`
+/// is rejected by the absent-when-empty rule). Takes precedence over
+/// `anchors`, mirroring `omit_acdp_version`'s precedence over
+/// `acdp_version`.
 fn apply_supersede_fields(
     mut b: RequestBuilder<'_>,
     title: Option<String>,
@@ -131,6 +142,8 @@ fn apply_supersede_fields(
     domain: Option<String>,
     metadata: Option<String>,
     data_refs: Option<String>,
+    anchors: Option<String>,
+    clear_anchors: Option<bool>,
     expires_at: Option<String>,
     data_period: Option<String>,
     expected_lineage_id: Option<String>,
@@ -159,6 +172,12 @@ fn apply_supersede_fields(
     }
     if let Some(dr) = data_refs {
         b = b.data_refs(parse_data_refs(&dr)?);
+    }
+    if let Some(a) = anchors {
+        b = b.anchors(parse_anchors(&a)?);
+    }
+    if clear_anchors.unwrap_or(false) {
+        b = b.clear_anchors();
     }
     if let Some(e) = expires_at {
         b = b.expires_at(parse_timestamp(&e)?);
@@ -361,7 +380,7 @@ impl PyAcdpProducer {
         visibility=None, description=None, summary=None,
         tags=None, domain=None, metadata=None,
         derived_from=None, audience=None, schema_uri=None,
-        contributors=None, data_refs=None, expires_at=None,
+        contributors=None, data_refs=None, anchors=None, expires_at=None,
         data_period=None, expected_lineage_id=None,
         acdp_version=None, omit_acdp_version=None
     ))]
@@ -380,6 +399,7 @@ impl PyAcdpProducer {
         schema_uri: Option<String>,
         contributors: Option<Vec<String>>,
         data_refs: Option<String>,
+        anchors: Option<String>,
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
@@ -407,6 +427,7 @@ impl PyAcdpProducer {
             schema_uri,
             contributors,
             data_refs,
+            anchors,
             expires_at,
             data_period,
             expected_lineage_id,
@@ -438,7 +459,8 @@ impl PyAcdpProducer {
         previous_body_json,
         title=None, summary=None, description=None,
         tags=None, domain=None, metadata=None,
-        data_refs=None, expires_at=None, data_period=None,
+        data_refs=None, anchors=None, clear_anchors=None,
+        expires_at=None, data_period=None,
         expected_lineage_id=None,
         acdp_version=None, omit_acdp_version=None
     ))]
@@ -452,6 +474,8 @@ impl PyAcdpProducer {
         domain: Option<String>,
         metadata: Option<String>,
         data_refs: Option<String>,
+        anchors: Option<String>,
+        clear_anchors: Option<bool>,
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
@@ -473,6 +497,8 @@ impl PyAcdpProducer {
             domain,
             metadata,
             data_refs,
+            anchors,
+            clear_anchors,
             expires_at,
             data_period,
             expected_lineage_id,
@@ -707,7 +733,7 @@ impl PyAcdpP256Producer {
         visibility=None, description=None, summary=None,
         tags=None, domain=None, metadata=None,
         derived_from=None, audience=None, schema_uri=None,
-        contributors=None, data_refs=None, expires_at=None,
+        contributors=None, data_refs=None, anchors=None, expires_at=None,
         data_period=None, expected_lineage_id=None,
         acdp_version=None, omit_acdp_version=None
     ))]
@@ -726,6 +752,7 @@ impl PyAcdpP256Producer {
         schema_uri: Option<String>,
         contributors: Option<Vec<String>>,
         data_refs: Option<String>,
+        anchors: Option<String>,
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
@@ -753,6 +780,7 @@ impl PyAcdpP256Producer {
             schema_uri,
             contributors,
             data_refs,
+            anchors,
             expires_at,
             data_period,
             expected_lineage_id,
@@ -774,7 +802,8 @@ impl PyAcdpP256Producer {
         previous_body_json,
         title=None, summary=None, description=None,
         tags=None, domain=None, metadata=None,
-        data_refs=None, expires_at=None, data_period=None,
+        data_refs=None, anchors=None, clear_anchors=None,
+        expires_at=None, data_period=None,
         expected_lineage_id=None,
         acdp_version=None, omit_acdp_version=None
     ))]
@@ -788,6 +817,8 @@ impl PyAcdpP256Producer {
         domain: Option<String>,
         metadata: Option<String>,
         data_refs: Option<String>,
+        anchors: Option<String>,
+        clear_anchors: Option<bool>,
         expires_at: Option<String>,
         data_period: Option<String>,
         expected_lineage_id: Option<String>,
@@ -809,6 +840,8 @@ impl PyAcdpP256Producer {
             domain,
             metadata,
             data_refs,
+            anchors,
+            clear_anchors,
             expires_at,
             data_period,
             expected_lineage_id,

@@ -15,8 +15,8 @@ use napi_derive::napi;
 use zeroize::Zeroizing;
 
 use crate::helpers::{
-    parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id, parse_timestamp,
-    parse_visibility,
+    parse_anchors, parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id,
+    parse_timestamp, parse_visibility,
 };
 
 /// Options for `buildPublishRequest`. Field names map directly to the
@@ -55,6 +55,10 @@ pub struct PublishOpts {
     /// Part of ProducerContent, so it is included in the content_hash
     /// preimage.
     pub data_refs: Option<String>,
+    /// External anchors (RFC-ACDP-0016) — a JSON-encoded array of
+    /// `{scheme, content_hash, uri?}` objects. Part of ProducerContent,
+    /// so it is included in the content_hash preimage.
+    pub anchors: Option<String>,
     /// RFC 3339 timestamp after which the conclusions should no longer be
     /// relied upon. Truncated to millisecond precision.
     pub expires_at: Option<String>,
@@ -95,6 +99,16 @@ pub struct SupersedeOpts {
     /// JSON-encoded array of `acdp-data-ref` objects (replaces the
     /// carried-over data refs when present).
     pub data_refs: Option<String>,
+    /// JSON-encoded array of `{scheme, content_hash, uri?}` anchor
+    /// objects (RFC-ACDP-0016; replaces the carried-over anchors when
+    /// present).
+    pub anchors: Option<String>,
+    /// Unset `anchors` entirely (the only way to produce a version with
+    /// none, since omitting `anchors` carries the previous version's
+    /// value forward and `anchors: "[]"` is rejected by the
+    /// absent-when-empty rule). Takes precedence over `anchors`,
+    /// mirroring `omitAcdpVersion`'s precedence over `acdpVersion`.
+    pub clear_anchors: Option<bool>,
     /// RFC 3339 expiry timestamp.
     pub expires_at: Option<String>,
     /// JSON object `{"start": <rfc3339>, "end": <rfc3339>}`.
@@ -174,6 +188,9 @@ fn apply_publish_fields(
     if let Some(dr) = opts.data_refs {
         b = b.data_refs(parse_data_refs(&dr)?);
     }
+    if let Some(a) = opts.anchors {
+        b = b.anchors(parse_anchors(&a)?);
+    }
     if let Some(e) = opts.expires_at {
         b = b.expires_at(parse_timestamp(&e)?);
     }
@@ -219,6 +236,12 @@ fn apply_supersede_fields(
     }
     if let Some(dr) = opts.data_refs {
         b = b.data_refs(parse_data_refs(&dr)?);
+    }
+    if let Some(a) = opts.anchors {
+        b = b.anchors(parse_anchors(&a)?);
+    }
+    if opts.clear_anchors.unwrap_or(false) {
+        b = b.clear_anchors();
     }
     if let Some(e) = opts.expires_at {
         b = b.expires_at(parse_timestamp(&e)?);

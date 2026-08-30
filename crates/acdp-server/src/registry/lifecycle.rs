@@ -53,6 +53,7 @@ const BODY_FIELD_NAMES: &[&str] = &[
     "data_period",
     "metadata",
     "schema_uri",
+    "anchors",
 ];
 
 /// Validate a raw lifecycle request body against the closed
@@ -151,6 +152,20 @@ mod tests {
         let err = parse_lifecycle_request(&json!({
             "event": valid_event(),
             "summary": "please update the summary too"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, AcdpError::ImmutableField(_)), "got {err:?}");
+    }
+
+    /// `anchors` (RFC-ACDP-0016) is a `Body` field like any other — an
+    /// envelope member named `anchors` MUST be `immutable_field`, not a
+    /// generic `schema_violation`. Regression test: this field was added
+    /// to `Body` (PR #169) without being added to `BODY_FIELD_NAMES`.
+    #[test]
+    fn anchors_field_named_member_is_immutable_field() {
+        let err = parse_lifecycle_request(&json!({
+            "event": valid_event(),
+            "anchors": [{"scheme": "macp.commitment", "content_hash": "sha256:aa"}]
         }))
         .unwrap_err();
         assert!(matches!(err, AcdpError::ImmutableField(_)), "got {err:?}");

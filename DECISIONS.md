@@ -95,3 +95,31 @@ Opus review of each against the actual current code (not just the original plan 
 **User verdict:** Confirm all four, no changes.
 
 **Status:** CONFIRMED (2026-08-28) — all four, no code changes.
+
+## anchors supersede-settability (RS-8 binding follow-up)
+
+- **Plan:** plans/rs8-bindings-anchors.md
+- **Assumption:** `anchors` exposed on both publish and supersede in both bindings,
+  mirroring `data_refs` (not `derived_from`'s publish-only treatment).
+- **Recommendation (fresh Opus subagent):** confirm as-is. The decisive point: since
+  `Producer::new_version_from` (fixed in this same branch) now carries `anchors`
+  forward on supersede, making anchors publish-only would make it an unreachable,
+  permanently-frozen field after v1 — worse than the chosen option. Nothing in the core
+  validation, wire schema, or RFC-ACDP-0016 framing suggests lineage-style (immutable)
+  treatment; anchors are ordinary ProducerContent with no version coupling.
+- **User verdict:** Confirm.
+- **Status:** CONFIRMED (2026-08-30) — no code change from the as-implemented state.
+
+Two side findings surfaced during this recommendation, both acted on before shipping
+(not deferred):
+1. **`anchors` had no way to be cleared on supersede** from either binding — omitting it
+   carries the previous version's anchors forward forever (correct default), but there
+   was no explicit "clear" signal, unlike `data_refs` (a plain `Vec`, where `[]` is a
+   legal wire value). User verdict: fix now. See the `clear_anchors` addition
+   (`RequestBuilder::clear_anchors`, plus `clear_anchors`/`clearAnchors` supersede-only
+   binding parameters) landed in the same PR as this plan's phases.
+2. **Unrelated pre-existing bug**: `BODY_FIELD_NAMES` in
+   `crates/acdp-server/src/registry/lifecycle.rs` is missing `"anchors"` (introduced by
+   RS-8/PR #169, not this branch) — a lifecycle envelope carrying an `anchors` member
+   gets a generic `schema_violation` instead of the correct `immutable_field`. User
+   verdict: fix now, same PR.

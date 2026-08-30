@@ -141,6 +141,89 @@ already effectively true, just needed the tag) and `UI-1` (wasm bump + tagged re
 are unblocked, and `CI-3` (tag-triggered publish = propagation head) can record this as
 the policy going forward.
 
+## RS-8 binding follow-up release (`anchors`, RFC-ACDP-0016) — not yet executed
+
+**Human-assisted, same caveat as above: no step here has been run by an agent.**
+This section covers the release for `plans/rs8-bindings-anchors.md` — exposing the
+`anchors` field (added to the core crates in RS-8, PR #169) through both language
+bindings. Source is complete and tested (both bindings' unit/integration suites, the
+`bindings/interop/` cross-language parity suite, and a core-crate fix to
+`Producer::new_version_from` that this work surfaced — see `ASSUMPTIONS.md`'s "anchors
+supersede-settability" entry). **No tag has been pushed and no publish has happened —
+this section is the plan for a human to execute, not a record of something done.**
+
+### Current state (re-verified 2026-08-29, don't trust the numbers below without
+re-checking — this exact drift pattern, an untagged `workflow_dispatch` publish
+leaving `git tag` behind reality, is already why this runbook exists)
+
+| Artifact | Latest git tag | Actually live | Committed manifest |
+|---|---|---|---|
+| `acdp` (PyPI) | `acdp-py-v0.8.1` | **`0.8.2`** (verified via `pypi.org/pypi/acdp/json`) | `bindings/acdp-py/Cargo.toml`: `0.8.0` (stale either way — irrelevant to publish, see below) |
+| `@agentcontextdistributionprotocol/acdp` (npm) | `acdp-node-v0.8.2` | `0.8.2` (verified via `registry.npmjs.org`) | `bindings/acdp-node/package.json`: `0.8.0` (same) |
+
+The git tag for `acdp-py` understates reality by one patch version — a `0.8.2` was
+published to PyPI without a matching tag ever being pushed, the exact pattern this
+runbook's "Why this exists" section describes. This doesn't block anything below; it
+just means the target version is computed from the **live registry**, not from `git
+tag`.
+
+Neither committed manifest (`Cargo.toml`/`package.json`) needs to change before
+tagging — confirmed for both workflows, not assumed: `bindings-release.yml`'s and
+`acdp-py-release.yml`'s "Stamp release version" steps both compute the published
+version as `${{ inputs.version }}` (dispatch) or `${GITHUB_REF_NAME#acdp-*-v}` (tag
+push), then overwrite the manifest file at build time — the committed value is never
+read. Only the `CHANGELOG.md` entries need to already exist (they do — see the
+`## Unreleased` sections in both `bindings/acdp-py/CHANGELOG.md` and
+`bindings/acdp-node/CHANGELOG.md`).
+
+### Target versions
+
+Following the precedent set by RS-8's own core-crate release (`0.8.1` → `0.8.2`, a
+**patch** bump for the same purely-additive, non-breaking `anchors` field): both
+bindings go from their live `0.8.2` to **`0.8.3`**. This happens to restore py/node
+lock-step (both currently live at `0.8.2`, matching for once) — a side effect, not a
+guarantee this holds for the *next* release after this one.
+
+### Steps
+
+1. **Dry-run first, both workflows**, to catch a build break before it's irreversible:
+   ```bash
+   gh workflow run acdp-py-release.yml --ref feat/rs8-bindings-anchors -f dry_run=true -f version=0.8.3
+   gh workflow run bindings-release.yml --ref feat/rs8-bindings-anchors -f dry_run=true -f version=0.8.3
+   ```
+   Wait for both to go green (`gh run watch <id> --exit-status` or `gh run list
+   --workflow=<name> --limit 1`) before continuing. If either fails, fix and re-dry-run
+   — do not proceed to a real tag push on a red dry run.
+   Note: dispatch this against `feat/rs8-bindings-anchors` only until it merges to
+   `main`; once merged, dispatch (and the real tag, below) should point at `main`.
+2. **Push the real tags**, once merged to `main` and both dry runs are green:
+   ```bash
+   git tag -a acdp-py-v0.8.3 -m "acdp-py v0.8.3" <main-HEAD-sha>
+   git tag -a acdp-node-v0.8.3 -m "acdp-node v0.8.3" <main-HEAD-sha>
+   git push origin acdp-py-v0.8.3 acdp-node-v0.8.3
+   ```
+   Each push triggers its workflow for real (`if: github.event_name == 'push'` skips
+   the `dry_run` gate entirely — a tag push always publishes).
+3. **Verify live**, the same way the earlier 0.8.2 npm incident was diagnosed in this
+   family's history — don't trust the packument/listing endpoint alone (it can lag);
+   check the versioned endpoint directly:
+   ```bash
+   curl -s -H "User-Agent: acdp-rs-session (you@example.com)" https://pypi.org/pypi/acdp/0.8.3/json | head -c 200
+   curl -s -H "User-Agent: acdp-rs-session (you@example.com)" https://registry.npmjs.org/@agentcontextdistributionprotocol/acdp/0.8.3
+   ```
+   For npm specifically, also confirm the 4 platform packages
+   (`acdp-darwin-arm64`/`acdp-darwin-x64`/`acdp-linux-x64-gnu`/`acdp-linux-arm64-gnu`)
+   published at `0.8.3` too, not just the root loader package — the `bindings-release.yml`
+   `publish` job runs `napi pre-publish` (platform packages) and `npm publish` (root) as
+   two separate steps; a partial success there is a known past failure mode for this
+   pipeline (napi-cli 3.x's `--gh-release` default caused exactly this on the 0.8.2
+   release — since fixed, but worth an explicit check here rather than assuming).
+4. **H11 reminder**: if step 1's dry run or step 2's tag push needs a re-run for any
+   reason, do NOT re-push a tag for a version that already published successfully —
+   npm/PyPI reject the republish (harmless 403, per this family's own incident history)
+   but it's a wasted, alarming red CI run. Bump to the next patch instead if a real
+   do-over is needed.
+
 ## Coordination note for SPEC-11 (`docs/version-matrix.md` refresh, spec repo)
 
 This is a **read**, not an edit — `docs/version-matrix.md` lives in the spec repo

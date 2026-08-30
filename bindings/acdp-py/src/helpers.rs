@@ -1,6 +1,6 @@
 //! Small shared conversions used by both `producer.rs` and `verifier.rs`.
 
-use acdp::types::{ContextType, DataPeriod, DataRef, LineageId, Visibility};
+use acdp::types::{AnchorEntry, ContextType, DataPeriod, DataRef, LineageId, Visibility};
 use chrono::{DateTime, Utc};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -33,6 +33,16 @@ pub(crate) fn parse_visibility(s: &str) -> PyResult<Visibility> {
 pub(crate) fn parse_data_refs(s: &str) -> PyResult<Vec<DataRef>> {
     serde_json::from_str(s)
         .map_err(|e| PyValueError::new_err(format!("invalid data_refs JSON: {e}")))
+}
+
+/// Parse a JSON-encoded `AnchorEntry[]` string into the typed vector
+/// (RFC-ACDP-0016). Each element MUST satisfy the `acdp-anchor-entry`
+/// schema; serde applies the same field validation Rust callers get.
+/// Semantic validation (scheme format, content_hash parseability, the
+/// `MAX_ANCHORS` cap) happens downstream in `RequestBuilder::build()`,
+/// not here — this only rejects malformed JSON.
+pub(crate) fn parse_anchors(s: &str) -> PyResult<Vec<AnchorEntry>> {
+    serde_json::from_str(s).map_err(|e| PyValueError::new_err(format!("invalid anchors JSON: {e}")))
 }
 
 /// Parse a JSON-encoded `{ "start": <rfc3339>, "end": <rfc3339> }`
