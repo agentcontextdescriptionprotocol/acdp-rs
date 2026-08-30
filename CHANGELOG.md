@@ -97,6 +97,12 @@ require-mode conformance run at the pin bumped by RS-3 (#159).
 
 - unify the whole ecosystem to 0.8.0 and auto-release the SDKs ([#127](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/127))
 
+## [0.6.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.6.1...acdp-v0.6.2) - 2026-07-10
+
+### Added
+
+- *(server)* publish_pinned_verified_in_tenant for operator-pinned keys ([#116](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/116))
+
 ## [0.6.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.5.3...acdp-v0.6.1) - 2026-07-09
 
 ### Added

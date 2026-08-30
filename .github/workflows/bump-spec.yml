@@ -15,3 +15,104 @@ jobs:
       file: .github/workflows/ci.yml
       sha: ${{ github.event.inputs.sha }}
     secrets: inherit
+  # bump-spec-ref.yml@v1 (the reusable workflow `bump` above calls) names its PR
+  # branch solely from the target SHA (`deps/spec-<sha:0:12>`), with no `file`
+  # component. Calling it a second time for bindings.yml at the same SHA would
+  # collide on that branch name — its own "branch already open?" check would find
+  # `bump`'s branch already pushed and silently skip bindings.yml's rewrite and PR
+  # entirely (confirmed by reading acdp-ci's bump-spec-ref.yml@v1 source directly).
+  # So bindings.yml's bump is a small inline job instead, using its own
+  # distinctly-named branch to guarantee no collision — landing as its own
+  # separate, human-reviewed PR.
+  bump-bindings:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Mint GitHub App token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.ACDP_BOT_APP_ID }}
+          private-key: ${{ secrets.ACDP_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app.outputs.token }}
+
+      # Narrow race: on a blank manual workflow_dispatch (no explicit sha), this
+      # step resolves spec HEAD via its own API call. If a second spec commit
+      # lands between this job's HEAD lookup and any other bump job's, the two
+      # could independently resolve to different SHAs. Genuinely narrow (the
+      # reusable bump-spec-ref.yml@v1 workflow exposes no workflow_call outputs
+      # to chain against, so there's no clean fix here) — mitigate operationally
+      # by passing an explicit sha on manual dispatch when this matters.
+      - name: Resolve target SHA + current pin
+        id: v
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          INSHA: ${{ github.event.inputs.sha }}
+          EVSHA: ${{ github.event.client_payload.sha }}
+        run: |
+          set -euo pipefail
+          SHA="${EVSHA:-$INSHA}"
+          [ -n "$SHA" ] || SHA=$(gh api repos/agentcontextdistributionprotocol/agentcontextdistributionprotocol/commits/HEAD --jq .sha)
+          CUR=$(awk '/repository: agentcontextdistributionprotocol\/agentcontextdistributionprotocol/{f=1;next} f&&match($0,/[0-9a-f]{40}/){print substr($0,RSTART,RLENGTH);exit}' .github/workflows/bindings.yml)
+          ANCHOR_COUNT=$(awk '/repository: agentcontextdistributionprotocol\/agentcontextdistributionprotocol/{c++} END{print c+0}' .github/workflows/bindings.yml)
+          if [ "$ANCHOR_COUNT" -gt 1 ]; then
+            echo "::error file=.github/workflows/bindings.yml::bump-bindings: found $ANCHOR_COUNT spec-pin anchors — this job only rewrites the first and would silently leave the rest stale. Bump the others by hand in the same PR." >&2
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "cur=$CUR" >> "$GITHUB_OUTPUT"
+          echo "branch=deps/spec-bindings-${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          if [ "$SHA" = "$CUR" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Branch already open?
+        if: ${{ steps.v.outputs.changed == 'true' }}
+        id: br
+        env:
+          BRANCH: ${{ steps.v.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rewrite bindings.yml's pinned spec ref
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          SHA: ${{ steps.v.outputs.sha }}
+        run: |
+          set -euo pipefail
+          perl -0777 -i -pe 'my $sha = $ENV{SHA}; s{(repository:\s*agentcontextdistributionprotocol/agentcontextdistributionprotocol.*?\bref:\s*)[0-9a-f]{7,40}}{$1$sha}s' .github/workflows/bindings.yml
+          NEW=$(awk '/repository: agentcontextdistributionprotocol\/agentcontextdistributionprotocol/{f=1;next} f&&match($0,/[0-9a-f]{40}/){print substr($0,RSTART,RLENGTH);exit}' .github/workflows/bindings.yml)
+          if [ "$NEW" != "$SHA" ]; then
+            echo "::error file=.github/workflows/bindings.yml::bump-bindings: rewrite did not land — expected ref $SHA, found '${NEW:-<none>}'" >&2
+            exit 1
+          fi
+
+      - name: Open PR (held for review — never auto-merged)
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BR: ${{ steps.v.outputs.branch }}
+          SHA: ${{ steps.v.outputs.sha }}
+          SHORT: ${{ steps.v.outputs.short }}
+          CUR: ${{ steps.v.outputs.cur }}
+        run: |
+          set -euo pipefail
+          git config user.name 'acdp-deps-bot[bot]'
+          git config user.email '${{ steps.app.outputs.app-slug }}[bot]@users.noreply.github.com'
+          git checkout -b "$BR"
+          git add .github/workflows/bindings.yml
+          git commit -m "chore(spec): bump bindings.yml pinned ACDP spec ref to $SHORT"
+          git push -u origin "$BR"
+          gh pr create --base "$GITHUB_REF_NAME" --head "$BR" \
+            --title "chore(spec): sync bindings.yml spec pin to $SHORT" \
+            --body "Companion bump to keep bindings.yml's acdp-wasm golden-parity job pinned to the same spec commit as ci.yml ($(printf %.7s "$CUR") -> $SHORT). Opened as a separate PR because acdp-ci's bump-spec-ref.yml@v1 names its PR branch from the SHA alone, so a second call for this file at the same SHA would collide on ci.yml's branch. Conformance CI re-runs on this PR -- review before merging. https://github.com/agentcontextdistributionprotocol/agentcontextdistributionprotocol/commit/$SHA"
