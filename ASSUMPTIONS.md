@@ -217,3 +217,32 @@
   the one item from this wave's batch that most warrants a deliberate look before/at the
   next crate release, since it changes wire output for every default-configured producer
   across the family, not just this repo.
+
+## anchors supersede-settability (RS-8 binding follow-up)
+- **Plan:** plans/rs8-bindings-anchors.md
+- **Assumed:** the plan's Open Question 1 had no explicit spec answer for whether
+  `anchors` should be settable on a supersession request, only that a clearly-best
+  default existed and was cheap to reverse.
+- **Chose:** exposed `anchors` on both `build_publish_request`/`buildPublishRequest`
+  AND `build_supersede_request`/`buildSupersedeRequest`, in both `bindings/acdp-py`
+  (`PyAcdpProducer`/`PyAcdpP256Producer`) and `bindings/acdp-node` (`PublishOpts`/
+  `SupersedeOpts`) — mirroring `data_refs`'s treatment (JSON-parsed, available on both
+  publish and supersede), not `derived_from`'s (publish-only, excluded from supersede).
+  Reasoning: anchors are external evidence tied to *this version's* content (a
+  blockchain/timestamping commitment over the current body), not an immutable
+  lineage fact fixed at first publish — so a later version legitimately needs its own,
+  different anchors, same as it needs its own `data_refs`.
+- **Alternatives:** publish-only exposure (mirroring `derived_from`) — rejected because
+  anchors describe per-version content evidence, not lineage provenance, so restricting
+  it to publish-only would block a legitimate supersede use case (re-anchoring a
+  corrected or updated version) for no protocol reason; the core `RequestBuilder`
+  itself imposes no such restriction (`anchors()` is available in every builder state).
+- **Blast radius if wrong:** low and cheaply reversible — this is a pre-1.0, previously
+  entirely-absent binding parameter (RS-8's core work never touched either binding), so
+  removing `anchors` from `SupersedeOpts`/`apply_supersede_fields` later is a normal,
+  expected kind of binding-surface change, not a breaking-contract event. No wire format,
+  schema, or core-crate API is affected either way — this is purely which FFI methods
+  accept the parameter.
+- **Status:** CONFIRMED (2026-08-30) — see DECISIONS.md for the full reconciliation
+  record, including two follow-up fixes (clear-anchors capability, an unrelated
+  `BODY_FIELD_NAMES` gap) that landed in the same PR as a result.

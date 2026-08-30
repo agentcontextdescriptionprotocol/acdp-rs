@@ -5,6 +5,27 @@ Independently versioned from the Rust crates (this package is
 in lock-step with the Python SDK (`bindings/acdp-py`) — the interop
 suite fails if the two versions or API surfaces drift.
 
+## Unreleased
+
+### Added
+
+- **`anchors`** (RFC-ACDP-0016): `PublishOpts` and `SupersedeOpts` (used
+  by `buildPublishRequest`/`buildSupersedeRequest` on both
+  `AcdpProducer` and `AcdpP256Producer`) gain a new optional `anchors`
+  field — a JSON-encoded array of `{scheme, content_hash, uri?, ...extensions}`
+  objects, following the same JSON-string-in / JSON-string-out
+  convention as `dataRefs`. Semantic validation (scheme format,
+  content-hash shape, the `MAX_ANCHORS` cap) is enforced by the
+  existing core `RequestBuilder::build()` path, not re-implemented in
+  this binding. Verified: the field participates in the `content_hash`
+  preimage exactly like `dataRefs` (round-trips through
+  `AcdpVerifier.verifyContentHash`). `SupersedeOpts` also gains a
+  `clearAnchors` boolean field (takes precedence over `anchors`,
+  mirroring `omitAcdpVersion`'s precedence over `acdpVersion`) — the
+  only way to produce a version with no anchors after a previous
+  version had some, since omitting `anchors` carries the old value
+  forward and an empty array is rejected by the absent-when-empty rule.
+
 ## 0.7.0 — 2026-07-05
 
 ACDP 0.4 transparency-log **witness cosignatures** (RFC-ACDP-0015),
