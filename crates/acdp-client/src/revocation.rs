@@ -21,7 +21,7 @@ use acdp_did::WebResolver;
 use acdp_primitives::error::AcdpError;
 use acdp_types::body::Body;
 use acdp_types::primitives::AgentDid;
-use acdp_types::revocation::{effective_boundary, KeyRevocation};
+use acdp_types::revocation::{effective_boundary, KeyRevocation, RevocationTrustClass};
 use acdp_types::search::SearchParamsBuilder;
 use acdp_verify::Verifier;
 use chrono::{DateTime, Utc};
@@ -137,32 +137,125 @@ pub async fn verify_revocation_body(
 /// (RFC-ACDP-0014 §8): search `type=key-revocation` (and the §10
 /// interim `acdp:key-revocation`) with `agent_id=<producer>`, retrieve
 /// each match, and return the ones that verify per §5
-/// ([`verify_revocation_body`]). Candidates that fail verification —
-/// including self-signed "revocations", which are at most a hint (§5
-/// step 2) — are skipped, not errors. Superseded revocations are
-/// queried too: the §4 earliest-boundary rule needs the whole lineage.
+/// ([`verify_revocation_body`]) **and** that satisfy two additional
+/// invariants enforced client-side, neither of which the registry can
+/// be trusted to have applied:
 ///
-/// **The honest caveat (§8):** search is served by the registry, and a
-/// malicious registry can hide a revocation exactly as it can hide any
-/// context — an empty result is *not* evidence of absence, and a
-/// registry colluding with a key thief can serve the stolen key's
-/// contexts while suppressing this signal. Within the protocol the
-/// systemic mitigation is the RFC-ACDP-0009 §2.11 append-only
-/// transparency log (RFC-ACDP-0012); until it is deployed, query more
-/// than one vantage where the stakes warrant it, and remember that
-/// revocations are self-contained signed contexts — out-of-band
-/// delivery verifies identically and is the one channel a registry
-/// cannot suppress.
+/// 1. `KeyRevocation::publisher == agent_id` (exact byte match — see
+///    below) — the query's own scope. `resp.matches` is registry-
+///    supplied and is re-checked here rather than trusted: a hostile
+///    registry could otherwise return a context belonging to a
+///    different producer entirely, and it would verify (§5 covers
+///    signature validity, not query relevance). This is a genuine
+///    cryptographic binding, not merely a registry-trusted one:
+///    `Body.agent_id` is a producer-controlled field, not part of the
+///    RFC-ACDP-0001 §5.7 exclusion set, so it sits inside
+///    ProducerContent — covered by `content_hash` and the producer's
+///    signature. Because [`verify_revocation_body`] runs the full
+///    §5.11 pipeline first, `rev.publisher` read here has already been
+///    verified against that signature, so a hostile registry cannot
+///    forge it — stronger than the Phase 1 `ctx_id` check, which binds
+///    only a registry-assigned field.
+/// 2. `trust_class == RevocationTrustClass::ProducerSigned` — with (1)
+///    enforced, a `RegistryAttested` result here would mean a producer
+///    published a revocation *claiming to speak as the registry*
+///    (`agent_id == publisher == <the queried producer>` while
+///    `revoked_key_controller` differs). RFC-ACDP-0014 §4 makes
+///    `revoked_key_controller` REQUIRED on registry-attested
+///    revocations and, when present, requires it equal `body.agent_id`
+///    on producer-signed ones — so this shape (`agent_id` fixed as the
+///    queried producer, `revoked_key_controller` differing) is illegal
+///    only in the producer-signed case; it is the *mandatory* shape
+///    when `body.agent_id` is genuinely a registry. RFC-ACDP-0014 §13
+///    documents this exact cross-producer forgery and endorses
+///    consumer-local, operational mitigations generally — this
+///    implementation's choice is client-local filtering; §13's own
+///    first-named suggestion is surfacing which DID issued each
+///    acted-upon revocation, which the `tracing` diagnostics below
+///    partially adopt.
+///
+/// Both are required together: (1) alone still admits a producer's own
+/// spec-illegal self-published "registry attestation" (`agent_id` and
+/// `publisher` are the same field, so that check alone can't tell honest
+/// producer-signed apart from self-claimed registry-attested); (2) alone
+/// still admits *another* producer's genuine revocation served by a
+/// hostile or buggy registry that ignored the `agent_id` search filter.
+///
+/// Candidates dropped by either check, or that fail §5 verification
+/// outright — including self-signed "revocations", which are at most a
+/// hint (§5 step 2) — are omitted from the return value: returning a
+/// typed error for one bad or off-scope body would let anyone poison
+/// the whole discovery result for every caller — a cheap DoS on the
+/// very helper meant to defend against DoS. Dropped candidates are not
+/// silent, though: with the `tracing` feature enabled, each one is
+/// surfaced via a `tracing::warn!` recording the publisher, trust
+/// class, and `ctx_id` of the dropped candidate and which filter
+/// dropped it — RFC-ACDP-0014 §13's first-named mitigation,
+/// "surfacing which DID issued each acted-upon revocation." A caller
+/// wanting them in-band, or building without `tracing`, has the
+/// composable primitives directly:
+/// [`RegistryClient::search`](crate::RegistryClient::search),
+/// [`verify_revocation_body`], and [`KeyRevocation::from_body`].
+///
+/// Superseded revocations are queried too: the §4 earliest-boundary
+/// rule needs the whole lineage.
+///
+/// **`agent_id` is matched by exact bytes, not normalized.**
+/// [`AgentDid`] derives `PartialEq` as plain string equality, and
+/// [`AgentDid::parse`] allows uppercase in the method-specific id —
+/// only the DID *method* is constrained to lowercase (a mismatched
+/// case there is rejected with `SchemaViolation`, not normalized) — so
+/// `did:web:Agents.example.com` and `did:web:agents.example.com` are
+/// both schema-valid and unequal here.
+/// Passing an `agent_id` that differs only in case from the one a body
+/// was actually published under means every candidate is dropped by
+/// filter (1) and this function returns `Ok(vec![])` — a silent "no
+/// revocations found", indistinguishable from the honest empty case.
+/// Pass the exact DID bytes the producer publishes under (e.g. from a
+/// verified body's `agent_id`, not a hand-typed or config-sourced
+/// variant). `agent_id` is schema-parsed at entry so a malformed DID
+/// fails loudly instead of silently returning empty.
+///
+/// **The honest caveat (§8), unchanged by the above:** search is served
+/// by the registry, and a malicious registry can hide a revocation
+/// exactly as it can hide any context — an empty result is *not*
+/// evidence of absence, and a registry colluding with a key thief can
+/// serve the stolen key's contexts while suppressing this signal.
+/// Within the protocol the systemic mitigation is the RFC-ACDP-0009
+/// §2.11 append-only transparency log (RFC-ACDP-0012); until it is
+/// deployed, query more than one vantage where the stakes warrant it,
+/// and remember that revocations are self-contained signed contexts —
+/// out-of-band delivery verifies identically and is the one channel a
+/// registry cannot suppress.
+///
+/// **No independent binding of the returned `ctx_id`.** Each result is
+/// retrieved by the `ctx_id` the search response named; nothing here
+/// re-derives or independently confirms that id. The publisher filter
+/// above catches a registry substituting a *different producer's*
+/// revocation, but a registry that returns `agent_id`'s own *wrong*
+/// revocation body for a listed `ctx_id` is not detected by this
+/// function. That is benign today only because the §4 earliest-`T`
+/// rule makes any genuine revocation of `agent_id` conservative to
+/// apply regardless of which one is returned — a future reader must
+/// not assume the id-to-body binding is actually checked.
 ///
 /// Registry-attested revocations (§6) are published under the
 /// *registry's* DID, not the producer's, so this producer-scoped query
-/// does not find them — search the registry's own `agent_id` and match
+/// never returns them (filter 2 above, in addition to the search scope
+/// itself) — search the registry's own `agent_id` and match
 /// `revoked_key_controller` client-side for those.
 pub async fn find_revocations(
     client: &RegistryClient,
     resolver: &WebResolver,
     agent_id: &AgentDid,
 ) -> Result<Vec<KeyRevocation>, AcdpError> {
+    // Schema-validate the caller's DID before it is promoted from an
+    // opaque search-filter string into an equality operand (filter 1
+    // below) — see the exact-byte-match caveat in the doc above. This
+    // does not normalize case; it only rejects a malformed DID loudly
+    // instead of silently yielding an empty result.
+    let agent_id = AgentDid::parse(agent_id.as_str())?;
+
     let mut revocations = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -184,7 +277,28 @@ pub async fn find_revocations(
                     }
                     let ctx = client.retrieve(&m.ctx_id).await?;
                     if let Ok(rev) = verify_revocation_body(&ctx.body, resolver).await {
-                        revocations.push(rev);
+                        // Re-check query scope and trust class on the
+                        // verified body — do not trust `resp.matches`,
+                        // and do not accept a producer claiming to be
+                        // a registry (RFC-ACDP-0014 §4, §13).
+                        if rev.publisher == agent_id
+                            && rev.trust_class == RevocationTrustClass::ProducerSigned
+                        {
+                            revocations.push(rev);
+                        } else {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                publisher = %rev.publisher,
+                                trust_class = ?rev.trust_class,
+                                ctx_id = %m.ctx_id,
+                                filter = if rev.publisher != agent_id {
+                                    "publisher_scope"
+                                } else {
+                                    "trust_class"
+                                },
+                                "find_revocations: dropped candidate outside query scope/trust class"
+                            );
+                        }
                     }
                 }
                 match resp.next_cursor {

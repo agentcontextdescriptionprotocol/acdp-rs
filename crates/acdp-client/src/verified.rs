@@ -95,6 +95,12 @@ impl Default for VerificationPolicy {
 /// registry-attested ones ([`RevocationTrustClass::RegistryAttested`](acdp_types::revocation::RevocationTrustClass))
 /// by default only for contexts served by or receipted by that same
 /// registry, with corroboration before global application.
+///
+/// [`find_revocations`](crate::revocation::find_revocations) itself
+/// pre-filters its output to [`RevocationTrustClass::ProducerSigned`]
+/// entries actually published by the queried producer, so §6
+/// registry-attested attestations never arrive through it — obtain
+/// those only from the separate registry-scoped query it documents.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RevocationPolicy {
     /// Verified revocations to enforce, matched against the signing
