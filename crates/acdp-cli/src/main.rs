@@ -177,6 +177,7 @@ fn classify(e: &AcdpError) -> &'static str {
         AcdpError::UnsupportedAlgorithm(_) => "unsupported_algorithm",
         AcdpError::RateLimited(_) => "rate_limited",
         AcdpError::Http(_) => "http_error",
+        AcdpError::ContextIdMismatch { .. } => "context_id_mismatch",
         _ => "internal_error",
     }
 }
@@ -219,7 +220,8 @@ async fn cmd_retrieve(rest: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("`retrieve` requires <ctx_id>".into()))?;
     let client = registry_client(url)?;
     let resolver = WebResolver::new();
-    let ctx = VerifiedContext::fetch(&client, &resolver, &CtxId(id.clone())).await?;
+    let ctx_id = CtxId::parse(id.clone())?;
+    let ctx = VerifiedContext::fetch(&client, &resolver, &ctx_id).await?;
     println!("{}", serde_json::to_string_pretty(ctx.full_context())?);
     Ok(())
 }
@@ -232,7 +234,8 @@ async fn cmd_body(rest: &[String]) -> Result<(), CliError> {
         .get(1)
         .ok_or_else(|| CliError::Usage("`body` requires <ctx_id>".into()))?;
     let client = registry_client(url)?;
-    let body = client.retrieve_body(&CtxId(id.clone())).await?;
+    let ctx_id = CtxId::parse(id.clone())?;
+    let body = client.retrieve_body(&ctx_id).await?;
     println!("{}", serde_json::to_string_pretty(&body)?);
     Ok(())
 }
@@ -741,7 +744,8 @@ async fn cmd_resolve(rest: &[String]) -> Result<(), CliError> {
         resolver = resolver.with_max_depth(d);
     }
 
-    let root = resolver.resolve(&CtxId(id.clone())).await?;
+    let ctx_id = CtxId::parse(id.clone())?;
+    let root = resolver.resolve(&ctx_id).await?;
     let ancestors = resolver.walk_derived_from(root.body()).await?;
 
     let mut all: Vec<&Body> = Vec::with_capacity(1 + ancestors.len());
@@ -783,6 +787,15 @@ mod tests {
             ),
             (AcdpError::InvalidReceipt("x".into()), "invalid_receipt"),
             (AcdpError::PayloadTooLarge("x".into()), "payload_too_large"),
+            // Issue #189: a substituted body must not be reported as an
+            // internal error.
+            (
+                AcdpError::ContextIdMismatch {
+                    requested: "a".into(),
+                    served: "b".into(),
+                },
+                "context_id_mismatch",
+            ),
             // A variant not enumerated in classify falls through to the
             // internal-error catch-all.
             (AcdpError::Canonicalization("x".into()), "internal_error"),

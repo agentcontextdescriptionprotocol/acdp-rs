@@ -477,6 +477,52 @@ fn cli_help_lists_new_commands() {
     assert!(stderr.contains("acdp resolve"));
 }
 
+// ── retrieve ─────────────────────────────────────────────────────────────────
+
+/// Phase 3 (issue #189 hardening) — `acdp retrieve` builds its `CtxId`
+/// via `CtxId::parse`, not a raw `CtxId(argv)`, so a malformed id (here:
+/// a non-canonical uppercase authority) fails locally with
+/// `schema_violation` before any request reaches the registry. Without
+/// the parse call this would either reach the network for a clean 404
+/// or, after Phases 1-2, surface as a confusing `context_id_mismatch` —
+/// both worse diagnostics for input that is simply malformed.
+#[tokio::test]
+async fn cli_retrieve_rejects_malformed_ctx_id_without_network_request() {
+    let registry = MockServer::start().await;
+    // Deliberately no `Mock::given(...).mount(...)` — any request that
+    // reaches the registry is still recorded in wiremock's request log,
+    // so an empty log after the run proves no network call was made.
+
+    let (code, stdout, stderr) = run_cli(
+        &[
+            "retrieve",
+            &registry.uri(),
+            "acdp://Registry.Example.com/12345678-1234-4321-8123-123456781234",
+        ],
+        None,
+    );
+
+    assert_eq!(
+        code, 2,
+        "malformed ctx_id MUST exit 2 (protocol error) rather than attempt the network; stderr={stderr}, stdout={stdout}"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("retrieve error envelope MUST be JSON");
+    assert_eq!(
+        parsed["error"]["code"], "schema_violation",
+        "malformed ctx_id MUST be diagnosed as schema_violation, not context_id_mismatch or an internal error; got {parsed}"
+    );
+
+    let requests = registry
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    assert!(
+        requests.is_empty(),
+        "malformed ctx_id MUST NOT reach the network: {requests:?}"
+    );
+}
+
 // ── resolve ──────────────────────────────────────────────────────────────────
 
 /// FEAT-05 — `acdp resolve` with no args exits 1 (usage error) and

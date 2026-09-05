@@ -297,14 +297,34 @@ impl VerifiedContext {
     /// strictness.
     ///
     /// 1. Fetches `body + registry_state` from the registry.
-    /// 2. Optionally runs `validate_body` — structural schema checks
+    /// 2. Refuses a served body whose `ctx_id` differs from the one
+    ///    requested (`AcdpError::ContextIdMismatch`) — this implements
+    ///    RFC-ACDP-0006 §4.1 step 7 (NORMATIVE, "Bind the resolved
+    ///    identity"): neither the signature check (step 5) nor the
+    ///    `content_hash` recomputation (step 6) can supply this binding,
+    ///    because `ctx_id` sits in the RFC-ACDP-0001 §5.7 registry-assigned
+    ///    exclusion set and is therefore stripped from ProducerContent
+    ///    before hashing. See RFC-ACDP-0008 §9.1 for the threat this
+    ///    closes: without it, a registry can serve any other
+    ///    validly-signed body by the same producer under the requested
+    ///    context's URL, and both preceding checks still pass. Step 7
+    ///    permits a consumer to surface "an equivalent typed error" in
+    ///    place of the registry-side `cross_registry_resolution_failed`
+    ///    wire code — `ContextIdMismatch` is that typed error. This
+    ///    generalizes the receipt-path analogue at RFC-ACDP-0010 §8 step 3
+    ///    to the receipt-less core-profile path, where it is the only
+    ///    binding available. It does **not** close §9.1 in full: a
+    ///    registry that genuinely republishes the same content under a
+    ///    new `ctx_id` still passes; only serve-time substitution — a
+    ///    different id claimed to be the one requested — is caught.
+    /// 3. Optionally runs `validate_body` — structural schema checks
     ///    plus embedded-`DataRef` hash verification (policy-controlled).
-    /// 3. Recomputes `content_hash` over ProducerContent.
-    /// 4. Resolves the producer's DID document. `did:web` is required
+    /// 4. Recomputes `content_hash` over ProducerContent.
+    /// 5. Resolves the producer's DID document. `did:web` is required
     ///    unconditionally for v0.1.0 (RFC-ACDP-0001 §5.4).
-    /// 5. Verifies the Ed25519 signature (or other supported algorithm).
-    /// 6. Optionally verifies the `registry_receipt` placeholder.
-    /// 7. Optionally rejects unknown statuses.
+    /// 6. Verifies the Ed25519 signature (or other supported algorithm).
+    /// 7. Optionally verifies the `registry_receipt` placeholder.
+    /// 8. Optionally rejects unknown statuses.
     pub async fn fetch_with_policy(
         client: &RegistryClient,
         resolver: &WebResolver,
@@ -365,6 +385,14 @@ impl VerifiedContext {
     /// beyond `policy.lineage_head.max_age_seconds` is a *freshness*
     /// verdict reported via [`Self::head_receipt_stale`], never a
     /// verification failure (§6).
+    ///
+    /// [`Self::fetch_with_policy`] now additionally refuses a served body
+    /// whose `ctx_id` is not the one requested (RFC-ACDP-0008 §9.1). This
+    /// endpoint has no requested identifier to compare against — the
+    /// served head's `ctx_id` is trivially "the one requested" — so on a
+    /// receipt-less registry the served head's identity rests entirely on
+    /// registry honesty (RFC-ACDP-0008 §9.1). Use [`ReceiptPolicy::Require`]
+    /// where that matters.
     pub async fn fetch_current_with_policy(
         client: &RegistryClient,
         resolver: &WebResolver,
@@ -443,6 +471,26 @@ impl VerifiedContext {
         ),
         AcdpError,
     > {
+        // Identifier binding — RFC-ACDP-0006 §4.1 step 7 (NORMATIVE, "Bind
+        // the resolved identity"): refuse a served body whose `ctx_id`
+        // differs from the one requested, before any crypto or network
+        // work. `ctx_id` is registry-assigned and outside both the
+        // `content_hash` and signature coverage (RFC-ACDP-0001 §5.7's
+        // exclusion set), so this equality check is the only binding
+        // available when no receipt is served. See RFC-ACDP-0008 §9.1 for
+        // the threat this closes; it does not close §9.1 in full (a
+        // genuine republish under a new `ctx_id` still passes — only
+        // serve-time substitution is caught). Step 7 permits a
+        // consumer-side "equivalent typed error" in place of the
+        // registry-side `cross_registry_resolution_failed` wire code —
+        // `ContextIdMismatch` is that typed error.
+        if ctx.body.ctx_id != *expected_ctx_id {
+            return Err(AcdpError::ContextIdMismatch {
+                requested: expected_ctx_id.as_str().to_string(),
+                served: ctx.body.ctx_id.as_str().to_string(),
+            });
+        }
+
         if policy.validate_body_schema {
             acdp_validation::validate_body(&ctx.body)?;
         }
@@ -616,6 +664,7 @@ impl VerifiedContext {
             schema_ok: false,
             data_ref_embedded: Vec::with_capacity(ctx.body.data_refs.len()),
             data_ref_external: Vec::with_capacity(ctx.body.data_refs.len()),
+            ctx_id_ok: ctx.body.ctx_id == *ctx_id,
         };
 
         // Schema (structural) — record pass/fail.
@@ -653,7 +702,8 @@ impl VerifiedContext {
         // Decide whether to surface the verified handle. Report paths
         // run the strict assertionMethod check only (no receipt /
         // historical handling — use `fetch_with_policy` for those).
-        let all_top_level_pass = report.schema_ok && report.body_hash_ok && report.signature_ok;
+        let all_top_level_pass =
+            report.schema_ok && report.body_hash_ok && report.signature_ok && report.ctx_id_ok;
         let verified = if all_top_level_pass {
             Some(Self {
                 inner: ctx,
@@ -689,12 +739,26 @@ impl VerifiedContext {
         fetcher: Option<&F>,
     ) -> Result<(Self, VerificationReport), AcdpError> {
         let ctx = client.retrieve(ctx_id).await?;
+
+        // Identifier binding — RFC-ACDP-0006 §4.1 step 7 (NORMATIVE, "Bind
+        // the resolved identity"). Same check as `verify_retrieved`,
+        // applied here because this path (backing both `fetch_report` and
+        // `fetch_report_with_fetcher`) never calls that function. See its
+        // doc comment for the full rationale.
+        if ctx.body.ctx_id != *ctx_id {
+            return Err(AcdpError::ContextIdMismatch {
+                requested: ctx_id.as_str().to_string(),
+                served: ctx.body.ctx_id.as_str().to_string(),
+            });
+        }
+
         let mut report = VerificationReport {
             body_hash_ok: false,
             signature_ok: false,
             schema_ok: false,
             data_ref_embedded: Vec::with_capacity(ctx.body.data_refs.len()),
             data_ref_external: Vec::with_capacity(ctx.body.data_refs.len()),
+            ctx_id_ok: true,
         };
 
         // Structural-only schema validation — embedded-hash checks are
@@ -828,9 +892,22 @@ impl VerifiedContext {
     /// Standalone variant for contexts obtained via the report paths;
     /// `fetch_with_policy` already does this under
     /// [`ReceiptPolicy::VerifyIfPresent`]/`Require`. The serving
-    /// authority is taken from the context's own `ctx_id` — correct
-    /// when the context was fetched from its home registry, which is
-    /// the only retrieval shape v0.2 defines.
+    /// authority is taken from the context's own `ctx_id` — this method
+    /// performs no requested-id binding of its own (it has no requested
+    /// id to compare against; it only ever sees `self.inner.body.ctx_id`),
+    /// so deriving the serving authority this way is sound only for a
+    /// `VerifiedContext` obtained through a pipeline that already bound
+    /// the served `ctx_id` to the one requested. Every construction path
+    /// does: `fetch_with_policy` and `CrossRegistryResolver::resolve`
+    /// check it directly; `fetch_current_with_policy` does too,
+    /// tautologically, since `/current` has no requested id to diverge
+    /// from; `fetch_report`/`fetch_report_with_fetcher` check it and
+    /// return `ContextIdMismatch` on failure; and `fetch_report_diagnose`
+    /// folds it into its `all_top_level_pass` gate, so it only ever
+    /// hands back `Some(VerifiedContext)` when `ctx_id_ok` held. All of
+    /// these implement RFC-ACDP-0006 §4.1 step 7, so the type invariant
+    /// — every `VerifiedContext` was bound to its requested `ctx_id` —
+    /// holds unconditionally.
     ///
     /// Returns `Ok(None)` when no receipt is present, `Ok(Some(_))`
     /// with the verified receipt otherwise.
@@ -901,6 +978,17 @@ pub struct VerificationReport {
     /// `None` indicates "not attempted" (no fetcher provided or no
     /// `location` to fetch from).
     pub data_ref_external: Vec<Option<Result<usize, AcdpError>>>,
+    /// The served body's `ctx_id` equals the one requested
+    /// (RFC-ACDP-0006 §4.1 step 7, NORMATIVE — "Bind the resolved
+    /// identity"). `false` means the registry served a different,
+    /// validly-signed body under the requested id (context
+    /// substitution); see `VerifiedContext::verify_retrieved`'s doc for
+    /// the full rationale. This flag gates whether
+    /// [`VerifiedContext::fetch_report_diagnose`] hands back a
+    /// `Some(VerifiedContext)` — appended last so any positional
+    /// construction fails loudly rather than silently binding the wrong
+    /// field.
+    pub ctx_id_ok: bool,
 }
 
 /// Sentinel `DataRefFetcher` used as the type parameter for
