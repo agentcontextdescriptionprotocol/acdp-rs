@@ -246,3 +246,46 @@
 - **Status:** CONFIRMED (2026-08-30) — see DECISIONS.md for the full reconciliation
   record, including two follow-up fixes (clear-anchors capability, an unrelated
   `BODY_FIELD_NAMES` gap) that landed in the same PR as a result.
+
+## Byte equality for CtxId comparison in context-identity binding (fed-011)
+- **Plan:** plans/issues-189-191-client-binding-hardening.md
+- **Assumed:** byte equality on `CtxId` satisfies conformance fixture
+  `fed-011-ctx-id-binding.json`'s requirement that ids be "compared as parsed `acdp://`
+  URIs, never as raw strings."
+- **Chose:** derived `PartialEq` byte comparison in `verify_retrieved` and
+  `fetch_report_inner`. This is sound *today* because the `ctx_id` schema
+  (`schemas/json/acdp-common.schema.json:40`) mandates a unique canonical text form —
+  lowercase DNS authority, lowercase v4 UUID — so byte equality and parsed equality
+  coincide for every valid input. The served side is additionally canonicalized by
+  `validate_identifiers` → `CtxId::parse`.
+- **Alternatives:** decomposing both sides into (authority, uuid) and comparing
+  components — rejected as machinery with no behavioural difference under
+  canonical-form uniqueness.
+- **Blast radius if wrong:** if a non-canonical or alias form ever becomes legitimate,
+  byte equality would produce false refusals (fail-closed, so refusing valid resolves
+  rather than accepting invalid ones). Fix would be relaxing the comparison at those two
+  call sites — a pure behaviour change, no API break, since `ContextIdMismatch` already
+  carries both textual forms.
+- **Status:** UNCONFIRMED
+
+## `String` (not `CtxId`) fields on `ContextIdMismatch` — corrected rationale
+- **Plan:** plans/issues-189-191-client-binding-hardening.md
+- **Assumed:** the outcome (`requested`/`served` typed as `String`, not `CtxId`) is
+  correct, but the rationale as shipped — "a `CtxId` field would over-promise that it
+  parsed" — is factually shaky: `CtxId` is an unvalidated `pub String` newtype today, and
+  `ContentHash` in the sibling `HashMismatch` variant is identical in that respect, so the
+  "over-promise" argument cuts against both fields equally and doesn't actually
+  distinguish `ContextIdMismatch`'s choice.
+- **Chose:** the corrected rationale — `requested`/`served` are forensic evidence
+  (attacker-controlled text quoted back to an operator for diagnosis), and `String` stays
+  honest under future hardening: if `CtxId` is later turned into a parse-validated type,
+  a `CtxId` field on this variant would then need a validity bypass to hold a value that,
+  by construction, failed to match what was requested. `String` requires no such escape
+  hatch. No code change — this replaces the comment/doc rationale only.
+- **Alternatives:** leave the original "over-promise" rationale in place (rejected: it is
+  demonstrably not the distinguishing argument, since it applies equally to a field this
+  PR is not questioning); retype the fields as `CtxId` now (out of scope — the task is
+  fixing the rationale, not the type).
+- **Blast radius if wrong:** none — this corrects documentation/reasoning only; the
+  shipped field types (`String`) are unchanged.
+- **Status:** UNCONFIRMED

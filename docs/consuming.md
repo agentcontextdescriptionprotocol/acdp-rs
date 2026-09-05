@@ -208,7 +208,7 @@ transport (e.g. for `s3://` or authenticated origins).
 ## Cross-registry resolution
 
 `CrossRegistryResolver` walks `derived_from` provenance edges across registries,
-following the seven-step algorithm in RFC-ACDP-0006 §4.1 with cycle detection,
+following the eight-step algorithm in RFC-ACDP-0006 §4.1 with cycle detection,
 depth/node/fan-out caps, and a wall-clock budget.
 
 ```rust,no_run
