@@ -117,7 +117,7 @@ jobs:
           # Pinned so a spec-repo push cannot flip this job's result without
           # a commit here. Kept in sync with the pin in ci.yml's conformance
           # job automatically by bump-spec.yml. (main HEAD as of 2026-08-30)
-          ref: 21759799a44c81f55884913d306827b7cc7a01bb
+          ref: d3a34134ea6471aac2622ccaf8c7c7063d8888c5
           path: acdp-spec
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
