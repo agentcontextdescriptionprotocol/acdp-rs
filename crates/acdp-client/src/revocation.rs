@@ -119,8 +119,10 @@ pub fn classify_under_revocation(
 ///
 /// The returned trust class MUST be honored per §6: act on
 /// producer-signed revocations unconditionally; treat registry-attested
-/// ones as the weaker class (verify that `publisher` is in fact the DID
-/// of the registry involved, and corroborate before global use).
+/// ones as the weaker class (confirm `publisher` is in fact the DID of
+/// the registry involved via
+/// [`KeyRevocation::cross_check_registry_binding`], and corroborate
+/// before global use).
 pub async fn verify_revocation_body(
     body: &Body,
     resolver: &WebResolver,
@@ -242,8 +244,7 @@ pub async fn verify_revocation_body(
 /// Registry-attested revocations (§6) are published under the
 /// *registry's* DID, not the producer's, so this producer-scoped query
 /// never returns them (filter 2 above, in addition to the search scope
-/// itself) — search the registry's own `agent_id` and match
-/// `revoked_key_controller` client-side for those.
+/// itself) — call [`find_registry_attested_revocations`] for those.
 pub async fn find_revocations(
     client: &RegistryClient,
     resolver: &WebResolver,
@@ -297,6 +298,167 @@ pub async fn find_revocations(
                                     "trust_class"
                                 },
                                 "find_revocations: dropped candidate outside query scope/trust class"
+                            );
+                        }
+                    }
+                }
+                match resp.next_cursor {
+                    Some(cursor) => params.cursor = Some(cursor),
+                    None => break,
+                }
+            }
+        }
+    }
+    Ok(revocations)
+}
+
+/// Discover a producer's **registry-attested** (§6) key revocations —
+/// the RFC-ACDP-0014 §8 second query that [`find_revocations`]'s own
+/// doc points callers at, since a producer-scoped search structurally
+/// cannot return them (they are published under the *registry's*
+/// `agent_id`, not the producer's).
+///
+/// Fetches the registry's own capabilities document (**exactly once**,
+/// before the search loop — [`RegistryClient::capabilities`] issues a
+/// fresh network round-trip on every call, so hoisting it above the
+/// type-form × status loop bounds total cost to one capabilities fetch
+/// plus up to `2 * MAX_SEARCH_PAGES` search round-trips rather than
+/// one capabilities fetch per candidate), then searches
+/// `agent_id=<capabilities.registry_did>` for `key-revocation` (and the
+/// §10 interim `acdp:key-revocation`) contexts, retrieves each match,
+/// and keeps the ones that:
+///
+/// 1. Verify per §5 ([`verify_revocation_body`]) — schema, hash
+///    recomputation, DID resolution, signature, and the §5 step 2
+///    not-self-signed check;
+/// 2. Name `controller` in `revoked_key_controller` (exact
+///    [`AgentDid`] equality — see [`find_revocations`]'s exact-byte-match
+///    caveat, which applies here identically); and
+/// 3. Pass [`KeyRevocation::cross_check_registry_binding`] against the
+///    authority this client actually talks to and the capabilities
+///    document just fetched — RFC-ACDP-0014 §6 step 2 (`publisher`
+///    must equal `capabilities.registry_did`) plus the RFC-ACDP-0011
+///    §7 step 3 / RFC-ACDP-0012 §9.3 step 3 house binding (`publisher`
+///    must equal `did:web:<serving_authority>`), confirming that
+///    `publisher` really is the specific registry this client is
+///    talking to, not merely *some* identity that appears in the
+///    search response claiming registry standing over `controller`'s
+///    key.
+///
+///    This function is what closes the *discovery* gap
+///    [`find_revocations`]'s trust-class filter opened: that filter
+///    excludes registry-attested revocations from its results
+///    entirely (by design — a producer-scoped search cannot
+///    distinguish a genuine one from a forgery), so without a
+///    dedicated registry-scoped query a caller would never see a
+///    genuine one at all. Filter (3) here then narrows *this*
+///    function's own results — and narrows a different thing than it
+///    might look like: it does **not** stop a producer forging a
+///    registry attestation of its own key by setting `agent_id` to the
+///    registry's DID. That forgery is already impossible one step
+///    earlier — [`verify_revocation_body`] runs `Verifier::verify_body`,
+///    which resolves `body.agent_id`'s DID document and verifies the
+///    signature against it, so a body claiming `agent_id = <registry
+///    DID>` cannot exist unless the registry's own key actually signed
+///    it. What filter (3) actually rejects is a **genuinely signed
+///    body published under some third DID** — another registry, or a
+///    producer emitting the §4-illegal `agent_id=Q,
+///    revoked_key_controller=P` shape — that a hostile or compromised
+///    registry lists in the `agent_id=<registry_did>` search response
+///    it serves to this client. That is the exact analog of
+///    [`find_revocations`]'s filter 1, and it is real and load-bearing:
+///    without it, this function would trust `publisher` merely because
+///    *some* validly-signed body appeared among the search results,
+///    rather than confirming it is signed by the one registry this
+///    client actually talks to.
+///
+/// As with [`find_revocations`], candidates dropped by (2) or (3), or
+/// that fail §5 outright, are omitted rather than surfaced as errors —
+/// a single bad or off-scope body must not poison the whole discovery
+/// result. With the `tracing` feature enabled, each drop is logged via
+/// `tracing::warn!` naming the publisher, controller, and `ctx_id`.
+///
+/// **Propagates, rather than swallows, a `capabilities()` error.**
+/// `CapabilitiesDocument.registry_did` is a required, non-`Option`
+/// `String` with no `#[serde(default)]`
+/// (`crates/acdp-types/src/capabilities.rs`), and
+/// [`RegistryClient::capabilities`] runs
+/// `acdp_validation::validate_capabilities` — which parses it with
+/// [`acdp_types::primitives::AgentDid::parse_web`] — before returning.
+/// A registry that omits `registry_did` fails deserialization; one
+/// sending `""` or a non-`did:web` value fails `parse_web`. Either way
+/// `capabilities()` already returns `Err`, so there is no "missing
+/// `registry_did`" state for this function to special-case — it simply
+/// propagates whatever `capabilities()` returns via `?`, rather than
+/// mapping a failure into a silent empty vec.
+///
+/// **The same §8 honest caveat as [`find_revocations`] applies**: search
+/// is registry-served, so an empty result is not evidence of absence.
+///
+/// **Cost note for callers verifying many contexts.** The single
+/// capabilities fetch above is hoisted *within* one call, but
+/// [`RegistryClient::capabilities`] issues a fresh network round-trip
+/// on every call to *this* function too — nothing here caches it across
+/// calls. A caller verifying many contexts against the same registry in
+/// a loop should hoist its own call to this function (or to
+/// `capabilities()` directly) above that loop rather than calling it
+/// once per context. An overload taking a pre-fetched capabilities
+/// document can be added additively later if that turns out to matter
+/// in practice.
+pub async fn find_registry_attested_revocations(
+    client: &RegistryClient,
+    resolver: &WebResolver,
+    controller: &AgentDid,
+) -> Result<Vec<KeyRevocation>, AcdpError> {
+    let controller = AgentDid::parse(controller.as_str())?;
+
+    // Fetched exactly once, outside the type-form × status loop below —
+    // see the doc above for why hoisting this is required, not
+    // stylistic.
+    let caps = client.capabilities().await?;
+    let registry_agent_id = AgentDid::parse(caps.registry_did.as_str())?;
+    let serving_authority = client
+        .authority()
+        .ok_or_else(|| AcdpError::SchemaViolation("registry client base URL has no host".into()))?;
+
+    let mut revocations = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for type_form in ["key-revocation", "acdp:key-revocation"] {
+        // Revocations are permanent but supersedable; the registry
+        // defaults search to status=active, so ask for both explicitly.
+        for status in ["active", "superseded"] {
+            let mut params = SearchParamsBuilder::new()
+                .context_type(type_form)
+                .agent_id(registry_agent_id.as_str())
+                .status(status)
+                .limit(100)
+                .build();
+            for _page in 0..MAX_SEARCH_PAGES {
+                let resp = client.search(&params).await?;
+                for m in &resp.matches {
+                    if !seen.insert(m.ctx_id.as_str().to_string()) {
+                        continue;
+                    }
+                    let ctx = client.retrieve(&m.ctx_id).await?;
+                    if let Ok(rev) = verify_revocation_body(&ctx.body, resolver).await {
+                        if rev.revoked_key_controller == controller
+                            && rev
+                                .cross_check_registry_binding(
+                                    &serving_authority,
+                                    &caps.registry_did,
+                                )
+                                .is_ok()
+                        {
+                            revocations.push(rev);
+                        } else {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                publisher = %rev.publisher,
+                                controller = %rev.revoked_key_controller,
+                                ctx_id = %m.ctx_id,
+                                "find_registry_attested_revocations: dropped candidate \
+                                 outside controller scope or failing registry-binding check"
                             );
                         }
                     }

@@ -73,10 +73,11 @@ impl Default for VerificationPolicy {
 /// The revocation signal is **pull-based**: the pipeline does not go
 /// looking for revocations on its own — the caller supplies the
 /// **verified** revocations it holds (from
-/// [`find_revocations`](crate::revocation::find_revocations), an
-/// out-of-band channel, or its own indefinite cache — the statement is
-/// permanent, cache accordingly). When `known` is empty the phase is
-/// inert and verification behaves exactly as before RFC-ACDP-0014.
+/// [`find_revocations`](crate::revocation::find_revocations),
+/// [`find_registry_attested_revocations`](crate::revocation::find_registry_attested_revocations),
+/// an out-of-band channel, or its own indefinite cache — the statement
+/// is permanent, cache accordingly). When `known` is empty the phase
+/// is inert and verification behaves exactly as before RFC-ACDP-0014.
 ///
 /// When the body's signing key matches a supplied revocation, §7
 /// applies: a receipt-attested publish time strictly before the
@@ -97,10 +98,12 @@ impl Default for VerificationPolicy {
 /// registry, with corroboration before global application.
 ///
 /// [`find_revocations`](crate::revocation::find_revocations) itself
-/// pre-filters its output to [`RevocationTrustClass::ProducerSigned`]
+/// pre-filters its output to [`RevocationTrustClass::ProducerSigned`](acdp_types::revocation::RevocationTrustClass)
 /// entries actually published by the queried producer, so §6
 /// registry-attested attestations never arrive through it — obtain
-/// those only from the separate registry-scoped query it documents.
+/// those from
+/// [`find_registry_attested_revocations`](crate::revocation::find_registry_attested_revocations)
+/// instead.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RevocationPolicy {
     /// Verified revocations to enforce, matched against the signing

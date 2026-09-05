@@ -1143,8 +1143,11 @@ async fn find_revocations_returns_only_verified() {
 /// which producer identity signs it and is served under, and the
 /// body's own metadata.
 struct Candidate {
-    /// DID path segment: the body publishes under, and its DID
-    /// document is served at, `did:web:localhost:<path>`.
+    /// DID path segment: for every non-empty path, the body publishes
+    /// under, and its DID document is served at,
+    /// `did:web:localhost:<path>`. The empty path is the one exception
+    /// (see [`candidate_did`] / [`candidate_did_route`]): it resolves
+    /// instead to [`REGISTRY_DID`], served at `/.well-known/did.json`.
     path: &'static str,
     /// The producer's Ed25519 signing-key seed for that path.
     seed: [u8; 32],
@@ -1152,10 +1155,34 @@ struct Candidate {
     metadata: serde_json::Value,
 }
 
-/// Shared harness for the `find_revocations` query-scope tests
-/// (extracted so the three cases below don't each clone the ~130-line
-/// registry + DID + search setup `find_revocations_returns_only_verified`
-/// uses inline).
+/// DID a `candidate.path` publishes under: the empty path is the
+/// registry's own bare DID ([`REGISTRY_DID`], no path component) — used
+/// by the §6/§8 registry-attested-discovery tests, which need a
+/// candidate published under the registry's own identity rather than
+/// under `did:web:localhost:<path>`.
+fn candidate_did(path: &str) -> String {
+    if path.is_empty() {
+        REGISTRY_DID.to_string()
+    } else {
+        format!("did:web:localhost:{path}")
+    }
+}
+
+/// The DID-document route path for `candidate_did(path)`: the bare
+/// registry DID resolves at the well-known path; every other candidate
+/// at its own path segment.
+fn candidate_did_route(path: &str) -> String {
+    if path.is_empty() {
+        "/.well-known/did.json".to_string()
+    } else {
+        format!("/{path}/did.json")
+    }
+}
+
+/// Shared harness for the `find_revocations` / `find_registry_attested_revocations`
+/// query-scope tests (extracted so the six cases below don't each clone
+/// the ~130-line registry + DID + search setup
+/// `find_revocations_returns_only_verified` uses inline).
 ///
 /// Publishes every `candidate` as a genuine, real-hash, real-signature
 /// `key-revocation` body — so §5 verification is the thing under test,
@@ -1169,8 +1196,13 @@ struct Candidate {
 async fn discover_with_candidates(
     search_agent_id: &str,
     candidates: &[Candidate],
-) -> (RegistryClient, WebResolver) {
+) -> (
+    RegistryClient,
+    WebResolver,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Distinct producer identities among the candidates — same path
     // MUST mean same seed here (single-producer contexts multi-published
@@ -1193,9 +1225,9 @@ async fn discover_with_candidates(
     let mut did_router = Router::new();
     for (&path, seed) in &producers {
         let pub_key = SigningKey::from_bytes(seed).verifying_key_bytes();
-        let doc = ed25519_did_doc(&format!("did:web:localhost:{path}"), "key-1", &pub_key);
+        let doc = ed25519_did_doc(&candidate_did(path), "key-1", &pub_key);
         did_router = did_router.route(
-            &format!("/{path}/did.json"),
+            &candidate_did_route(path),
             get(move || {
                 let doc = doc.clone();
                 async move { Json(doc) }
@@ -1213,7 +1245,7 @@ async fn discover_with_candidates(
     let mut matches = Vec::new();
     let mut contexts: HashMap<String, serde_json::Value> = HashMap::new();
     for c in candidates {
-        let producer_did = format!("did:web:localhost:{}", c.path);
+        let producer_did = candidate_did(c.path);
         let producer = Producer::new(
             SigningKey::from_bytes(&c.seed),
             AgentDid::new(&producer_did),
@@ -1257,15 +1289,39 @@ async fn discover_with_candidates(
         );
     }
 
-    let search_body = json!({ "matches": matches });
+    // Paginate the synthesized search response one match per page (via
+    // an index-encoded `cursor`) rather than returning everything in
+    // one shot — so a candidate list of 2+ actually exercises
+    // `find_revocations` / `find_registry_attested_revocations`'s
+    // cursor-following loop, not just its single-page path.
+    const PAGE_SIZE: usize = 1;
+    let matches = Arc::new(matches);
     let contexts = Arc::new(contexts);
+    let caps_hits = Arc::new(AtomicUsize::new(0));
 
     let mut full_router = Router::new()
         .route(
             "/contexts/search",
-            get(move || {
-                let body = search_body.clone();
-                async move { Json(body) }
+            get({
+                let matches = matches.clone();
+                move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
+                    let matches = matches.clone();
+                    async move {
+                        let offset: usize =
+                            q.get("cursor").and_then(|c| c.parse().ok()).unwrap_or(0);
+                        let end = (offset + PAGE_SIZE).min(matches.len());
+                        let page: Vec<serde_json::Value> = matches
+                            .get(offset..end)
+                            .map(<[_]>::to_vec)
+                            .unwrap_or_default();
+                        let mut body = serde_json::Map::new();
+                        body.insert("matches".to_string(), json!(page));
+                        if end < matches.len() {
+                            body.insert("next_cursor".to_string(), json!(end.to_string()));
+                        }
+                        Json(serde_json::Value::Object(body))
+                    }
+                }
             }),
         )
         .route(
@@ -1277,12 +1333,29 @@ async fn discover_with_candidates(
                     async move { Json(contexts.get(&id).cloned().expect("known ctx_id")) }
                 }
             }),
+        )
+        // `find_registry_attested_revocations` fetches this exactly
+        // once before the search loop, regardless of how many search
+        // pages the loop below ends up following — `caps_hits` is how
+        // callers assert that.
+        .route(
+            "/.well-known/acdp.json",
+            get({
+                let caps_hits = caps_hits.clone();
+                move || {
+                    let caps_hits = caps_hits.clone();
+                    async move {
+                        caps_hits.fetch_add(1, Ordering::SeqCst);
+                        Json(caps())
+                    }
+                }
+            }),
         );
     for (&path, seed) in &producers {
         let pub_key = SigningKey::from_bytes(seed).verifying_key_bytes();
-        let doc = ed25519_did_doc(&format!("did:web:localhost:{path}"), "key-1", &pub_key);
+        let doc = ed25519_did_doc(&candidate_did(path), "key-1", &pub_key);
         full_router = full_router.route(
-            &format!("/{path}/did.json"),
+            &candidate_did_route(path),
             get(move || {
                 let doc = doc.clone();
                 async move { Json(doc) }
@@ -1300,7 +1373,7 @@ async fn discover_with_candidates(
     )
     .expect("pinned client");
 
-    (client, resolver)
+    (client, resolver, caps_hits)
 }
 
 /// Case A (issue #191): a producer publishes `agent_id` = itself but
@@ -1339,7 +1412,8 @@ async fn find_revocations_drops_self_claimed_registry_attestation() {
             }),
         },
     ];
-    let (client, resolver) = discover_with_candidates(LOCAL_PRODUCER_DID, &candidates).await;
+    let (client, resolver, _caps_hits) =
+        discover_with_candidates(LOCAL_PRODUCER_DID, &candidates).await;
 
     let revs = find_revocations(&client, &resolver, &AgentDid::new(LOCAL_PRODUCER_DID))
         .await
@@ -1389,7 +1463,8 @@ async fn find_revocations_drops_cross_producer_substitution() {
             }),
         },
     ];
-    let (client, resolver) = discover_with_candidates(LOCAL_PRODUCER_DID, &candidates).await;
+    let (client, resolver, _caps_hits) =
+        discover_with_candidates(LOCAL_PRODUCER_DID, &candidates).await;
 
     let revs = find_revocations(&client, &resolver, &AgentDid::new(LOCAL_PRODUCER_DID))
         .await
@@ -1422,7 +1497,8 @@ async fn find_revocations_case_variant_agent_id_is_a_false_negative_by_design() 
         title: "legitimate producer-signed revocation",
         metadata: revocation_metadata(),
     }];
-    let (client, resolver) = discover_with_candidates(LOCAL_PRODUCER_DID, &candidates).await;
+    let (client, resolver, _caps_hits) =
+        discover_with_candidates(LOCAL_PRODUCER_DID, &candidates).await;
 
     // Same DID, method-specific id differs only in case — schema-valid
     // per `AgentDid::parse` (only the DID *method* is case-folded), and
@@ -1448,4 +1524,175 @@ async fn find_revocations_case_variant_agent_id_is_a_false_negative_by_design() 
         .await
         .expect("discovery");
     assert_eq!(revs.len(), 1);
+}
+
+// ── Phase 5 (#191 G1 fix): `find_registry_attested_revocations` ─────────────
+//
+// `find_revocations`'s trust-class filter (Phase 4) deliberately drops
+// every `RegistryAttested` candidate — including a genuine RFC-ACDP-0014
+// §6 attestation published under the registry's own DID. That is
+// correct for `find_revocations` (a producer-scoped query structurally
+// cannot vouch for a registry-scoped claim), but it means the doc
+// instruction that used to read "search the registry's own `agent_id`
+// and match `revoked_key_controller` client-side" needs a real function
+// behind it — this is that function, and the tests below are the
+// round-trip proof that the gap Phase 4 opened is closed again.
+
+/// A genuine §6 registry-attested revocation: published under
+/// [`REGISTRY_DID`] itself (`candidate.path == ""`), naming
+/// [`LOCAL_PRODUCER_DID`] as `revoked_key_controller` — the shape
+/// `KeyRevocation::from_body` classifies as
+/// [`RevocationTrustClass::RegistryAttested`] since `revoked_key_controller`
+/// is present and differs from `agent_id`.
+fn registry_attested_candidate() -> Candidate {
+    Candidate {
+        path: "",
+        seed: [0x11u8; 32],
+        title: "registry-attested revocation of the producer's key",
+        metadata: json!({
+            "revoked_key_fingerprint": K2_FP,
+            "compromised_since": T,
+            "revoked_key_controller": LOCAL_PRODUCER_DID,
+        }),
+    }
+}
+
+/// `find_registry_attested_revocations` returns every genuine §6
+/// attestation: published under the registry's own DID, naming the
+/// queried controller, and passing the registry-binding check against
+/// the live capabilities document and serving authority.
+///
+/// Two attestations (not one) are published here — the harness pages
+/// its synthesized search response one match per page, so with two
+/// matches this actually drives the function's cursor-following loop
+/// across a real `next_cursor`, rather than only ever taking the
+/// single-page path. That is also what makes the `caps_hits` assertion
+/// below meaningful: it pins the plan's "exactly one capabilities
+/// fetch regardless of page count" acceptance criterion against a call
+/// that genuinely spans more than one page.
+#[tokio::test]
+async fn find_registry_attested_revocations_returns_genuine_attestation() {
+    use acdp::client::find_registry_attested_revocations;
+
+    let second = Candidate {
+        path: "",
+        seed: [0x11u8; 32],
+        title: "a second registry-attested revocation of the producer's key",
+        metadata: json!({
+            "revoked_key_fingerprint": K1_FP,
+            "compromised_since": T,
+            "revoked_key_controller": LOCAL_PRODUCER_DID,
+        }),
+    };
+    let candidates = [registry_attested_candidate(), second];
+    let (client, resolver, caps_hits) = discover_with_candidates(REGISTRY_DID, &candidates).await;
+
+    let mut revs =
+        find_registry_attested_revocations(&client, &resolver, &AgentDid::new(LOCAL_PRODUCER_DID))
+            .await
+            .expect("discovery");
+    assert_eq!(revs.len(), 2, "both genuine §6 attestations must be found");
+    revs.sort_by(|a, b| a.revoked_key_fingerprint.cmp(&b.revoked_key_fingerprint));
+    assert_eq!(revs[0].revoked_key_fingerprint, K1_FP);
+    assert_eq!(revs[1].revoked_key_fingerprint, K2_FP);
+    for rev in &revs {
+        assert_eq!(rev.publisher.as_str(), REGISTRY_DID);
+        assert_eq!(rev.revoked_key_controller.as_str(), LOCAL_PRODUCER_DID);
+        assert_eq!(rev.trust_class, RevocationTrustClass::RegistryAttested);
+    }
+    assert_eq!(
+        caps_hits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "capabilities() must be fetched exactly once regardless of how many \
+         search pages the two-match, one-per-page response above required"
+    );
+}
+
+/// **The G1 regression guard.** Before Phase 5, `RevocationPolicy`'s
+/// doc (and `find_revocations`'s own closing sentence) told a caller to
+/// obtain a §6 registry attestation by calling
+/// `find_revocations(client, resolver, &registry_did)`: `publisher ==
+/// registry_did == agent_id` passes the query-scope filter, then the
+/// trust-class filter silently drops it — `Ok(vec![])`, indistinguishable
+/// from "no revocations." This test pins both halves of the round trip:
+/// `find_revocations` queried with the registry's own DID still finds
+/// nothing (proving the hole Phase 4 opened stays closed off from that
+/// path), and `find_registry_attested_revocations` finds the very same
+/// registry-published attestation (proving the doc's replacement
+/// instruction is actually true).
+#[tokio::test]
+async fn find_registry_attested_revocations_recovers_what_find_revocations_now_drops() {
+    use acdp::client::{find_registry_attested_revocations, find_revocations};
+
+    let candidates = [registry_attested_candidate()];
+    let (client, resolver, _caps_hits) = discover_with_candidates(REGISTRY_DID, &candidates).await;
+
+    // The old (now-corrected) doc instruction: query `find_revocations`
+    // with the registry's own DID. It verifies per §5 (genuine
+    // signature) and passes the publisher-scope filter (`publisher ==
+    // agent_id == registry_did`) — but the trust-class filter (§6
+    // `RegistryAttested`) drops it. This is Phase 4's intended
+    // behavior for `find_revocations` specifically, not a bug — the
+    // point of this test is that the *replacement* function recovers
+    // it.
+    let dropped = find_revocations(&client, &resolver, &AgentDid::new(REGISTRY_DID))
+        .await
+        .expect("discovery");
+    assert_eq!(
+        dropped,
+        Vec::new(),
+        "find_revocations correctly excludes RegistryAttested entries even when \
+         queried with the registry's own DID"
+    );
+
+    // The corrected instruction: `find_registry_attested_revocations`
+    // finds the very same attestation.
+    let recovered =
+        find_registry_attested_revocations(&client, &resolver, &AgentDid::new(LOCAL_PRODUCER_DID))
+            .await
+            .expect("discovery");
+    assert_eq!(
+        recovered.len(),
+        1,
+        "the registry-attested revocation find_revocations dropped MUST be \
+         reachable through find_registry_attested_revocations — this is the \
+         G1 fix"
+    );
+    assert_eq!(recovered[0].revoked_key_fingerprint, K2_FP);
+    assert_eq!(
+        recovered[0].trust_class,
+        RevocationTrustClass::RegistryAttested
+    );
+}
+
+/// `find_registry_attested_revocations` propagates a `capabilities()`
+/// failure rather than swallowing it into an empty vec. Simulated here
+/// by a registry that serves no `/.well-known/acdp.json` at all (a
+/// stand-in for any capabilities failure mode — malformed document,
+/// non-`did:web` `registry_did`, transport error, ...): the point under
+/// test is only that the finder's `?` on `client.capabilities()`
+/// actually propagates, not any specific failure shape.
+#[tokio::test]
+async fn find_registry_attested_revocations_propagates_capabilities_error() {
+    use acdp::client::find_registry_attested_revocations;
+
+    let router = Router::new(); // no `/.well-known/acdp.json` route
+    let tls = TlsTestServer::start(router).await;
+    let resolver = WebResolver::with_test_endpoint(&tls.root_cert_pem, "localhost", tls.addr)
+        .expect("pinned resolver");
+    let client = RegistryClient::with_test_endpoint(
+        &format!("https://{REGISTRY_AUTHORITY}"),
+        tls.addr,
+        &tls.root_cert_pem,
+    )
+    .expect("pinned client");
+
+    let result =
+        find_registry_attested_revocations(&client, &resolver, &AgentDid::new(LOCAL_PRODUCER_DID))
+            .await;
+    assert!(
+        result.is_err(),
+        "a registry that can't even serve capabilities must surface an error, \
+         not look like an honest \"no revocations\" empty vec"
+    );
 }
