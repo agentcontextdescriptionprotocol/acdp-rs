@@ -96,7 +96,7 @@ use acdp::{client::{RegistryClient, VerifiedContext}, did::WebResolver, types::C
 
 let client   = RegistryClient::new("https://registry.example.com")?;
 let resolver = WebResolver::new();
-let ctx_id   = CtxId("acdp://registry.example.com/…".into());
+let ctx_id   = CtxId::parse("acdp://registry.example.com/a1b2c3d4-e5f6-4789-8abc-def012345678")?;
 
 let ctx = VerifiedContext::fetch(&client, &resolver, &ctx_id).await?;
 println!("{} — {:?}", ctx.body().title, ctx.registry_state().status);

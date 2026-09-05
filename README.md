@@ -186,7 +186,7 @@ use acdp::{
 
 let client   = RegistryClient::new("https://registry.example.com")?;
 let resolver = WebResolver::new();
-let ctx_id   = CtxId("acdp://registry.example.com/…".into());
+let ctx_id   = CtxId::parse("acdp://registry.example.com/a1b2c3d4-e5f6-4789-8abc-def012345678")?;
 
 // Fetches, recomputes hash, resolves DID, verifies signature
 let ctx = VerifiedContext::fetch(&client, &resolver, &ctx_id).await?;
