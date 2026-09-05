@@ -177,6 +177,7 @@ fn classify(e: &AcdpError) -> &'static str {
         AcdpError::UnsupportedAlgorithm(_) => "unsupported_algorithm",
         AcdpError::RateLimited(_) => "rate_limited",
         AcdpError::Http(_) => "http_error",
+        AcdpError::ContextIdMismatch { .. } => "context_id_mismatch",
         _ => "internal_error",
     }
 }
@@ -783,6 +784,15 @@ mod tests {
             ),
             (AcdpError::InvalidReceipt("x".into()), "invalid_receipt"),
             (AcdpError::PayloadTooLarge("x".into()), "payload_too_large"),
+            // Issue #189: a substituted body must not be reported as an
+            // internal error.
+            (
+                AcdpError::ContextIdMismatch {
+                    requested: "a".into(),
+                    served: "b".into(),
+                },
+                "context_id_mismatch",
+            ),
             // A variant not enumerated in classify falls through to the
             // internal-error catch-all.
             (AcdpError::Canonicalization("x".into()), "internal_error"),

@@ -107,11 +107,20 @@ The stages, in order (it returns on the **first** failure):
 
 | # | Stage | Failure error |
 |---|---|---|
+| 0 | **Identifier binding** — the served body's `ctx_id` must equal the one requested, per RFC-ACDP-0006 §4.1 step 7 (NORMATIVE); see RFC-ACDP-0008 §9.1 for the threat rationale | `ContextIdMismatch` |
 | 1 | **Schema validation** (`validate_body`) — structural + embedded `data_ref` hashes | `SchemaViolation`, `DataRefHashMismatch` |
 | 2 | **`content_hash` recompute** — `sha256(JCS(ProducerContent))` vs declared | `HashMismatch` |
 | 3 | **`did:web` key resolution** via `WebResolver` | `KeyResolution`, `KeyResolutionUnreachable` |
 | 4 | **Signature verification** against the resolved key (algorithm must match) | `InvalidSignature`, `UnsupportedAlgorithm` |
 | 5 | **Status check** per policy | — |
+
+Stage 0 is the client-side form of the check: §4.1 step 7 permits "an
+equivalent typed error" in place of the registry-side
+`cross_registry_resolution_failed` wire code, and `ContextIdMismatch` is
+that typed error. It does not close RFC-ACDP-0008 §9.1 in full — a registry
+that genuinely republishes the same content under a new `ctx_id` still
+passes; only serve-time substitution (a different id claimed to be the one
+requested) is caught.
 
 This is exactly what the offline `cargo run --example consumer` demonstrates,
 step by step.

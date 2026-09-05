@@ -297,14 +297,34 @@ impl VerifiedContext {
     /// strictness.
     ///
     /// 1. Fetches `body + registry_state` from the registry.
-    /// 2. Optionally runs `validate_body` — structural schema checks
+    /// 2. Refuses a served body whose `ctx_id` differs from the one
+    ///    requested (`AcdpError::ContextIdMismatch`) — this implements
+    ///    RFC-ACDP-0006 §4.1 step 7 (NORMATIVE, "Bind the resolved
+    ///    identity"): neither the signature check (step 5) nor the
+    ///    `content_hash` recomputation (step 6) can supply this binding,
+    ///    because `ctx_id` sits in the RFC-ACDP-0001 §5.7 registry-assigned
+    ///    exclusion set and is therefore stripped from ProducerContent
+    ///    before hashing. See RFC-ACDP-0008 §9.1 for the threat this
+    ///    closes: without it, a registry can serve any other
+    ///    validly-signed body by the same producer under the requested
+    ///    context's URL, and both preceding checks still pass. Step 7
+    ///    permits a consumer to surface "an equivalent typed error" in
+    ///    place of the registry-side `cross_registry_resolution_failed`
+    ///    wire code — `ContextIdMismatch` is that typed error. This
+    ///    generalizes the receipt-path analogue at RFC-ACDP-0010 §8 step 3
+    ///    to the receipt-less core-profile path, where it is the only
+    ///    binding available. It does **not** close §9.1 in full: a
+    ///    registry that genuinely republishes the same content under a
+    ///    new `ctx_id` still passes; only serve-time substitution — a
+    ///    different id claimed to be the one requested — is caught.
+    /// 3. Optionally runs `validate_body` — structural schema checks
     ///    plus embedded-`DataRef` hash verification (policy-controlled).
-    /// 3. Recomputes `content_hash` over ProducerContent.
-    /// 4. Resolves the producer's DID document. `did:web` is required
+    /// 4. Recomputes `content_hash` over ProducerContent.
+    /// 5. Resolves the producer's DID document. `did:web` is required
     ///    unconditionally for v0.1.0 (RFC-ACDP-0001 §5.4).
-    /// 5. Verifies the Ed25519 signature (or other supported algorithm).
-    /// 6. Optionally verifies the `registry_receipt` placeholder.
-    /// 7. Optionally rejects unknown statuses.
+    /// 6. Verifies the Ed25519 signature (or other supported algorithm).
+    /// 7. Optionally verifies the `registry_receipt` placeholder.
+    /// 8. Optionally rejects unknown statuses.
     pub async fn fetch_with_policy(
         client: &RegistryClient,
         resolver: &WebResolver,
@@ -365,6 +385,14 @@ impl VerifiedContext {
     /// beyond `policy.lineage_head.max_age_seconds` is a *freshness*
     /// verdict reported via [`Self::head_receipt_stale`], never a
     /// verification failure (§6).
+    ///
+    /// [`Self::fetch_with_policy`] now additionally refuses a served body
+    /// whose `ctx_id` is not the one requested (RFC-ACDP-0008 §9.1). This
+    /// endpoint has no requested identifier to compare against — the
+    /// served head's `ctx_id` is trivially "the one requested" — so on a
+    /// receipt-less registry the served head's identity rests entirely on
+    /// registry honesty (RFC-ACDP-0008 §9.1). Use [`ReceiptPolicy::Require`]
+    /// where that matters.
     pub async fn fetch_current_with_policy(
         client: &RegistryClient,
         resolver: &WebResolver,
@@ -443,6 +471,26 @@ impl VerifiedContext {
         ),
         AcdpError,
     > {
+        // Identifier binding — RFC-ACDP-0006 §4.1 step 7 (NORMATIVE, "Bind
+        // the resolved identity"): refuse a served body whose `ctx_id`
+        // differs from the one requested, before any crypto or network
+        // work. `ctx_id` is registry-assigned and outside both the
+        // `content_hash` and signature coverage (RFC-ACDP-0001 §5.7's
+        // exclusion set), so this equality check is the only binding
+        // available when no receipt is served. See RFC-ACDP-0008 §9.1 for
+        // the threat this closes; it does not close §9.1 in full (a
+        // genuine republish under a new `ctx_id` still passes — only
+        // serve-time substitution is caught). Step 7 permits a
+        // consumer-side "equivalent typed error" in place of the
+        // registry-side `cross_registry_resolution_failed` wire code —
+        // `ContextIdMismatch` is that typed error.
+        if ctx.body.ctx_id != *expected_ctx_id {
+            return Err(AcdpError::ContextIdMismatch {
+                requested: expected_ctx_id.as_str().to_string(),
+                served: ctx.body.ctx_id.as_str().to_string(),
+            });
+        }
+
         if policy.validate_body_schema {
             acdp_validation::validate_body(&ctx.body)?;
         }
