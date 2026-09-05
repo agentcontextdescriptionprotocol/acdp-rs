@@ -174,9 +174,15 @@ assert!(report.schema_ok && report.body_hash_ok && report.signature_ok);
 | `signature_ok` | producer signature verified against the resolved DID key. |
 | `data_ref_embedded` | per-`DataRef` embedded-hash outcome, in `body.data_refs` order. |
 | `data_ref_external` | per-`DataRef` external-fetch outcome; `None` = not attempted. |
+| `ctx_id_ok` | the served body's `ctx_id` matched the one requested (RFC-ACDP-0006 §4.1 step 7, NORMATIVE). |
 
 `fetch_report_with_fetcher` additionally fetches and verifies external
 `data_ref` locations (see below).
+
+`fetch_report` and `fetch_report_with_fetcher` return
+`AcdpError::ContextIdMismatch` on a mismatch, while `fetch_report_diagnose`
+— which reports rather than short-circuits — returns `Ok((None, report))`
+with `ctx_id_ok == false`, i.e. it withholds the `VerifiedContext` handle.
 
 ## Fetching data references
 

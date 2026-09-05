@@ -12,8 +12,8 @@ mod common;
 use std::sync::{Arc, RwLock};
 
 use acdp::client::{
-    HistoricalKeyPolicy, KeyAuthorization, ReceiptPolicy, RegistryClient, VerificationPolicy,
-    VerifiedContext,
+    HistoricalKeyPolicy, HttpsDataRefFetcher, KeyAuthorization, ReceiptPolicy, RegistryClient,
+    VerificationPolicy, VerifiedContext,
 };
 use acdp::crypto::SigningKey;
 use acdp::did::WebResolver;
@@ -706,4 +706,171 @@ async fn cross_registry_resolver_refuses_context_substitution() {
         matches!(err, AcdpError::ContextIdMismatch { .. }),
         "got {err:?}"
     );
+}
+
+// ── Phase 2 — substitution refused on the report paths ──────────────────────
+//
+// `fetch_report` / `fetch_report_with_fetcher` / `fetch_report_diagnose` never
+// call `verify_retrieved` — they have their own pipeline
+// (`fetch_report_inner` / `fetch_report_diagnose`'s own body) — so the
+// binding above does not reach them. This section reproduces
+// `context_substitution_is_refused`'s exact scenario (same harness pattern,
+// same receipt-stripping, same `VerifyIfPresent` + `None` gap) against each
+// of the three report-path entry points.
+
+/// Shared setup for the Phase 2 report-path substitution tests: two
+/// contexts (A, B) published by the same producer key, receipts stripped
+/// (the `VerifyIfPresent` + `None` gap), registry currently serving A.
+/// Returns `(harness, client, ctx_id_a, ctx_json_b)` — callers request A
+/// and then call `h.serve_context(ctx_json_b)` to trigger substitution.
+async fn setup_report_substitution() -> (Harness, RegistryClient, CtxId, serde_json::Value) {
+    let producer_key_a = SigningKey::from_bytes(&[7u8; 32]);
+    let producer_key_b = SigningKey::from_bytes(&[7u8; 32]);
+    let producer_pub = producer_key_a.verifying_key_bytes();
+    let registry_key_pub = SigningKey::from_bytes(&[0x11u8; 32]).verifying_key_bytes();
+
+    let h = start_harness(&registry_key_pub, &producer_pub).await;
+    h.advertise_profiles(&["acdp-registry-core"]);
+
+    let (ctx_id_a, mut ctx_json_a, _) =
+        publish_with_receipts_titled(&h, producer_key_a, "report context A").await;
+    let (ctx_id_b, mut ctx_json_b, _) =
+        publish_with_receipts_titled(&h, producer_key_b, "report context B").await;
+    assert_ne!(
+        ctx_id_a, ctx_id_b,
+        "the two publishes must mint distinct ctx_ids"
+    );
+
+    ctx_json_a
+        .as_object_mut()
+        .unwrap()
+        .remove("registry_receipt");
+    ctx_json_b
+        .as_object_mut()
+        .unwrap()
+        .remove("registry_receipt");
+
+    let client = h.client();
+    h.serve_context(ctx_json_a);
+    (h, client, ctx_id_a, ctx_json_b)
+}
+
+/// `fetch_report` against a registry substituting B for requested A must
+/// hard-fail with `ContextIdMismatch` — the same as `fetch_with_policy`,
+/// since `fetch_report_inner` gets the identical check.
+#[tokio::test]
+async fn fetch_report_refuses_context_substitution() {
+    let (h, client, ctx_id_a, ctx_json_b) = setup_report_substitution().await;
+
+    // Substitution: A requested, registry serves B.
+    h.serve_context(ctx_json_b);
+    let err = VerifiedContext::fetch_report(
+        &client,
+        &h.resolver,
+        &ctx_id_a,
+        &VerificationPolicy::default(),
+    )
+    .await
+    .expect_err("A requested, B served must be refused");
+    assert!(
+        matches!(err, AcdpError::ContextIdMismatch { .. }),
+        "got {err:?}"
+    );
+}
+
+/// `fetch_report_with_fetcher` is a separate public entry point from
+/// `fetch_report` (both back onto `fetch_report_inner`, but each is named
+/// individually in the plan's acceptance criteria) — must independently
+/// refuse the same substitution.
+#[tokio::test]
+async fn fetch_report_with_fetcher_refuses_context_substitution() {
+    let (h, client, ctx_id_a, ctx_json_b) = setup_report_substitution().await;
+
+    h.serve_context(ctx_json_b);
+    let fetcher = HttpsDataRefFetcher::new();
+    let err = VerifiedContext::fetch_report_with_fetcher(
+        &client,
+        &h.resolver,
+        &ctx_id_a,
+        &VerificationPolicy::default(),
+        &fetcher,
+    )
+    .await
+    .expect_err("A requested, B served must be refused");
+    assert!(
+        matches!(err, AcdpError::ContextIdMismatch { .. }),
+        "got {err:?}"
+    );
+}
+
+/// `fetch_report_diagnose` is diagnostic by contract and must NOT
+/// short-circuit: it returns `Ok((None, report))` rather than an `Err`,
+/// with `report.ctx_id_ok == false` and every other top-level check still
+/// recorded as having passed — proving the substituted body genuinely
+/// cleared schema/hash/signature and only the id binding caught it, and
+/// that the gate at `all_top_level_pass` refuses to hand back a
+/// `VerifiedContext` over that substituted content.
+#[tokio::test]
+async fn fetch_report_diagnose_refuses_verified_handle_on_context_substitution() {
+    let (h, client, ctx_id_a, ctx_json_b) = setup_report_substitution().await;
+
+    h.serve_context(ctx_json_b);
+    let (verified, report) = VerifiedContext::fetch_report_diagnose(
+        &client,
+        &h.resolver,
+        &ctx_id_a,
+        &VerificationPolicy::default(),
+    )
+    .await
+    .expect("fetch_report_diagnose must not error — it reports, not short-circuits");
+
+    assert!(
+        verified.is_none(),
+        "a VerifiedContext must NOT be handed back over a substituted body"
+    );
+    assert!(
+        !report.ctx_id_ok,
+        "report must record the id-binding failure"
+    );
+    assert!(
+        report.signature_ok,
+        "the substituted body's own signature is genuinely valid — must still be reported true"
+    );
+    assert!(
+        report.body_hash_ok,
+        "the substituted body's own hash genuinely recomputes — must still be reported true"
+    );
+    assert!(
+        report.schema_ok,
+        "the substituted body is genuinely schema-valid — must still be reported true"
+    );
+}
+
+/// Positive control: `fetch_report_diagnose` on a correctly-served context
+/// (A requested, A served) returns `Some(_)` with `ctx_id_ok == true`.
+/// Guards against the new field being trivially always-false.
+#[tokio::test]
+async fn fetch_report_diagnose_positive_control() {
+    let (_h, client, ctx_id_a, _ctx_json_b) = setup_report_substitution().await;
+
+    let (verified, report) = VerifiedContext::fetch_report_diagnose(
+        &client,
+        &_h.resolver,
+        &ctx_id_a,
+        &VerificationPolicy::default(),
+    )
+    .await
+    .expect("fetch_report_diagnose must not error on a correctly served context");
+
+    assert!(
+        verified.is_some(),
+        "A requested, A served must still yield a VerifiedContext"
+    );
+    assert!(
+        report.ctx_id_ok,
+        "correctly served context must report ctx_id_ok == true"
+    );
+    assert!(report.signature_ok);
+    assert!(report.body_hash_ok);
+    assert!(report.schema_ok);
 }
