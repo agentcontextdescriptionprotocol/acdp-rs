@@ -13,6 +13,35 @@ semver_check = true
 # Label the release PRs release-plz opens.
 pr_labels = ["release"]
 
+# Only cut a release when a commit actually changes shipped behaviour.
+#
+# Without this, ANY commit since the last tag makes release-plz consider the
+# package changed — including a commit that touches nothing but CHANGELOG.md.
+# That happened on 2026-09-06: de7fff5 backfilled the missing 0.9.1 stanza for
+# eight sub-crates (docs only, zero code) and release-plz opened PR #221
+# proposing a full 0.9.2 bump of all 13 crates whose entire release content was
+# that backfill. Publishing it would have burned a version on crates.io
+# artifacts functionally identical to 0.9.1 — and crates.io publishes are
+# irreversible.
+#
+# The regex is matched against the conventional-commit type, so `feat!:`,
+# `fix(server):` and `perf:` all still release. Everything else — `chore:`,
+# `docs:`, `ci:`, `build:`, `refactor:`, `test:`, `style:` — no longer does.
+#
+# Two consequences worth knowing before you write a commit:
+#   1. A BREAKING CHANGE: footer on a non-matching type (e.g. `refactor:`)
+#      will NOT trigger a release. Use `feat!:` / `fix!:` for anything that
+#      needs to ship, so the break rides a releasable type.
+#   2. Dependency bumps land as `chore(deps)`/`build(deps)` and no longer
+#      release on their own. A dependency fix that must reach crates.io needs
+#      a `fix:` commit (or a manual release), not just the bump.
+#
+# Lockstep is preserved: per release-plz's documented version_group behaviour,
+# one matching commit in any member releases the whole group, so the 13 crates
+# still move together.
+release_commits = "^(feat|fix|perf)"
+
+
 # Create a GitHub Release (tag + notes) for each published version.
 git_release_enable = true
 
