@@ -319,7 +319,13 @@ fn is_well_formed_version(v: &str) -> bool {
 /// would be silently misread as version `0.0`, and `"0.2.0 "` /
 /// `"0.2.0;"` would be misread as `0.2` — all turning the gate OFF when
 /// it must stay ON for anything that isn't a clean `major.minor.patch`.
-fn key_revocation_gate_applies(acdp_version: &str) -> bool {
+///
+/// `pub(crate)` rather than private: `RegistryServer::publish_verified_in_tenant`
+/// (server.rs) reuses this exact predicate to gate the §5 step 2
+/// did:web self-sign check on the same version boundary as the §4
+/// shape gate above — a second, independent version-comparison helper
+/// would risk drifting from this one's fail-closed polarity.
+pub(crate) fn key_revocation_gate_applies(acdp_version: &str) -> bool {
     if !is_well_formed_version(acdp_version) {
         return true;
     }

@@ -118,6 +118,14 @@ name              = "key_revocation"
 path              = "tests/key_revocation.rs"
 required-features = ["client", "server", "test-transport"]
 
+# RFC-ACDP-0014 §5 step 2 on the did:web RegistryServer publish path
+# (#207 Phase 7). Separate from `key_revocation` above so that file can
+# stay at ZERO edits; needs the same TLS DID-document harness.
+[[test]]
+name              = "key_revocation_publish_gate"
+path              = "tests/key_revocation_publish_gate.rs"
+required-features = ["client", "server", "test-transport"]
+
 # Resolver-backed verification algorithm (RFC-ACDP-0001 §5.11) per-step
 # error branches, driven through the in-process TLS DID-document harness.
 # Needs `client` for the WebResolver/Verifier and `test-transport` for the

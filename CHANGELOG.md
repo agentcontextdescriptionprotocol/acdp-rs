@@ -37,6 +37,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bodies already stored under an older validator are not re-validated retroactively.
   Producer-side validation (`RequestBuilder::build`) is intentionally untouched: the check
   only fires registry-side, per §4's own scoping ("Registries advertising...").
+  `RegistryServer::publish_verified_in_tenant` (the `did:web`/resolver-backed publish path)
+  now additionally enforces the §5 step 2 not-self-signed rule for a resolved `did:web`
+  signing key, rejecting with `key_not_authorized` when the resolved key's fingerprint
+  equals the revocation's own `metadata.revoked_key_fingerprint`; the `did:key` path was
+  already covered (see above) since its fingerprint is derivable offline.
+  `publish_pinned_verified_in_tenant` (operator-pinned key, no DID resolution) gets the same
+  check at no added cost, since the caller-supplied key is already in hand.
+  `publish_unverified_for_tests` is unchanged — it has no resolved key to check at all, by
+  its own no-DID-resolution contract.
+  This adds no new DID resolution in practice: `publish_verified_in_tenant` already
+  resolves the producer's `did:web` document unconditionally, for every publish, to verify
+  the request signature (RFC-ACDP-0003 steps 7–8) — a DID-host outage already fails every
+  `publish_verified` call today, key-revocation or not. The fingerprint computation this
+  phase adds re-resolves the *same* DID microseconds later, against `WebResolver`'s LRU
+  cache, so there is no new network round-trip and no new operational risk.
+  **Not yet enforced:** the §4 table's `supersedes` row ("a revocation context MAY be
+  superseded only by another `key-revocation` context from the same signer class") is *not*
+  implemented by this gate — checking it needs the superseded context's stored type and
+  signer class, which the registry-agnostic `PublishValidator` cannot see (it has no store
+  access). Tracked in
+  [#216](https://github.com/agentcontextdistributionprotocol/acdp-rs/issues/216); everything
+  else in the §4 table is enforced as described above.
 
 ## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.8.5...acdp-v0.9.0) - 2026-09-06
 
