@@ -29,13 +29,14 @@
 
 use crate::registry::rate_limit::{NoopRateLimiter, RateLimiter};
 use crate::registry::store::RegistryStore;
-use crate::registry::validator::PublishValidator;
+use crate::registry::validator::{key_revocation_gate_applies, PublishValidator};
 use acdp_primitives::error::AcdpError;
 use acdp_types::{
     body::{Body, FullContext},
     capabilities::CapabilitiesDocument,
     primitives::{AgentDid, CtxId, LineageId, Status, Visibility},
     publish::{PublishRequest, PublishResponse},
+    revocation::KeyRevocation,
     search::{SearchParams, SearchResponse},
 };
 
@@ -383,14 +384,56 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         // Steps 7–8: DID resolution + signature verification.
         acdp_verify::verify_publish_request_signature(req, resolver).await?;
 
+        // RFC-ACDP-0014 §5 step 2 on the did:web publish path: a
+        // revocation MUST NOT be signed by the very key it revokes.
+        // `PublishValidator::validate_post_schema` (above) already
+        // enforces this for a did:key signer offline, purely from the
+        // body (`KeyRevocation::from_parts`'s did:key sub-case) — but a
+        // did:web signer's fingerprint is not derivable without
+        // resolving its DID document. That resolution already happened
+        // unconditionally just above, to verify the signature
+        // (RFC-ACDP-0003 steps 7–8) — so this is NOT a new resolution.
+        // `producer_key_fingerprint` dispatches by method
+        // internally, so a did:key signer reaching this line would be a
+        // harmless, resolver-free recheck of what was already enforced
+        // above; a did:web signer instead gets a second, cache-hit
+        // resolve of the same DID (via `WebResolver`'s LRU cache)
+        // purely to derive a fingerprint from the key that already
+        // verified — no new I/O, no new failure mode. Scoped to
+        // key-revocation bodies at `acdp_version >= 0.3.0` so no other
+        // publish pays even that cached-lookup cost.
+        let revocation_check_needed = req.context_type.is_key_revocation()
+            && key_revocation_gate_applies(&self.caps.acdp_version);
+
         // RFC-ACDP-0010: fingerprint the key that was just resolved and
-        // verified, for the receipt's `key_fingerprint` binding. Only
-        // resolved when a receipt will actually be minted.
-        let fingerprint = if self.receipt_signer.is_some() {
+        // verified, for the receipt's `key_fingerprint` binding. Also
+        // needed (and computed here, not a second time) when the §5
+        // step 2 check above applies, so a key-revocation publish never
+        // triggers two DID resolutions for one fingerprint.
+        let fingerprint = if self.receipt_signer.is_some() || revocation_check_needed {
             Some(producer_key_fingerprint(req, resolver).await?)
         } else {
             None
         };
+
+        if revocation_check_needed {
+            // `fingerprint` is `Some` here because `revocation_check_needed`
+            // was one of the two disjuncts in the `if` just above that
+            // decided whether to compute it — but that's a non-local
+            // invariant spanning several lines, so treat a `None` as a
+            // recoverable internal-state error rather than panicking the
+            // publish path (this crate is `forbid(unsafe_code)` and ships
+            // to crates.io; see `AcdpError::RegistryInternal`'s other use
+            // in this file for the same "impossible state" idiom).
+            let fp = fingerprint.as_deref().ok_or_else(|| {
+                AcdpError::RegistryInternal(
+                    "key-revocation fingerprint missing despite revocation_check_needed \
+                     — this is an internal invariant violation, not a caller error"
+                        .into(),
+                )
+            })?;
+            KeyRevocation::from_publish_request(req)?.check_not_self_signed(fp)?;
+        }
 
         // FEAT-01: hand the rest of the pipeline to the store as a
         // single atomic commit. Idempotency lookup, predecessor
@@ -499,6 +542,15 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
                     .into(),
             ));
         }
+        // RFC-ACDP-0014 §5 step 2 is deliberately NOT extended here for
+        // a did:web signer: this method's entire contract (see its doc
+        // comment above) is to skip DID resolution + signature
+        // verification, so there is no resolved key — and no
+        // resolver — to fingerprint. `validate_post_schema` above still
+        // enforces the did:key sub-case offline (`KeyRevocation::from_parts`),
+        // since that needs no resolution either; a did:web self-revocation
+        // published through this test-only bypass is not caught until a
+        // conformant path re-verifies it.
         let raw_bytes = serde_json::to_vec(req)?.len();
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
         let _validated = validator.validate_post_schema(req, raw_bytes)?;
@@ -541,7 +593,17 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         let validator = PublishValidator::for_authority(&self.caps, &self.authority);
         let _validated = validator.validate_post_schema(req, raw_bytes)?;
 
-        let fingerprint = if self.receipt_signer.is_some() {
+        // RFC-ACDP-0014 §5 step 2 applies here too, and at no extra
+        // resolution cost: `verified_public_key_b64` is the key the
+        // *caller* already verified the signature against — there is
+        // no DID document to fetch, so fingerprinting it is a pure,
+        // local computation regardless of receipt minting. Unlike the
+        // did:web hook in `publish_verified_in_tenant`, this adds no
+        // new I/O.
+        let revocation_check_needed = req.context_type.is_key_revocation()
+            && key_revocation_gate_applies(&self.caps.acdp_version);
+
+        let fingerprint = if self.receipt_signer.is_some() || revocation_check_needed {
             Some(fingerprint_pinned_key(
                 verified_public_key_b64,
                 verified_algorithm,
@@ -549,6 +611,23 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
         } else {
             None
         };
+
+        if revocation_check_needed {
+            // See the identical guard in `publish_verified_in_tenant` for
+            // why this is `ok_or_else` rather than `expect`: the
+            // `Some`-ness of `fingerprint` here depends on the `if` a few
+            // lines above matching this same `revocation_check_needed`, a
+            // non-local invariant that shouldn't panic the publish path
+            // if it's ever broken by a future edit.
+            let fp = fingerprint.as_deref().ok_or_else(|| {
+                AcdpError::RegistryInternal(
+                    "key-revocation fingerprint missing despite revocation_check_needed \
+                     — this is an internal invariant violation, not a caller error"
+                        .into(),
+                )
+            })?;
+            KeyRevocation::from_publish_request(req)?.check_not_self_signed(fp)?;
+        }
 
         self.commit_via_store(req, idempotency_key, tenant, fingerprint)
     }
@@ -1132,13 +1211,18 @@ pub(crate) fn can_retrieve(
 
 /// Resolve and fingerprint the producer key named by
 /// `signature.key_id` — the binding recorded in a receipt's
-/// `key_fingerprint` (RFC-ACDP-0010). Delegates to the same
+/// `key_fingerprint` (RFC-ACDP-0010), and (as of RFC-ACDP-0014 §5 step 2)
+/// also checked against a did:web key-revocation's own
+/// `revoked_key_fingerprint` in [`RegistryServer::publish_verified_in_tenant`].
+/// Delegates to the same
 /// [`acdp_crypto::fingerprint::fingerprint_for_key_id`] the consumer
 /// cross-check uses, so mint-time and verify-time fingerprints cannot
 /// drift. Callers MUST invoke this only after
 /// `verify_publish_request_signature` succeeded, so the fingerprinted
-/// key is the one that actually verified (the resolver's cache makes
-/// the second resolution cheap).
+/// key is the one that actually verified (the resolver's cache makes a
+/// second resolution — receipt minting and/or the §5 step 2 check on
+/// the same request — cheap, and `publish_verified_in_tenant` computes
+/// it at most once per publish either way).
 #[cfg(feature = "client")]
 async fn producer_key_fingerprint(
     req: &PublishRequest,
