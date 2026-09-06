@@ -14,7 +14,9 @@ jobs:
     with:
       file: .github/workflows/ci.yml
       sha: ${{ github.event.inputs.sha }}
-    secrets: inherit
+    secrets:
+      ACDP_BOT_APP_ID: '${{ secrets.ACDP_BOT_APP_ID }}'
+      ACDP_BOT_PRIVATE_KEY: '${{ secrets.ACDP_BOT_PRIVATE_KEY }}'
   # bump-spec-ref.yml@v1 (the reusable workflow `bump` above calls) names its PR
   # branch solely from the target SHA (`deps/spec-<sha:0:12>`), with no `file`
   # component. Calling it a second time for bindings.yml at the same SHA would
