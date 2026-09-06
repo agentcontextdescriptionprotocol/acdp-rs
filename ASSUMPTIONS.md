@@ -289,3 +289,35 @@
 - **Blast radius if wrong:** none — this corrects documentation/reasoning only; the
   shipped field types (`String`) are unchanged.
 - **Status:** UNCONFIRMED
+
+## `semver-tool-health` is not a required status check
+- **Plan:** plans/issues-206-208-bindings-registry-release-gate.md (Phase 1)
+- **Assumed:** adding the job to `ci.yml` is sufficient to satisfy Phase 1's acceptance
+  criterion 5 ("a tool-health check exists that is NOT continue-on-error").
+- **Chose:** ship the job without touching branch protection. `main`'s required contexts are
+  `[rustfmt, clippy, test (ubuntu/macos/windows × stable), conformance (spec fixtures),
+  MSRV (1.86), docs, cargo-deny, cargo-vet]` — `semver-tool-health` is absent, so it reddens the
+  run but does **not** block merge. The criterion is met literally; its intent needs a
+  branch-protection update.
+- **Alternatives:** adding it to required checks via `gh api .../branches/main/protection`
+  — rejected here because repo-settings changes are outside the standing
+  commit/PR/merge/publish authorization, and a required check that has never run green once
+  would block every PR the moment it is added.
+- **Blast radius if wrong:** a future cargo-semver-checks outage reddens CI visibly but someone
+  could still merge past it — strictly better than today (silent false-green), strictly worse
+  than a hard gate. Reversible: one branch-protection edit, best made after the job has a green
+  history.
+- **Status:** UNCONFIRMED
+
+## Unpublished-crate baseline behaviour in cargo-semver-checks is untested
+- **Plan:** plans/issues-206-208-bindings-registry-release-gate.md (Phase 1)
+- **Assumed:** a workspace crate with no crates.io baseline (newly added, never published) is
+  skipped by cargo-semver-checks rather than treated as an error.
+- **Chose:** ship without covering this branch. Not triggered by anything in this plan — Phases
+  2-7 add public API to existing crates, they do not add a new crate.
+- **Alternatives:** constructing a throwaway unpublished crate to observe the exit code —
+  rejected as disproportionate for a path this plan cannot reach.
+- **Blast radius if wrong:** if such a crate exits 101 rather than 0, the `semver-tool-health`
+  job hard-reds on the PR that introduces it, with a misleading "tool error" diagnosis. Caught
+  immediately (first CI run on that PR), fixed by an exclusion or an exit-code carve-out.
+- **Status:** UNCONFIRMED
