@@ -91,8 +91,10 @@ for the variants the spec marks retryable:
 
 Everything else — `InvalidSignature`, `SchemaViolation`, `HashMismatch`,
 `KeyResolution` (permanent resolution failure, including DNS-rebinding
-refusals), `NotAuthorized`, `NotFound`, `PayloadTooLarge` — is **permanent**.
-Retrying won't help; fix the request or the key.
+refusals), `NotAuthorized`, `NotFound`, `PayloadTooLarge`,
+`ContextIdMismatch` (locally detected context substitution — RFC-ACDP-0008
+§9.1; a misbehaving registry will serve the same wrong body on retry) — is
+**permanent**. Retrying won't help; fix the request or the key.
 
 `RegistryClient::publish_with_retry(req, idempotency_key, max_attempts)` uses
 exactly this predicate, with bounded backoff (250 ms → 500 ms → 1 s → 2 s):

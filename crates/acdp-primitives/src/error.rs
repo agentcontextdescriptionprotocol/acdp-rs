@@ -11,7 +11,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Top-level error type.
+///
+/// `#[non_exhaustive]`: the wire vocabulary (RFC-ACDP-0007 §5) keeps growing
+/// as new RFCs land — 25 wire codes now, up from 21 not long ago, with
+/// RFC-ACDP-0009 reserved and still unimplemented. Without this attribute,
+/// every new variant is a semver-breaking change for any downstream crate
+/// that matches on `AcdpError` exhaustively. Same rationale as
+/// `SsrfReason` in `crates/acdp-safe-http/src/lib.rs` ("future spec
+/// revisions may add ranges"); match with a wildcard arm.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AcdpError {
     // ── Cryptography ─────────────────────────────────────────────────────────
     /// JCS canonicalization failed (input not serializable).
@@ -26,6 +35,31 @@ pub enum AcdpError {
         stored: ContentHash,
         /// The hash recomputed by the verifier.
         recomputed: ContentHash,
+    },
+
+    /// Locally detected: the registry returned a body whose `ctx_id` is not
+    /// the one that was requested (context substitution). Not a wire code —
+    /// the client detects it. Permanent; fail closed.
+    ///
+    /// Implements RFC-ACDP-0006 §4.1 step 7 (NORMATIVE, "Bind the resolved
+    /// identity"): step 7 requires exactly this comparison — `body.ctx_id`
+    /// against the `ctx_id` used to construct the request — and permits a
+    /// consumer to surface "an equivalent typed error" in place of the
+    /// registry-side `cross_registry_resolution_failed` wire code; this
+    /// variant is that typed error. See RFC-ACDP-0008 §9.1 for the threat
+    /// this closes: without it, a registry can serve any other
+    /// validly-signed body by the same producer under the requested
+    /// context's URL, and both signature verification and `content_hash`
+    /// recomputation still pass. It does **not** close §9.1 in full: a
+    /// registry that genuinely republishes the same content under a new
+    /// `ctx_id` still passes; only serve-time substitution — a different
+    /// id claimed to be the one requested — is caught.
+    #[error("context substitution: requested {requested}, registry served {served}")]
+    ContextIdMismatch {
+        /// The `ctx_id` the caller requested.
+        requested: String,
+        /// The `ctx_id` actually present on the body the registry served.
+        served: String,
     },
 
     /// Wire code: `hash_mismatch`. The remote registry rejected a
@@ -534,5 +568,12 @@ mod tests {
         assert!(!AcdpError::InvalidWitnessCosignature("x".into()).is_transient());
         assert!(!AcdpError::ImmutableField("x".into()).is_transient());
         assert!(!AcdpError::InvalidLifecycleTransition("x".into()).is_transient());
+        // Issue #189: context substitution is locally detected and permanent;
+        // retrying against the same misbehaving registry will not fix it.
+        assert!(!AcdpError::ContextIdMismatch {
+            requested: "a".into(),
+            served: "b".into(),
+        }
+        .is_transient());
     }
 }

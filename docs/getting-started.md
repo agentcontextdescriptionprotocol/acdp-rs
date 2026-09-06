@@ -93,7 +93,7 @@ use acdp::{
 
 let client   = RegistryClient::new("https://registry.example.com")?;
 let resolver = WebResolver::new();
-let ctx_id   = CtxId("acdp://registry.example.com/12345678-1234-4321-8123-123456781234".into());
+let ctx_id   = CtxId::parse("acdp://registry.example.com/a1b2c3d4-e5f6-4789-8abc-def012345678")?;
 
 let ctx = VerifiedContext::fetch(&client, &resolver, &ctx_id).await?;
 

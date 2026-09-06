@@ -95,6 +95,30 @@ fn client_types_reexported() {
     use acdp::did::WebResolver;
 }
 
+#[cfg(feature = "client")]
+#[test]
+fn revocation_surface_reexported() {
+    // Compile-time path checks only: both `find_revocations` and its
+    // §6 registry-attested counterpart resolve through the facade
+    // exactly like the rest of the client surface.
+    use acdp::client::{
+        classify_under_revocation, find_registry_attested_revocations, find_revocations,
+        verify_revocation_body, RevocationPolicy,
+    };
+    use acdp::types::revocation::{KeyRevocation, RevocationTrustClass};
+
+    // Binding the (async) fn items themselves proves the paths resolve
+    // without needing to actually drive them over a live registry.
+    let _a = find_revocations;
+    let _b = find_registry_attested_revocations;
+    let _c = classify_under_revocation;
+    let _d = verify_revocation_body;
+    let _e: fn(&KeyRevocation, &str, &str) -> Result<(), acdp::AcdpError> =
+        KeyRevocation::cross_check_registry_binding;
+    let _f = RevocationPolicy::default();
+    let _g = RevocationTrustClass::ProducerSigned;
+}
+
 #[cfg(feature = "server")]
 #[test]
 fn server_types_reexported() {

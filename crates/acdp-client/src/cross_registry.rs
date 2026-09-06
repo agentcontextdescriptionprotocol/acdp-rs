@@ -177,11 +177,13 @@ impl CrossRegistryResolver {
 
     /// Resolve a single cross-registry [`CtxId`] end-to-end.
     ///
-    /// Steps 1–6 of RFC-ACDP-0006 §4.1: parse, fetch capabilities,
+    /// Steps 1–7 of RFC-ACDP-0006 §4.1: parse, fetch capabilities,
     /// verify the registry DID *and* its DID document's web binding,
-    /// retrieve, recompute hash, verify signature. The [`SsrfPolicy`]
-    /// is checked first so a hostile authority cannot drive an
-    /// internal-network request.
+    /// retrieve, recompute hash, verify signature, and (step 7,
+    /// NORMATIVE) bind the resolved identity — reached through
+    /// `fetch_with_policy`, which refuses a served body whose `ctx_id`
+    /// is not the one requested. The [`SsrfPolicy`] is checked first so
+    /// a hostile authority cannot drive an internal-network request.
     pub async fn resolve(&self, ctx_id: &CtxId) -> Result<VerifiedContext, AcdpError> {
         let parsed = CtxId::parse(ctx_id.as_str())?;
         let authority = parsed.authority().to_string();
