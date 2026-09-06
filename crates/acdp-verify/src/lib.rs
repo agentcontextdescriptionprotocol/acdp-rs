@@ -408,6 +408,51 @@ pub async fn verify_body_signature_historical(
     }
 }
 
+// ── Context-identity binding (RFC-ACDP-0006 §4.1 step 7) ─────────────────────
+
+/// Verify that a served body's `ctx_id` is the one the caller actually
+/// requested — RFC-ACDP-0006 §4.1 step 7 (NORMATIVE, "Bind the resolved
+/// identity").
+///
+/// `ctx_id` is registry-assigned and sits in the RFC-ACDP-0001 §5.7
+/// exclusion set, so it is stripped from `ProducerContent` before hashing:
+/// neither `content_hash` recomputation nor the producer signature covers
+/// it. Without this explicit comparison a registry can serve any other
+/// validly-signed body from the same producer under the requested
+/// context's URL, and every other check still passes (RFC-ACDP-0008 §9.1).
+/// This is the only binding available on the receipt-less path, since
+/// `ctx_id` is assigned by the registry rather than the producer.
+///
+/// Fails closed: both `served_ctx_id` and `expected_ctx_id` are parsed with
+/// [`CtxId::parse`] before comparison, so a malformed id on *either* side
+/// is rejected with [`AcdpError::SchemaViolation`] rather than silently
+/// passing or silently failing to match. `CtxId::parse` mandates a unique
+/// canonical text form (`acdp://` prefix, lowercase DNS authority,
+/// lowercase v4 UUID), so byte equality and parsed equality coincide for
+/// every value that clears parsing.
+///
+/// This is deliberately **stricter** than conformance fixture
+/// `fed-011-ctx-id-binding.json`'s `uri_encoding_and_path_style_equivalence`
+/// case, which asks that percent-encoded and path-style forms compare
+/// *equal* to the canonical form. Requiring canonical form on both sides
+/// instead produces false refusals for such alternate encodings, never
+/// false acceptances — a safe deviation from that one fixture case.
+///
+/// On mismatch, returns the existing [`AcdpError::ContextIdMismatch`]
+/// (shipped in 0.9.0 for the Rust client's equivalent check) rather than a
+/// new variant, so the two enforcement points share one typed error.
+pub fn verify_ctx_id_binding(served_ctx_id: &str, expected_ctx_id: &str) -> Result<(), AcdpError> {
+    let served = CtxId::parse(served_ctx_id)?;
+    let expected = CtxId::parse(expected_ctx_id)?;
+    if served != expected {
+        return Err(AcdpError::ContextIdMismatch {
+            requested: expected.as_str().to_string(),
+            served: served.as_str().to_string(),
+        });
+    }
+    Ok(())
+}
+
 // ── Lifecycle events (ACDP 0.3, RFC-ACDP-0013 §5) ────────────────────────────
 
 /// The pure (offline) prefix of RFC-ACDP-0013 §5 lifecycle-event
@@ -865,6 +910,95 @@ mod offline_tests {
         assert!(matches!(
             verify_lifecycle_event_offline(&raw, &CtxId(CTX.into()), &actor, None),
             Err(AcdpError::InvalidSignature(_))
+        ));
+    }
+
+    // ── verify_ctx_id_binding ─────────────────────────────────────────────
+
+    const OTHER_CTX: &str = "acdp://registry.example.com/11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn ctx_id_binding_matching_ids_ok() {
+        // Positive control for every failure case below.
+        assert!(verify_ctx_id_binding(CTX, CTX).is_ok());
+    }
+
+    #[test]
+    fn ctx_id_binding_mismatch_rejected_with_both_fields() {
+        match verify_ctx_id_binding(OTHER_CTX, CTX) {
+            Err(AcdpError::ContextIdMismatch { requested, served }) => {
+                assert_eq!(requested, CTX);
+                assert_eq!(served, OTHER_CTX);
+            }
+            other => panic!("expected ContextIdMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctx_id_binding_non_canonical_expected_is_schema_violation_not_silent_pass() {
+        // Positive control: CTX vs CTX matches (see
+        // `ctx_id_binding_matching_ids_ok`); an uppercase-authority variant
+        // of the *expected* side must fail parsing, not silently pass and
+        // not be reported as a `ContextIdMismatch`.
+        let uppercase_authority =
+            "acdp://Registry.example.com/00000000-0000-4000-8000-000000000000";
+        assert!(matches!(
+            verify_ctx_id_binding(CTX, uppercase_authority),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+
+        let uppercase_uuid = "acdp://registry.example.com/00000000-0000-4000-8000-000000000AAA";
+        assert!(matches!(
+            verify_ctx_id_binding(CTX, uppercase_uuid),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+
+        let missing_prefix = "registry.example.com/00000000-0000-4000-8000-000000000000";
+        assert!(matches!(
+            verify_ctx_id_binding(CTX, missing_prefix),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+
+        let malformed_uuid = "acdp://registry.example.com/not-a-uuid";
+        assert!(matches!(
+            verify_ctx_id_binding(CTX, malformed_uuid),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn ctx_id_binding_non_canonical_served_is_schema_violation() {
+        let uppercase_authority =
+            "acdp://Registry.example.com/00000000-0000-4000-8000-000000000000";
+        assert!(matches!(
+            verify_ctx_id_binding(uppercase_authority, CTX),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn ctx_id_binding_both_non_canonical_errors_without_panic() {
+        let bad_served = "acdp://Registry.example.com/00000000-0000-4000-8000-000000000000";
+        let bad_expected = "not-acdp-at-all";
+        assert!(matches!(
+            verify_ctx_id_binding(bad_served, bad_expected),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn ctx_id_binding_empty_string_either_side_errors_without_panic() {
+        assert!(matches!(
+            verify_ctx_id_binding("", CTX),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+        assert!(matches!(
+            verify_ctx_id_binding(CTX, ""),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+        assert!(matches!(
+            verify_ctx_id_binding("", ""),
+            Err(AcdpError::SchemaViolation(_))
         ));
     }
 }

@@ -6,6 +6,12 @@
 //! ACDP 0.2 offline path: `did:key` bodies and publish requests verify
 //! with no network at all, and registry receipts verify against a
 //! caller-resolved registry key.
+//!
+//! `verifyCtxIdBinding` binds the served `ctx_id` (from the body) to the
+//! `ctx_id` the caller requested (RFC-ACDP-0006 §4.1 step 7, NORMATIVE).
+//! `ctx_id` is registry-assigned and outside both `content_hash` and the
+//! producer signature (RFC-ACDP-0001 §5.7), so this explicit comparison
+//! is the only binding available on the receipt-less path.
 
 //! ACDP 0.3 adds the offline verdict surface (documents supplied by
 //! the caller, never fetched here): `verifyLineageHeadReceipt`
@@ -26,6 +32,7 @@ use acdp::crypto::{
 };
 use acdp::types::revocation::KeyRevocation;
 use acdp::types::{Body, ContentHash, CtxId, PublishRequest, RegistryReceipt};
+use acdp::verify::verify_ctx_id_binding;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, Utc};
 use napi::bindgen_prelude::*;
@@ -100,6 +107,31 @@ impl AcdpVerifier {
         verify_content_hash(&body, &stored)
             .map(|_| true)
             .map_err(|e| Error::from_reason(format!("content_hash mismatch: {e}")))
+    }
+
+    /// Verify that a body's *served* `ctx_id` matches the `ctx_id` the
+    /// caller *expected* (RFC-ACDP-0006 §4.1 step 7, NORMATIVE) — the
+    /// context-identity binding check for the receipt-less retrieval
+    /// path, since `ctx_id` is registry-assigned and outside
+    /// `content_hash`/signature coverage.
+    ///
+    /// Argument order is `(bodyJson, expectedCtxId)`: the body's own
+    /// `ctx_id` is the *served* identity, `expectedCtxId` is what the
+    /// caller requested — the same `(served, expected)` order as
+    /// `verify_ctx_id_binding` and `RegistryReceipt::cross_check`.
+    ///
+    /// * `bodyJson` — the `body` object from a `FullContext` retrieval.
+    /// * `expectedCtxId` — the `ctx_id` the caller requested.
+    ///
+    /// Returns `true` on success; throws on malformed JSON, a malformed
+    /// `ctx_id` on either side, or a mismatch.
+    #[napi]
+    pub fn verify_ctx_id_binding(body_json: String, expected_ctx_id: String) -> Result<bool> {
+        let body: Body = serde_json::from_str(&body_json)
+            .map_err(|e| Error::from_reason(format!("invalid body JSON: {e}")))?;
+        verify_ctx_id_binding(body.ctx_id.as_str(), &expected_ctx_id)
+            .map(|_| true)
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Verify an Ed25519 signature over a `content_hash` string.
@@ -316,12 +348,10 @@ impl AcdpVerifier {
             RegistryReceipt::from_value(&value).map_err(|e| Error::from_reason(e.to_string()))?;
         let body_hash = ContentHash::parse(&recomputed_body_hash)
             .map_err(|e| Error::from_reason(format!("invalid recomputedBodyHash: {e}")))?;
+        let expected_ctx = CtxId::parse(&expected_ctx_id)
+            .map_err(|e| Error::from_reason(format!("invalid expectedCtxId: {e}")))?;
         receipt
-            .cross_check(
-                &CtxId(expected_ctx_id),
-                &body_hash,
-                &producer_key_fingerprint,
-            )
+            .cross_check(&expected_ctx, &body_hash, &producer_key_fingerprint)
             .map_err(|e| Error::from_reason(e.to_string()))?;
         let pub_bytes: Vec<u8> = STANDARD
             .decode(&registry_public_key_b64)

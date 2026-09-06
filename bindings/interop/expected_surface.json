@@ -40,6 +40,7 @@
       "parse_key_revocation",
       "verify_body_offline",
       "verify_content_hash",
+      "verify_ctx_id_binding",
       "verify_lifecycle_event",
       "verify_lineage_head_receipt",
       "verify_log_checkpoint",

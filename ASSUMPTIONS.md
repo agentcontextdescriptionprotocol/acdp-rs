@@ -267,6 +267,17 @@
   call sites — a pure behaviour change, no API break, since `ContextIdMismatch` already
   carries both textual forms.
 - **Status:** UNCONFIRMED
+- **Update (2026-09-06, plans/issues-206-208-bindings-registry-release-gate.md Phase 2,
+  #206):** the bindings' equivalent check, `acdp_verify::verify_ctx_id_binding`, makes the
+  parse-then-compare step explicit rather than relying on the served side having already
+  been canonicalized by an upstream `validate_identifiers` call (the bindings have no such
+  call): it parses *both* `served_ctx_id` and `expected_ctx_id` with `CtxId::parse` before
+  comparing, so a malformed id on either side fails closed with `SchemaViolation` instead
+  of reaching the equality check at all. This is the same deliberate divergence from
+  `fed-011-ctx-id-binding.json`'s `uri_encoding_and_path_style_equivalence` case as the
+  client's byte-equality choice above — canonical-form-only comparison produces false
+  refusals for percent-encoded/path-style forms, never false acceptances — recorded again
+  here because it is a second, independent call site making the same choice.
 
 ## `String` (not `CtxId`) fields on `ContextIdMismatch` — corrected rationale
 - **Plan:** plans/issues-189-191-client-binding-hardening.md

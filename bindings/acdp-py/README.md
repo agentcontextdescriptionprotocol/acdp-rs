@@ -35,6 +35,10 @@ Beyond `build_publish_request` / `build_supersede_request` (Ed25519 and
 P-256 producers) and the `verify_content_hash` / `verify_signature`
 basics, `AcdpVerifier` exposes the full 0.2.0 surface:
 
+- `verify_ctx_id_binding` — bind the served `ctx_id` to the one you
+  requested (RFC-ACDP-0006 §4.1 step 7, NORMATIVE); see
+  [Verifying a retrieved body](#verifying-a-retrieved-body) below for why
+  this is a separate call.
 - `verify_body_offline` / `verify_publish_request_offline` — offline
   `did:key` verification (no network).
 - `verify_receipt` / `verify_lineage_head_receipt` — registry receipts
@@ -77,6 +81,32 @@ acdp.AcdpVerifier.verify_signature(
     body["content_hash"],
 )
 ```
+
+### Verifying a retrieved body
+
+`ctx_id` is registry-assigned and sits in the RFC-ACDP-0001 §5.7 exclusion
+set, so it is stripped before `content_hash` is computed — neither the hash
+recompute above nor the producer's signature covers it. Without an
+explicit comparison, a registry could serve any other validly-signed body
+from the same producer under the `ctx_id` URL you asked for, and every
+check above would still pass. Call `verify_ctx_id_binding` to close that
+gap (RFC-ACDP-0006 §4.1 step 7, NORMATIVE):
+
+```python
+# Argument order matters: `body_json` carries the *served* ctx_id,
+# `expected_ctx_id` is the one you requested. Using keyword args makes a
+# transposed call impossible to typo silently.
+acdp.AcdpVerifier.verify_ctx_id_binding(
+    body_json=json.dumps(body),
+    expected_ctx_id=requested_ctx_id,
+)
+```
+
+Like the rest of the `AcdpVerifier` bool surface, this returns `True` on
+success and raises on failure (`ValueError` for a malformed `ctx_id` on
+either side, `RuntimeError` for a mismatch) — it never returns `False`, so
+`if acdp.AcdpVerifier.verify_ctx_id_binding(...):` guards a branch that
+can't be reached.
 
 ## Design rules
 

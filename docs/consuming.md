@@ -122,6 +122,15 @@ that genuinely republishes the same content under a new `ctx_id` still
 passes; only serve-time substitution (a different id claimed to be the one
 requested) is caught.
 
+`VerifiedContext::fetch` is specific to the Rust `client` feature; a
+caller building an equivalent pipeline outside Rust (or outside
+`VerifiedContext` — e.g. the Python/Node/WASM bindings, or a bare
+`RegistryClient` caller who skips `VerifiedContext`) must perform this
+same comparison itself. `acdp::verify::verify_ctx_id_binding` is the
+standalone function this stage wraps; the bindings expose it directly as
+`verify_ctx_id_binding` (Python) / `verifyCtxIdBinding` (Node, WASM) — see
+[`docs/bindings.md`](bindings.md).
+
 This is exactly what the offline `cargo run --example consumer` demonstrates,
 step by step.
 

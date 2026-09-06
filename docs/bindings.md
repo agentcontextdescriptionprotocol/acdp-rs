@@ -70,7 +70,19 @@ httpx.post("https://registry.example.com/contexts",
 # Verify a retrieved body (raises on mismatch)
 AcdpVerifier.verify_content_hash(body_json, stored_hash)
 AcdpVerifier.verify_signature(pub_key_b64, sig_b64, content_hash)
+
+# Bind the served identity to the one you requested (RFC-ACDP-0006 §4.1
+# step 7, NORMATIVE). `ctx_id` is registry-assigned and in the §5.7
+# exclusion set, so neither content_hash nor the signature covers it —
+# without this call a registry could serve any other validly-signed body
+# from the same producer under the URL you asked for.
+AcdpVerifier.verify_ctx_id_binding(body_json=body_json, expected_ctx_id=requested_ctx_id)
 ```
+
+All `AcdpVerifier` methods that return a plain bool follow the same
+convention: they return `True`/`true` on success and raise/throw on
+failure — never `False`/`false`. Writing `if AcdpVerifier.verify_...(...)`
+guards a branch that can't be reached.
 
 ## Node.js (`acdp-node`)
 
@@ -94,6 +106,14 @@ await fetch('https://registry.example.com/contexts', {
 
 AcdpVerifier.verifyContentHash(bodyJson, storedHash);  // throws on mismatch
 AcdpVerifier.verifySignature(pubKeyB64, sigB64, contentHash);
+
+// Bind the served identity to the one you requested (RFC-ACDP-0006 §4.1
+// step 7, NORMATIVE) — argument order is (bodyJson, expectedCtxId): the
+// body carries the *served* ctx_id, the second argument is what you
+// requested. ctx_id is registry-assigned and outside content_hash /
+// signature coverage, so this explicit check is the only binding
+// available on the receipt-less path.
+AcdpVerifier.verifyCtxIdBinding(bodyJson, requestedCtxId);  // throws on mismatch
 ```
 
 The Node API is the same surface in camelCase.
@@ -102,17 +122,25 @@ The Node API is the same surface in camelCase.
 
 A verification-only core for browsers and edge runtimes. It exposes the
 consumer-side checks (`verifyContentHash`, `verifySignatureEd25519`,
-`verifyBodyOffline`, receipt/log/lifecycle/witness verification) but no
-producer/signing surface — signing keys should not live in a browser.
+`verifyCtxIdBinding`, `verifyBodyOffline`, receipt/log/lifecycle/witness
+verification) but no producer/signing surface — signing keys should not
+live in a browser.
 
 ```bash
 cd bindings/acdp-wasm && wasm-pack build --target web
 ```
 
 ```js
-import init, { verifyContentHash } from '@agentcontextdistributionprotocol/acdp-wasm';
+import init, { verifyContentHash, verifyCtxIdBinding } from '@agentcontextdistributionprotocol/acdp-wasm';
 await init();
 const verdict = JSON.parse(verifyContentHash(bodyJson, storedHash));
+
+// Bind the served ctx_id to the one requested (RFC-ACDP-0006 §4.1 step 7).
+// Like verifyContentHash, a malformed *served* ctx_id is
+// reported as a `{"valid": false, ...}` verdict, not a throw — only a
+// malformed `expectedCtxId` argument throws.
+const binding = JSON.parse(verifyCtxIdBinding(bodyJson, requestedCtxId));
+if (binding.valid) { /* served ctx_id matches what was requested */ }
 ```
 
 See `bindings/acdp-wasm/README.md` for the full exported surface.

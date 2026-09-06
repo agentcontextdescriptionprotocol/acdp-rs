@@ -25,6 +25,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bindings-fmt:
+    name: rustfmt (bindings)
+    runs-on: ubuntu-latest
+    # Each binding crate is a standalone Cargo package with its own
+    # [workspace] table, so the root `cargo fmt --all -- --check` (ci.yml's
+    # `fmt` job) never walks into bindings/**/src/ — that job only sees
+    # whatever `[workspace] members` the root Cargo.toml lists, and the
+    # bindings are deliberately excluded from it. Without this job the
+    # bindings have no rustfmt check anywhere in CI.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --manifest-path bindings/acdp-py/Cargo.toml -- --check
+      - run: cargo fmt --all --manifest-path bindings/acdp-node/Cargo.toml -- --check
+      - run: cargo fmt --all --manifest-path bindings/acdp-wasm/Cargo.toml -- --check
+
   acdp-py:
     name: acdp-py (python ${{ matrix.python }})
     runs-on: ubuntu-latest
@@ -96,6 +115,22 @@ jobs:
       - name: Build the native binary
         working-directory: bindings/acdp-node
         run: npm run build:debug
+      # index.js + index.d.ts are napi-generated but git-tracked (see
+      # .gitignore:18-21): the bindings-release publish job does not run
+      # `napi build`, so whatever is committed here is exactly what ships
+      # to npm. Nothing else in CI checks that the committed copies match
+      # what the current source actually generates, so a contributor who
+      # edits the Rust FFI surface without regenerating them would ship a
+      # stale loader/type-defs pair silently. Fail if `npm run build:debug`
+      # (just run above) produced a diff against the committed files.
+      - name: Fail if generated NAPI artifacts are stale
+        working-directory: bindings/acdp-node
+        run: |
+          if ! git diff --exit-code -- index.js index.d.ts; then
+            echo "::error::bindings/acdp-node/index.js and/or index.d.ts are out of date." \
+                 "Run 'npm run build:debug' in bindings/acdp-node and commit the result."
+            exit 1
+          fi
       - name: node --test
         working-directory: bindings/acdp-node
         # Explicit glob: Node 22+ treats `--test tests/` as a module
@@ -165,6 +200,47 @@ jobs:
       - name: wasm-pack test (--node)
         working-directory: bindings/acdp-wasm
         run: wasm-pack test --node
+
+  binding-copies-parity:
+    name: v030.rs / v040.rs triplicate drift guard
+    runs-on: ubuntu-latest
+    # bindings/{acdp-py,acdp-node,acdp-wasm}/src/v030.rs are three
+    # byte-identical copies of the same 0.3.0 verdict logic (same for
+    # v040.rs) — there is no shared module and no sync mechanism, so an
+    # edit applied to one copy and not the others compiles fine and only
+    # shows up as a silent behavioral divergence between bindings. This
+    # job is a cheap tripwire for that: it does not build or dedupe
+    # anything, it just proves the three files still agree byte-for-byte.
+    # No Rust/Node/Python toolchain needed — just a checkout and md5sum.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare v030.rs and v040.rs across the three bindings
+        run: |
+          set -euo pipefail
+          check_identical() {
+            file="$1"
+            a="bindings/acdp-py/src/$file"
+            b="bindings/acdp-node/src/$file"
+            c="bindings/acdp-wasm/src/$file"
+            sum_a=$(md5sum "$a" | cut -d' ' -f1)
+            sum_b=$(md5sum "$b" | cut -d' ' -f1)
+            sum_c=$(md5sum "$c" | cut -d' ' -f1)
+            if [ "$sum_a" != "$sum_b" ] || [ "$sum_a" != "$sum_c" ]; then
+              echo "::error::$file has diverged across bindings — these three files" \
+                   "must stay byte-identical:"
+              echo "  $a  $sum_a"
+              echo "  $b  $sum_b"
+              echo "  $c  $sum_c"
+              echo "Apply the same edit to all three (this is a tripwire, not a fix —" \
+                   "there is deliberately no shared module; each of" \
+                   "bindings/{acdp-py,acdp-node,acdp-wasm}/src/$file must be" \
+                   "edited in lockstep)."
+              exit 1
+            fi
+            echo "OK: $file identical ($sum_a) across acdp-py, acdp-node, acdp-wasm"
+          }
+          check_identical v030.rs
+          check_identical v040.rs
 
   interop:
     name: interop (python ↔ node)

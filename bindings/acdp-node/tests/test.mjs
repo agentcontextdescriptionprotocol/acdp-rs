@@ -733,6 +733,92 @@ test('verifyBodyOffline rejects did:web bodies (resolution is host-side)', () =>
   assert.throws(() => AcdpVerifier.verifyBodyOffline(JSON.stringify(body)));
 });
 
+// ── verifyCtxIdBinding (RFC-ACDP-0006 §4.1 step 7) ────────────────────────────
+
+const CTX_BINDING_CTX =
+  'acdp://registry.example.com/12345678-1234-4321-8123-123456781234';
+const CTX_BINDING_OTHER_UUID =
+  'acdp://registry.example.com/00000000-0000-4000-8000-000000000000';
+const CTX_BINDING_OTHER_AUTHORITY =
+  'acdp://other.example.com/12345678-1234-4321-8123-123456781234';
+// Mirrors the core `verify_ctx_id_binding` fixture: only the last three
+// UUID hex chars are uppercase.
+const CTX_BINDING_UPPERCASE_UUID =
+  'acdp://registry.example.com/00000000-0000-4000-8000-000000000AAA';
+
+function bodyWithCtxId(ctxId) {
+  const p = AcdpProducer.fromSeedDidKey(Buffer.alloc(32));
+  const req = JSON.parse(
+    p.buildPublishRequest({ title: 'ctx binding', contextType: 'data_snapshot' }),
+  );
+  return {
+    ...req,
+    ctx_id: ctxId,
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+    origin_registry: 'registry.example.com',
+    created_at: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+test('verifyCtxIdBinding accepts matching served/expected ctx_id', () => {
+  // Positive control for every failure case below.
+  const body = bodyWithCtxId(CTX_BINDING_CTX);
+  assert.equal(
+    AcdpVerifier.verifyCtxIdBinding(JSON.stringify(body), CTX_BINDING_CTX),
+    true,
+  );
+});
+
+test('verifyCtxIdBinding rejects a UUID-only mismatch', () => {
+  const body = bodyWithCtxId(CTX_BINDING_CTX);
+  assert.throws(
+    () => AcdpVerifier.verifyCtxIdBinding(JSON.stringify(body), CTX_BINDING_OTHER_UUID),
+    /context substitution/i,
+  );
+});
+
+test('verifyCtxIdBinding rejects an authority-only mismatch', () => {
+  const body = bodyWithCtxId(CTX_BINDING_CTX);
+  assert.throws(
+    () =>
+      AcdpVerifier.verifyCtxIdBinding(JSON.stringify(body), CTX_BINDING_OTHER_AUTHORITY),
+    /context substitution/i,
+  );
+});
+
+test('verifyCtxIdBinding rejects a malformed expectedCtxId', () => {
+  const body = bodyWithCtxId(CTX_BINDING_CTX);
+  assert.throws(
+    () => AcdpVerifier.verifyCtxIdBinding(JSON.stringify(body), 'not-a-ctx-id'),
+    /schema violation|invalid|ctx_id/i,
+  );
+});
+
+test('verifyCtxIdBinding rejects an uppercase-UUID served ctx_id', () => {
+  // Uppercase-UUID rejection must be enforced on the served side too,
+  // not just the expected side.
+  const body = bodyWithCtxId(CTX_BINDING_UPPERCASE_UUID);
+  assert.throws(
+    () => AcdpVerifier.verifyCtxIdBinding(JSON.stringify(body), CTX_BINDING_CTX),
+    /schema violation|invalid|ctx_id/i,
+  );
+});
+
+test('verifyCtxIdBinding rejects an uppercase-UUID expected ctx_id', () => {
+  const body = bodyWithCtxId(CTX_BINDING_CTX);
+  assert.throws(
+    () => AcdpVerifier.verifyCtxIdBinding(JSON.stringify(body), CTX_BINDING_UPPERCASE_UUID),
+    /schema violation|invalid|ctx_id/i,
+  );
+});
+
+test('verifyCtxIdBinding rejects malformed body JSON', () => {
+  assert.throws(
+    () => AcdpVerifier.verifyCtxIdBinding('not json', CTX_BINDING_CTX),
+    /invalid body json/i,
+  );
+});
+
 test('verifyPublishRequestOffline rejects did:web requests (resolution is host-side)', () => {
   const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
   const raw = p.buildPublishRequest({
@@ -981,5 +1067,42 @@ test('verifyReceipt rejects unknown receipt members (closed schema)', () => {
       RCPT_001.content_hash,
       RCPT_001.key_fingerprint,
     ),
+  );
+});
+
+// ── derivedFrom CtxId validation (issue #206 gap G1) ──────────────────────
+//
+// `buildPublishRequest`'s `derivedFrom` option is now routed through
+// `CtxId::parse` at the setter (not deferred to `.build()`'s downstream
+// `validate_publish_request` check), so a malformed entry throws here.
+
+test('buildPublishRequest accepts a valid derivedFrom ctx_id', () => {
+  // Positive control: a well-formed derivedFrom entry builds fine.
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  const raw = p.buildPublishRequest({
+    title: 'derived',
+    contextType: 'data_snapshot',
+    derivedFrom: [
+      'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+    ],
+  });
+  const req = JSON.parse(raw);
+  assert.deepEqual(req.derived_from, [
+    'acdp://registry.example.com/12345678-1234-4321-8123-123456781234',
+  ]);
+});
+
+test('buildPublishRequest rejects a malformed derivedFrom ctx_id', () => {
+  // A malformed derivedFrom entry must throw at the setter, not later
+  // at .build().
+  const p = AcdpProducer.generate(AGENT_DID, KEY_ID);
+  assert.throws(
+    () =>
+      p.buildPublishRequest({
+        title: 'derived',
+        contextType: 'data_snapshot',
+        derivedFrom: ['not-a-ctx-id'],
+      }),
+    /schema violation|invalid|ctx_id/i,
   );
 });

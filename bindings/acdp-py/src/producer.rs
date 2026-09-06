@@ -22,6 +22,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use zeroize::Zeroizing;
 
+use crate::errors::map_acdp_error;
 use crate::helpers::{
     parse_anchors, parse_context_type, parse_data_period, parse_data_refs, parse_lineage_id,
     parse_timestamp, parse_visibility,
@@ -97,7 +98,8 @@ fn apply_publish_fields(
         b = b.metadata(v);
     }
     if let Some(df) = derived_from {
-        b = b.derived_from(df.into_iter().map(CtxId).collect());
+        let parsed: Result<Vec<CtxId>, _> = df.into_iter().map(CtxId::parse).collect();
+        b = b.derived_from(parsed.map_err(map_acdp_error)?);
     }
     if let Some(aud) = audience {
         b = b.audience(aud.into_iter().map(|d| AgentDid::new(&d)).collect());

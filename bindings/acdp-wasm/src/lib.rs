@@ -3,8 +3,9 @@
 //! A pure, **offline** cryptographic verifier for the browser (the
 //! console) and edge/WASI hosts: it lets a consumer render an ACDP
 //! context and independently reach a real verification VERDICT — the
-//! producer signature, the `content_hash`, a registry receipt
-//! (RFC-ACDP-0010), a lineage-head receipt (RFC-ACDP-0011), a
+//! producer signature, the `content_hash`, the `ctx_id` binding
+//! (RFC-ACDP-0006 §4.1 step 7 — see `verifyCtxIdBinding`), a registry
+//! receipt (RFC-ACDP-0010), a lineage-head receipt (RFC-ACDP-0011), a
 //! transparency-log checkpoint / inclusion / consistency proof
 //! (RFC-ACDP-0012), a lifecycle event (RFC-ACDP-0013), a key revocation
 //! (RFC-ACDP-0014), and witness cosignatures + quorum (RFC-ACDP-0015) —
@@ -57,6 +58,19 @@ fn out(r: Result<String, String>) -> Result<String, JsError> {
 #[wasm_bindgen(js_name = verifyContentHash)]
 pub fn verify_content_hash(body_json: &str, expected_hash: &str) -> Result<String, JsError> {
     out(core::verify_content_hash_json(body_json, expected_hash))
+}
+
+/// Verify that a body's *served* `ctx_id` matches the `ctx_id` the
+/// caller *expected* (RFC-ACDP-0006 §4.1 step 7, NORMATIVE). Argument
+/// order is `(bodyJson, expectedCtxId)`: the body's own `ctx_id` is the
+/// *served* identity, `expectedCtxId` is what the caller requested.
+/// Returns a verdict for the served side (a malformed served `ctx_id`,
+/// or a served/expected mismatch, is a fail verdict). Throws on
+/// malformed body JSON or a malformed `expectedCtxId` — that value is
+/// host input, mirroring `verifyContentHash`'s `expectedHash`.
+#[wasm_bindgen(js_name = verifyCtxIdBinding)]
+pub fn verify_ctx_id_binding(body_json: &str, expected_ctx_id: &str) -> Result<String, JsError> {
+    out(core::verify_ctx_id_binding_json(body_json, expected_ctx_id))
 }
 
 /// Verify an Ed25519 signature over the ASCII `"sha256:<hex>"` string.

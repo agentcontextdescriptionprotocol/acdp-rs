@@ -42,6 +42,7 @@ wasm-bindgen exports (camelCase in JS/TypeScript):
 |---|---|---|
 | `verifyContentHash` | 0001 §5.7 | recompute `sha256(JCS(producer_content))` |
 | `verifySignatureEd25519` / `verifySignatureP256` | 0001 §5.8 | signature over the ASCII `"sha256:<hex>"` string |
+| `verifyCtxIdBinding` | 0006 §4.1 step 7 | bind the served `ctx_id` to the one requested — see [Verifying a retrieved body](#verifying-a-retrieved-body) |
 | `verifyBodyOffline` / `verifyPublishRequestOffline` | 0002 | full `did:key` context verify (no resolution) |
 | `fingerprintEd25519` / `verifyReceipt` | 0010 | registry-receipt verification |
 | `verifyLineageHeadReceipt` | 0011 | lineage-head receipt |
@@ -63,12 +64,30 @@ npm install @agentcontextdistributionprotocol/acdp-wasm
 ```
 
 ```js
-import init, { verifyContentHash, verifySignatureEd25519 }
+import init, { verifyContentHash, verifySignatureEd25519, verifyCtxIdBinding }
   from "@agentcontextdistributionprotocol/acdp-wasm";
 await init();
 const verdict = JSON.parse(verifyContentHash(bodyJson, body.content_hash));
 if (verdict.valid) { /* the hash the consumer recomputed itself checks out */ }
+
+// Bind the served ctx_id to the one requested (RFC-ACDP-0006 §4.1 step 7).
+// See "Verifying a retrieved body" below for why this is a separate call.
+const binding = JSON.parse(verifyCtxIdBinding(bodyJson, requestedCtxId));
+if (binding.valid) { /* the ctx_id you got back is the one you asked for */ }
 ```
+
+### Verifying a retrieved body
+
+`ctx_id` is registry-assigned and sits in the RFC-ACDP-0001 §5.7 exclusion
+set, so it is stripped before `content_hash` is computed — neither the hash
+recompute above nor the producer's signature covers it. Without an
+explicit comparison, a registry could serve any other validly-signed body
+from the same producer under the `ctx_id` URL you asked for, and every
+check above would still pass. `verifyCtxIdBinding(bodyJson, expectedCtxId)`
+closes that gap: `bodyJson` carries the *served* identity, `expectedCtxId`
+is what you requested. Like `verifyContentHash`, a malformed *served*
+`ctx_id` is a `{"valid": false, ...}` verdict, not a throw — only a
+malformed `expectedCtxId` argument throws a `JsError`.
 
 The package is built with `wasm-pack --target web`: an ESM module you
 initialize once with `await init()`. This is the target the crate is
@@ -94,10 +113,12 @@ wasm-pack build --target web --out-dir pkg --scope agentcontextdistributionproto
 Import from a browser (local, unpublished build):
 
 ```js
-import init, { verifyContentHash, verifySignatureEd25519 } from "./pkg/acdp_wasm.js";
+import init, { verifyContentHash, verifySignatureEd25519, verifyCtxIdBinding } from "./pkg/acdp_wasm.js";
 await init();
 const verdict = JSON.parse(verifyContentHash(bodyJson, body.content_hash));
 if (verdict.valid) { /* the hash the consumer recomputed itself checks out */ }
+const binding = JSON.parse(verifyCtxIdBinding(bodyJson, requestedCtxId));
+if (binding.valid) { /* the ctx_id you got back is the one you asked for */ }
 ```
 
 ## Golden-vector parity

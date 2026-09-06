@@ -767,3 +767,38 @@ def test_supersede_rejects_malformed_lineage_id():
         p.build_supersede_request(
             json.dumps(body), expected_lineage_id="not-a-lineage-id"
         )
+
+
+# ── derived_from CtxId validation (issue #206 gap G1) ───────────────────
+#
+# `build_publish_request`'s `derived_from` kwarg is now routed through
+# `CtxId::parse` at the setter (not deferred to `.build()`'s downstream
+# `validate_publish_request` check), so a malformed entry fails here,
+# raising `ValueError` via the shared `map_acdp_error` mapper
+# (`AcdpError::SchemaViolation` -> `PyValueError`).
+
+
+def test_derived_from_accepts_valid_ctx_id():
+    """Positive control: a well-formed derived_from entry builds fine."""
+    p = _producer()
+    raw = p.build_publish_request(
+        title="derived",
+        context_type="data_snapshot",
+        derived_from=["acdp://registry.example.com/12345678-1234-4321-8123-123456781234"],
+    )
+    req = json.loads(raw)
+    assert req["derived_from"] == [
+        "acdp://registry.example.com/12345678-1234-4321-8123-123456781234"
+    ]
+
+
+def test_derived_from_rejects_malformed_ctx_id():
+    """A malformed derived_from entry must fail at the setter, not
+    later at .build()."""
+    p = _producer()
+    with pytest.raises(ValueError):
+        p.build_publish_request(
+            title="derived",
+            context_type="data_snapshot",
+            derived_from=["not-a-ctx-id"],
+        )
