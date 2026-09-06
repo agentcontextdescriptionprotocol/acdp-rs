@@ -17,6 +17,14 @@
 //! A failed *verification* is a result to report, not an error: those
 //! functions return `Ok(verdict_json)` with `"valid": false`. Only
 //! malformed host input yields `Err`.
+//!
+//! `verify_ctx_id_binding_json` is the one place this line gets subtle:
+//! `expected_ctx_id` is host input (pre-parsed with `CtxId::parse`, so a
+//! malformed value is `Err`), but a malformed *served* `ctx_id` — i.e.
+//! one embedded in `body_json` — is a fail verdict, because it describes
+//! the thing being verified, not a caller mistake. See
+//! `bindings/acdp-wasm/README.md` for why the binding exists at all
+//! (RFC-ACDP-0006 §4.1 step 7).
 
 use acdp::crypto::{
     canonical_preimage, explain_hash_mismatch, fingerprint_ed25519, verify_body_offline,

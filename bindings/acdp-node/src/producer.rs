@@ -177,8 +177,7 @@ fn apply_publish_fields(
         b = b.metadata(v);
     }
     if let Some(df) = opts.derived_from {
-        let parsed: std::result::Result<Vec<CtxId>, _> =
-            df.into_iter().map(CtxId::parse).collect();
+        let parsed: std::result::Result<Vec<CtxId>, _> = df.into_iter().map(CtxId::parse).collect();
         b = b.derived_from(parsed.map_err(|e| Error::from_reason(e.to_string()))?);
     }
     if let Some(aud) = opts.audience {

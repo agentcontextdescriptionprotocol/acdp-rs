@@ -57,10 +57,33 @@ AcdpVerifier.verifySignature(
 );
 ```
 
+### Verifying a retrieved body
+
+`ctx_id` is registry-assigned and sits in the RFC-ACDP-0001 §5.7 exclusion
+set, so it is stripped before `content_hash` is computed — neither the hash
+recompute above nor the producer's signature covers it. Without an
+explicit comparison, a registry could serve any other validly-signed body
+from the same producer under the `ctx_id` URL you asked for, and every
+check above would still pass. Call `verifyCtxIdBinding` to close that gap
+(RFC-ACDP-0006 §4.1 step 7, NORMATIVE):
+
+```javascript
+// Argument order matters: `bodyJson` carries the *served* ctx_id,
+// `expectedCtxId` is the one you requested.
+AcdpVerifier.verifyCtxIdBinding(JSON.stringify(body), requestedCtxId);
+```
+
+Like the rest of the `AcdpVerifier` bool surface, this returns `true` on
+success and throws on failure — never `false` — so
+`if (AcdpVerifier.verifyCtxIdBinding(...))` guards a branch that can't be
+reached.
+
 ## Verification surface
 
 `AcdpVerifier` covers the full 0.2.0 surface in addition to the basics
-above: offline `did:key` verification (`verifyBodyOffline`,
+above: identity binding (`verifyCtxIdBinding`, see
+[Verifying a retrieved body](#verifying-a-retrieved-body) above),
+offline `did:key` verification (`verifyBodyOffline`,
 `verifyPublishRequestOffline`), registry receipts (`verifyReceipt`,
 `verifyLineageHeadReceipt`), the transparency log (`verifyLogCheckpoint`,
 `verifyLogInclusion`, `verifyLogConsistency`), lifecycle events

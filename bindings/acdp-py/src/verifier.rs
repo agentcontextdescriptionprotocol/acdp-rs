@@ -9,6 +9,12 @@
 //!   and compare against the body's stored `content_hash`.
 //! * `verify_signature` — Ed25519 verify against an already-known
 //!   public key, useful once the host has resolved the producer's DID.
+//! * `verify_ctx_id_binding` — bind the served `ctx_id` (from the body)
+//!   to the `ctx_id` the caller requested (RFC-ACDP-0006 §4.1 step 7,
+//!   NORMATIVE). `ctx_id` is registry-assigned and outside both
+//!   `content_hash` and the producer signature (RFC-ACDP-0001 §5.7), so
+//!   this explicit comparison is the only binding available on the
+//!   receipt-less path.
 //! * `verify_body_offline` / `verify_publish_request_offline` — full
 //!   verification for `did:key` producers (ACDP 0.2), where the key is
 //!   the identity and no resolution is needed at all.

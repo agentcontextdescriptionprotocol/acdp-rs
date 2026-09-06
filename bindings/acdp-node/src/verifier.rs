@@ -6,6 +6,12 @@
 //! ACDP 0.2 offline path: `did:key` bodies and publish requests verify
 //! with no network at all, and registry receipts verify against a
 //! caller-resolved registry key.
+//!
+//! `verifyCtxIdBinding` binds the served `ctx_id` (from the body) to the
+//! `ctx_id` the caller requested (RFC-ACDP-0006 §4.1 step 7, NORMATIVE).
+//! `ctx_id` is registry-assigned and outside both `content_hash` and the
+//! producer signature (RFC-ACDP-0001 §5.7), so this explicit comparison
+//! is the only binding available on the receipt-less path.
 
 //! ACDP 0.3 adds the offline verdict surface (documents supplied by
 //! the caller, never fetched here): `verifyLineageHeadReceipt`

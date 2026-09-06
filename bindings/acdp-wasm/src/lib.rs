@@ -3,8 +3,9 @@
 //! A pure, **offline** cryptographic verifier for the browser (the
 //! console) and edge/WASI hosts: it lets a consumer render an ACDP
 //! context and independently reach a real verification VERDICT — the
-//! producer signature, the `content_hash`, a registry receipt
-//! (RFC-ACDP-0010), a lineage-head receipt (RFC-ACDP-0011), a
+//! producer signature, the `content_hash`, the `ctx_id` binding
+//! (RFC-ACDP-0006 §4.1 step 7 — see `verifyCtxIdBinding`), a registry
+//! receipt (RFC-ACDP-0010), a lineage-head receipt (RFC-ACDP-0011), a
 //! transparency-log checkpoint / inclusion / consistency proof
 //! (RFC-ACDP-0012), a lifecycle event (RFC-ACDP-0013), a key revocation
 //! (RFC-ACDP-0014), and witness cosignatures + quorum (RFC-ACDP-0015) —
