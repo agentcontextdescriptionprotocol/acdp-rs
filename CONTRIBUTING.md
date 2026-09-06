@@ -82,6 +82,9 @@ places:
 Also update `AcdpError::is_transient` if the new code is retryable, and
 `SupersessionReason` if the code uses a `details.reason` sub-vocabulary.
 
+`AcdpError` is `#[non_exhaustive]`, so adding a variant here is no longer a
+semver-breaking change for downstream crates that match on it.
+
 ## Reporting security issues
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
