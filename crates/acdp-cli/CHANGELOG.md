@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-cli-v0.8.5...acdp-cli-v0.9.0) - 2026-09-06
+
+### Fixed
+
+- *(client)* bind the served ctx_id to the requested one ([#189](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/189)) ([#200](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/200))
+
+### Other
+
+- release v0.8.5 ([#187](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/187))
+
 ## [0.8.5](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-cli-v0.8.4...acdp-cli-v0.8.5) - 2026-08-31
 
 ### Other

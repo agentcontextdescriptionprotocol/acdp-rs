@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-client-v0.8.5...acdp-client-v0.9.0) - 2026-09-06
+
+### Added
+
+- [**breaking**] mark AcdpError and VerificationReport #[non_exhaustive] ([#205](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/205))
+
+### Fixed
+
+- *(client)* enforce query scope and trust class in find_revocations ([#191](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/191)) ([#204](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/204))
+- *(client)* bind the served ctx_id to the requested one ([#189](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/189)) ([#200](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/200))
+
+### Other
+
+- release v0.8.5 ([#187](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/187))
+
 ## [0.8.5](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-client-v0.8.4...acdp-client-v0.8.5) - 2026-08-31
 
 ### Other

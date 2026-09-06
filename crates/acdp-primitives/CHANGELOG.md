@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-primitives-v0.8.5...acdp-primitives-v0.9.0) - 2026-09-06
+
+### Added
+
+- [**breaking**] mark AcdpError and VerificationReport #[non_exhaustive] ([#205](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/205))
+
+### Fixed
+
+- *(client)* bind the served ctx_id to the requested one ([#189](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/189)) ([#200](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/200))
+
 ## [0.8.2](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-primitives-v0.8.1...acdp-primitives-v0.8.2) - 2026-08-30
 
 ### Other

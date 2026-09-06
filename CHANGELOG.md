@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.8.5...acdp-v0.9.0) - 2026-09-06
+
+### Changed
+
+- **[BREAKING] `AcdpError` and `VerificationReport` are now `#[non_exhaustive]`**
+  ([#205](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/205)).
+  Downstream crates that match exhaustively on `AcdpError` must add a `_` wildcard arm.
+  `VerificationReport` can no longer be constructed via struct literal outside
+  `acdp-client`; it is an output-only diagnostic type and was never intended to be.
+  Taken deliberately in this release rather than later: the two fixes below already
+  forced a break (a new error variant and a new report field), so marking both types
+  now means downstream absorbs **one** break instead of one per future RFC — this
+  protocol keeps adding wire error codes (25 today, up from 21). Precedent:
+  `SsrfReason` in `acdp-safe-http` already takes this stance.
+
+### Fixed
+
+- **Context substitution is now refused across every verified retrieval path** (#189,
+  [#200](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/200)).
+  `verify_retrieved` accepted an `expected_ctx_id` but never compared it to
+  `ctx.body.ctx_id`, so a registry serving context B where A was requested passed every
+  check — hash recomputation, producer signature, DID resolution and key authorization
+  are all self-referential over whatever body came back. `ctx_id` is registry-assigned
+  and sits in the RFC-ACDP-0001 §5.7 exclusion set, so neither `content_hash` nor the
+  producer signature covers it; a client-side equality check is the only binding
+  available when no receipt is served. The receipt path already bound it, so the gap was
+  exactly `ReceiptPolicy::VerifyIfPresent` with `registry_receipt: None` — the whole
+  core-profile v0.1.0 world.
+  This implements **RFC-ACDP-0006 §4.1 step 7 (NORMATIVE)**, added to the spec in
+  `285e9dc` with conformance fixture `fed-011-ctx-id-binding.json`; it is conformance,
+  not optional hardening. New error variant `AcdpError::ContextIdMismatch` — step 7
+  permits a consumer-side "equivalent typed error", and reusing
+  `CrossRegistryResolutionFailed` would have been wrong because it is classified
+  *transient*, so retry-aware callers would have retried a substitution attack.
+  It does **not** close RFC-ACDP-0008 §9.1 in full: a registry that genuinely republishes
+  content under a new `ctx_id` still passes; only serve-time substitution is caught.
+  **Consumer-visible behavior change:** a non-canonical `ctx_id` argument to the `acdp`
+  CLI now exits locally with `schema_violation` before any network request, rather than
+  producing a registry 404.
+
+- **`find_revocations` now enforces query scope and trust class** (#191,
+  [#204](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/204)).
+  Its doc claimed a producer-scoped query cannot return registry-attested revocations;
+  nothing enforced it. The trust class is derived purely from
+  `revoked_key_controller != agent_id`, and the only §5 identity check compares the
+  signing key to the revoked key, never publisher identity — so a producer could publish
+  `agent_id = P, revoked_key_controller = Q` revoking Q's fingerprint, and it would
+  verify and be returned by a P-scoped query. Because RFC-ACDP-0014 §7 encourages caching
+  keyed by `revoked_key_fingerprint`, that is a cross-producer DoS reached through a store
+  write, from a body that verified.
+  **Caller-visible behavior change:** results are now filtered to those whose `publisher`
+  equals the queried `agent_id` **and** whose trust class is `ProducerSigned`. Callers
+  that relied on this function to surface §6 registry attestations must switch to
+  `find_registry_attested_revocations`, added in the same release. Note `agent_id` is
+  matched by **exact bytes** — `AgentDid` does not normalize case — so a case-variant DID
+  yields an empty result; pass the DID as published.
+  Dropped candidates are surfaced via `tracing::warn!` when the `tracing` feature is
+  enabled (RFC-ACDP-0014 §13's first-named mitigation, "surfacing which DID issued each
+  acted-upon revocation").
+
+### Added
+
+- `find_registry_attested_revocations` and `KeyRevocation::cross_check_registry_binding`
+  ([#204](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/204)) —
+  RFC-ACDP-0014 §8's prescribed registry-scoped discovery query, and the §6 publisher
+  binding it relies on. Required rather than additive: the `find_revocations` filtering
+  above would otherwise remove a documented capability with no replacement.
+
+### Other
+
+- move off yanked wnaf 0.14.0 ([#201](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/201))
+
 ## [0.8.5](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.8.4...acdp-v0.8.5) - 2026-08-30
 
 ### Fixed
