@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.9.0...acdp-v0.9.1) - 2026-09-06
+
+### Added
+
+- **The Python, Node and wasm SDKs can now perform the RFC-ACDP-0006 §4.1 step-7
+  context-identity binding** ([#206](https://github.com/agentcontextdistributionprotocol/acdp-rs/issues/206),
+  [#214](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/214)).
+  **If you verify retrieved contexts through a binding, read this.** `ctx_id` is
+  registry-assigned and sits in the RFC-ACDP-0001 §5.7 exclusion set, so it is stripped from
+  ProducerContent before hashing — neither `content_hash` recomputation nor the producer
+  signature covers it. Until now the bindings offered no way to check it on the receipt-less
+  path, so a consumer calling `verify_content_hash` + `verify_signature` and treating
+  `true`/`true` as "this is the context I asked for" was exposed to context substitution: a
+  compromised registry could serve any other validly-signed body from the same producer under
+  the requested context's URL and every other check would still pass. The Rust client has
+  enforced this since 0.9.0; the SDKs had no equivalent.
+  New: `AcdpVerifier.verify_ctx_id_binding(body_json, expected_ctx_id)` (Python),
+  `AcdpVerifier.verifyCtxIdBinding(bodyJson, expectedCtxId)` (Node), and
+  `verifyCtxIdBinding(bodyJson, expectedCtxId)` (wasm), all backed by
+  `acdp::verify::verify_ctx_id_binding`. **Add it to your verify sequence for any retrieval
+  that arrives without a registry receipt** — the documented recipes in `docs/bindings.md` and
+  each binding's README have been updated to include the step. It fails closed: both
+  identifiers are parsed before comparison, so a malformed id on either side is an error
+  rather than a silent pass. Note this is deliberately stricter than conformance fixture
+  `fed-011`'s `uri_encoding_and_path_style_equivalence` case — non-canonical forms are refused
+  rather than normalised, which yields false refusals, never false acceptances.
+  Every unvalidated `CtxId` construction in the bindings was also routed through
+  `CtxId::parse`, including two `derived_from` sites in the Python and Node producers.
+- *(server)* enforce RFC-ACDP-0014 §4/§5 key-revocation validation at publish ([#207](https://github.com/agentcontextdistributionprotocol/acdp-rs/issues/207)) ([#217](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/217)) — see **Changed** below for what this rejects.
+- `KeyRevocation::from_publish_request`, so the RFC-ACDP-0014 §4 shape table can be validated
+  from a `PublishRequest` and not only from a retrieved `Body`. One implementation now backs
+  both entry points.
+
+### Other
+
+- re-arm the release semver gate ([#208](https://github.com/agentcontextdistributionprotocol/acdp-rs/issues/208)) ([#212](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/212)).
+  `release-plz.toml`'s `semver_check = true` gate was documented as blocking but had been
+  reporting a false green: the pinned `cargo-semver-checks` could not parse current stable
+  rustdoc output, and release-plz classifies a tool crash as "API compatible". It logged
+  `✓ API compatible changes` for all 12 crates on a release that carried a known breaking
+  change. The tool is now pinned to a working version in both the advisory CI job and the
+  blocking release gate, and a non-advisory job fails when the tool cannot run rather than
+  when it merely finds a break. Filed upstream as release-plz/release-plz#3018. This affects
+  release tooling only — no library behaviour changes.
+
 ### Changed
 
 - **`PublishValidator` now enforces the RFC-ACDP-0014 §4 `key-revocation` shape table at
