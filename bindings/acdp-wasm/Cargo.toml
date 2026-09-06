@@ -45,7 +45,7 @@ producer = []
 acdp       = { path = "../..", default-features = false }
 wasm-bindgen = "0.2"
 serde_json = "1"
-base64     = "0.22"
+base64     = "0.23"
 chrono     = { version = "0.4", features = ["serde"] }
 hex        = "0.4"
 
