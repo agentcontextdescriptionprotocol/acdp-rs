@@ -88,7 +88,8 @@ pub struct KeyRevocation {
     /// producer-signed; different ⇒ registry-attested. MUST NOT be
     /// collapsed when reporting (§6). For a registry-attested claim the
     /// caller still owns confirming that `publisher` really is the DID
-    /// of a registry it talks to (`capabilities.registry_did`).
+    /// of a registry it talks to — see
+    /// [`Self::cross_check_registry_binding`].
     pub trust_class: RevocationTrustClass,
 }
 
@@ -247,6 +248,55 @@ impl KeyRevocation {
     pub fn revokes(&self, key_fingerprint: &str) -> bool {
         self.revoked_key_fingerprint == key_fingerprint
     }
+
+    /// Registry-attestation binding (pure): `publisher` — the identity
+    /// this revocation was actually published under — MUST equal both
+    /// `did:web:<serving_authority>` (the authority the context was
+    /// actually fetched from, not whatever the body claims) AND the
+    /// serving registry's advertised `capabilities.registry_did`. The
+    /// two halves have different citations: the `registry_did` half is
+    /// RFC-ACDP-0014 §6 step 2; the `serving_authority` half is not a
+    /// §6 step at all — it is the ACDP-wide `registry_did`↔authority
+    /// invariant of RFC-ACDP-0011 §7 step 3 / RFC-ACDP-0012 §9.3 step 3
+    /// (the two house-pattern siblings), applied here to key
+    /// revocations.
+    ///
+    /// A [`RevocationTrustClass::RegistryAttested`] revocation imports
+    /// its authority entirely from *who published it* — §5 body
+    /// verification alone only proves the body is genuinely signed by
+    /// `publisher`'s current key, not that `publisher` is the specific
+    /// registry a caller actually talks to. Without this check a
+    /// consumer could apply a registry-attested revocation on the say-so
+    /// of any producer willing to name someone else as
+    /// `revoked_key_controller`; this pins `publisher` to the one
+    /// registry both the transport (`serving_authority`) and the
+    /// registry's own self-description (`capabilities_registry_did`)
+    /// agree on.
+    ///
+    /// Pure — no DID resolution or network I/O — so it stays exposable
+    /// from the language bindings.
+    pub fn cross_check_registry_binding(
+        &self,
+        serving_authority: &str,
+        capabilities_registry_did: &str,
+    ) -> Result<(), AcdpError> {
+        let expected_did = acdp_did::web::authority_to_did_web(serving_authority);
+        if self.publisher.as_str() != expected_did {
+            return Err(AcdpError::KeyNotAuthorized(format!(
+                "key-revocation publisher '{}' ≠ serving authority's DID '{expected_did}' \
+                 (RFC-ACDP-0014 §6 steps 2–3)",
+                self.publisher
+            )));
+        }
+        if self.publisher.as_str() != capabilities_registry_did {
+            return Err(AcdpError::KeyNotAuthorized(format!(
+                "key-revocation publisher '{}' ≠ capabilities.registry_did \
+                 '{capabilities_registry_did}' (RFC-ACDP-0014 §6 steps 2–3)",
+                self.publisher
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The effective compromise boundary for `key_fingerprint` across a set
@@ -317,6 +367,60 @@ fn parse_canonical_ms(raw: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registry_attested_rev(publisher: &str) -> KeyRevocation {
+        KeyRevocation {
+            revoked_key_fingerprint: format!("sha256:{}", "a1".repeat(32)),
+            compromised_since: parse_canonical_ms("2026-05-01T00:00:00.000Z").unwrap(),
+            reason: None,
+            revoked_key_id: None,
+            revoked_key_controller: AgentDid::new("did:web:agents.example.com:producer"),
+            publisher: AgentDid::new(publisher),
+            trust_class: RevocationTrustClass::RegistryAttested,
+        }
+    }
+
+    /// RFC-ACDP-0014 §6 steps 2–3: `publisher` must equal both the
+    /// serving authority's DID and `capabilities.registry_did`. All
+    /// aligned ⇒ `Ok`; either mismatch ⇒ `Err(KeyNotAuthorized)`.
+    #[test]
+    fn cross_check_registry_binding_success_and_both_failure_directions() {
+        let rev = registry_attested_rev("did:web:registry.example.com");
+
+        rev.cross_check_registry_binding("registry.example.com", "did:web:registry.example.com")
+            .expect("serving authority and capabilities.registry_did both match publisher");
+
+        // Wrong serving authority.
+        assert!(matches!(
+            rev.cross_check_registry_binding("hostile.example", "did:web:registry.example.com"),
+            Err(AcdpError::KeyNotAuthorized(_))
+        ));
+
+        // Wrong capabilities.registry_did.
+        assert!(matches!(
+            rev.cross_check_registry_binding("registry.example.com", "did:web:other.example"),
+            Err(AcdpError::KeyNotAuthorized(_))
+        ));
+    }
+
+    /// `did:web:localhost%3A8443` — the percent-encoded-port form
+    /// `authority_to_did_web` produces for a `host:port` authority
+    /// (RFC-ACDP-0014 §6 steps 2–3; live in this codebase's own test
+    /// harness, which binds ephemeral ports, not merely hypothetical).
+    #[test]
+    fn cross_check_registry_binding_percent_encoded_port_authority() {
+        let rev = registry_attested_rev("did:web:localhost%3A8443");
+
+        rev.cross_check_registry_binding("localhost:8443", "did:web:localhost%3A8443")
+            .expect("host:port authority round-trips through authority_to_did_web");
+
+        // A bare-hostname serving authority (no port) must NOT match a
+        // publisher bound to the port-bearing form.
+        assert!(matches!(
+            rev.cross_check_registry_binding("localhost", "did:web:localhost%3A8443"),
+            Err(AcdpError::KeyNotAuthorized(_))
+        ));
+    }
 
     #[test]
     fn fingerprint_form_edges() {

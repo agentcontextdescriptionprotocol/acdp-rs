@@ -43,6 +43,7 @@ you do not opt in:
 | **Timeouts** | 5 s connect, 30 s total. | RFC-ACDP-0006 §7.4 |
 | **Algorithm-downgrade rejection** | The signature algorithm must match the algorithm of the resolved DID verification method. | RFC-ACDP-0001 §5.10 |
 | **Ed25519 mandatory** | Ed25519 is always supported; downgrade attacks are rejected. | RFC-ACDP-0001 §5.10 |
+| **Context-identity binding** | The served body's `ctx_id` must equal the one requested; mismatch is treated as a failed resolution (fail-closed). This is the only binding available on the receipt-less path, since `ctx_id` is registry-assigned and outside `content_hash`/signature coverage. | RFC-ACDP-0006 §4.1 step 7 (NORMATIVE) |
 
 > The size, redirect, and timeout constants are exposed as
 > `acdp::registry::{MAX_CONTEXT_BYTES, MAX_METADATA_BYTES, MAX_REDIRECTS}` and

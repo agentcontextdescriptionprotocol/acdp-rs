@@ -96,7 +96,7 @@ use acdp::{client::{RegistryClient, VerifiedContext}, did::WebResolver, types::C
 
 let client   = RegistryClient::new("https://registry.example.com")?;
 let resolver = WebResolver::new();
-let ctx_id   = CtxId("acdp://registry.example.com/…".into());
+let ctx_id   = CtxId::parse("acdp://registry.example.com/a1b2c3d4-e5f6-4789-8abc-def012345678")?;
 
 let ctx = VerifiedContext::fetch(&client, &resolver, &ctx_id).await?;
 println!("{} — {:?}", ctx.body().title, ctx.registry_state().status);
@@ -107,11 +107,20 @@ The stages, in order (it returns on the **first** failure):
 
 | # | Stage | Failure error |
 |---|---|---|
+| 0 | **Identifier binding** — the served body's `ctx_id` must equal the one requested, per RFC-ACDP-0006 §4.1 step 7 (NORMATIVE); see RFC-ACDP-0008 §9.1 for the threat rationale | `ContextIdMismatch` |
 | 1 | **Schema validation** (`validate_body`) — structural + embedded `data_ref` hashes | `SchemaViolation`, `DataRefHashMismatch` |
 | 2 | **`content_hash` recompute** — `sha256(JCS(ProducerContent))` vs declared | `HashMismatch` |
 | 3 | **`did:web` key resolution** via `WebResolver` | `KeyResolution`, `KeyResolutionUnreachable` |
 | 4 | **Signature verification** against the resolved key (algorithm must match) | `InvalidSignature`, `UnsupportedAlgorithm` |
 | 5 | **Status check** per policy | — |
+
+Stage 0 is the client-side form of the check: §4.1 step 7 permits "an
+equivalent typed error" in place of the registry-side
+`cross_registry_resolution_failed` wire code, and `ContextIdMismatch` is
+that typed error. It does not close RFC-ACDP-0008 §9.1 in full — a registry
+that genuinely republishes the same content under a new `ctx_id` still
+passes; only serve-time substitution (a different id claimed to be the one
+requested) is caught.
 
 This is exactly what the offline `cargo run --example consumer` demonstrates,
 step by step.
@@ -165,9 +174,15 @@ assert!(report.schema_ok && report.body_hash_ok && report.signature_ok);
 | `signature_ok` | producer signature verified against the resolved DID key. |
 | `data_ref_embedded` | per-`DataRef` embedded-hash outcome, in `body.data_refs` order. |
 | `data_ref_external` | per-`DataRef` external-fetch outcome; `None` = not attempted. |
+| `ctx_id_ok` | the served body's `ctx_id` matched the one requested (RFC-ACDP-0006 §4.1 step 7, NORMATIVE). |
 
 `fetch_report_with_fetcher` additionally fetches and verifies external
 `data_ref` locations (see below).
+
+`fetch_report` and `fetch_report_with_fetcher` return
+`AcdpError::ContextIdMismatch` on a mismatch, while `fetch_report_diagnose`
+— which reports rather than short-circuits — returns `Ok((None, report))`
+with `ctx_id_ok == false`, i.e. it withholds the `VerifiedContext` handle.
 
 ## Fetching data references
 
@@ -193,7 +208,7 @@ transport (e.g. for `s3://` or authenticated origins).
 ## Cross-registry resolution
 
 `CrossRegistryResolver` walks `derived_from` provenance edges across registries,
-following the seven-step algorithm in RFC-ACDP-0006 §4.1 with cycle detection,
+following the eight-step algorithm in RFC-ACDP-0006 §4.1 with cycle detection,
 depth/node/fan-out caps, and a wall-clock budget.
 
 ```rust,no_run
