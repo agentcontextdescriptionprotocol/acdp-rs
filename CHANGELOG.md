@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.8.5...acdp-v0.9.0) - 2026-09-06
+
+### Fixed
+
+- *(client)* enforce query scope and trust class in find_revocations ([#191](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/191)) ([#204](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/204))
+- *(client)* bind the served ctx_id to the requested one ([#189](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/189)) ([#200](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/200))
+
+### Other
+
+- move off yanked wnaf 0.14.0 ([#201](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/201))
+
 ## [0.8.5](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.8.4...acdp-v0.8.5) - 2026-08-30
 
 ### Fixed
