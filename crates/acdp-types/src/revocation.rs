@@ -16,8 +16,9 @@
 //! signing key's fingerprint — `acdp-client` wires the full pipeline.
 
 use crate::body::Body;
+use crate::publish::PublishRequest;
 use acdp_primitives::error::AcdpError;
-use acdp_primitives::primitives::{AgentDid, Visibility};
+use acdp_primitives::primitives::{AgentDid, ContextType, Visibility};
 use acdp_primitives::time::fmt_rfc3339_ms;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -121,17 +122,59 @@ impl KeyRevocation {
     /// This does NOT verify the body's hash or signature — a parsed
     /// revocation is untrusted until the strict §5.11 pipeline passes.
     pub fn from_body(body: &Body) -> Result<Self, AcdpError> {
-        if !body.context_type.is_key_revocation() {
+        Self::from_parts(
+            &body.context_type,
+            &body.visibility,
+            body.metadata.as_ref(),
+            &body.agent_id,
+            &body.signature.key_id,
+        )
+    }
+
+    /// Parse and shape-validate a `key-revocation` context carried as a
+    /// producer-submitted [`PublishRequest`] — i.e. *before* the registry
+    /// has assigned `ctx_id`/`lineage_id`/`origin_registry`/`created_at`.
+    /// Enforces exactly the same RFC-ACDP-0014 §4 shape table as
+    /// [`Self::from_body`] (see its doc comment for the itemized list),
+    /// because none of those checks touch a registry-assigned field.
+    ///
+    /// This is the entry point a `PublishValidator` — which sees a
+    /// `PublishRequest`, never a `Body` — uses to run the §4 checks at
+    /// publish time.
+    pub fn from_publish_request(req: &PublishRequest) -> Result<Self, AcdpError> {
+        Self::from_parts(
+            &req.context_type,
+            &req.visibility,
+            req.metadata.as_ref(),
+            &req.agent_id,
+            &req.signature.key_id,
+        )
+    }
+
+    /// Shared RFC-ACDP-0014 §4 shape-validation core over the five fields
+    /// the constraint table actually touches. Identical on `Body` and
+    /// `PublishRequest`, which is why [`Self::from_body`] and
+    /// [`Self::from_publish_request`] both delegate here instead of each
+    /// carrying their own copy — see [`Self::from_body`]'s doc comment
+    /// for the itemized list of what is enforced.
+    fn from_parts(
+        context_type: &ContextType,
+        visibility: &Visibility,
+        metadata: Option<&serde_json::Value>,
+        agent_id: &AgentDid,
+        signing_key_id: &str,
+    ) -> Result<Self, AcdpError> {
+        if !context_type.is_key_revocation() {
             return Err(AcdpError::SchemaViolation(format!(
                 "not a key-revocation context: type is '{}' (RFC-ACDP-0014 §4 requires \
                  'key-revocation', or 'acdp:key-revocation' in the pre-0.3.0 interim form)",
-                serde_json::to_value(&body.context_type)
+                serde_json::to_value(context_type)
                     .ok()
                     .and_then(|v| v.as_str().map(str::to_owned))
                     .unwrap_or_default()
             )));
         }
-        if body.visibility != Visibility::Public {
+        if *visibility != Visibility::Public {
             return Err(AcdpError::SchemaViolation(
                 "a key-revocation context MUST be visibility 'public' — it is a safety \
                  broadcast; an audience-restricted revocation protects nobody outside the \
@@ -140,18 +183,14 @@ impl KeyRevocation {
             ));
         }
 
-        let meta = body
-            .metadata
-            .as_ref()
-            .and_then(|m| m.as_object())
-            .ok_or_else(|| {
-                AcdpError::SchemaViolation(
-                    "key-revocation body has no metadata object; \
-                     metadata.revoked_key_fingerprint and metadata.compromised_since are \
-                     REQUIRED (RFC-ACDP-0014 §4)"
-                        .into(),
-                )
-            })?;
+        let meta = metadata.and_then(|m| m.as_object()).ok_or_else(|| {
+            AcdpError::SchemaViolation(
+                "key-revocation body has no metadata object; \
+                 metadata.revoked_key_fingerprint and metadata.compromised_since are \
+                 REQUIRED (RFC-ACDP-0014 §4)"
+                    .into(),
+            )
+        })?;
 
         let fingerprint = required_str(meta, "revoked_key_fingerprint")?;
         if !is_sha256_fingerprint(fingerprint) {
@@ -181,10 +220,10 @@ impl KeyRevocation {
 
         let (revoked_key_controller, trust_class) =
             match optional_str(meta, "revoked_key_controller")? {
-                None => (body.agent_id.clone(), RevocationTrustClass::ProducerSigned),
+                None => (agent_id.clone(), RevocationTrustClass::ProducerSigned),
                 Some(c) => {
                     let controller = AgentDid::parse(&c)?;
-                    if controller == body.agent_id {
+                    if controller == *agent_id {
                         // §5 rule 3: present-and-equal is the explicit
                         // producer-signed controller binding.
                         (controller, RevocationTrustClass::ProducerSigned)
@@ -202,7 +241,7 @@ impl KeyRevocation {
             reason,
             revoked_key_id,
             revoked_key_controller,
-            publisher: body.agent_id.clone(),
+            publisher: agent_id.clone(),
             trust_class,
         };
 
@@ -210,8 +249,8 @@ impl KeyRevocation {
         // derivable from the key_id itself with no resolution. A
         // malformed did:key key_id is left for signature verification
         // to reject — this check is best-effort by design.
-        if body.signature.key_id.starts_with("did:key:") {
-            if let Ok(material) = acdp_did::key::resolve_did_key_url(&body.signature.key_id) {
+        if signing_key_id.starts_with("did:key:") {
+            if let Ok(material) = acdp_did::key::resolve_did_key_url(signing_key_id) {
                 if let Ok(fp) = acdp_crypto::fingerprint::fingerprint_did_key_material(&material) {
                     revocation.check_not_self_signed(&fp)?;
                 }
@@ -367,6 +406,346 @@ fn parse_canonical_ms(raw: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body::Signature;
+    use acdp_primitives::primitives::{ContentHash, CtxId, LineageId};
+
+    // ── from_publish_request: mirrors the from_body shape-violation
+    // coverage above, over the PublishRequest-shaped entry point Phase 5
+    // adds (RFC-ACDP-0014 §4). ──────────────────────────────────────────
+
+    const PR_PRODUCER_DID: &str = "did:web:agents.example.com:pr-test-producer";
+    const PR_COMPROMISED_SINCE: &str = "2026-05-01T00:00:00.000Z";
+
+    fn pr_valid_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "revoked_key_fingerprint": format!("sha256:{}", "a".repeat(64)),
+            "compromised_since": PR_COMPROMISED_SINCE,
+        })
+    }
+
+    fn publish_request_with_metadata(metadata: Option<serde_json::Value>) -> PublishRequest {
+        PublishRequest {
+            version: 1,
+            supersedes: None,
+            agent_id: AgentDid::new(PR_PRODUCER_DID),
+            contributors: vec![],
+            title: "Key revocation — key-1 compromised".into(),
+            context_type: ContextType::KeyRevocation,
+            data_refs: vec![],
+            derived_from: vec![],
+            visibility: Visibility::Public,
+            content_hash: ContentHash("sha256:0".into()),
+            signature: Signature {
+                algorithm: "ed25519".into(),
+                key_id: format!("{PR_PRODUCER_DID}#key-1"),
+                value: "A".repeat(88),
+            },
+            audience: None,
+            acdp_version: Some("0.3.0".into()),
+            description: None,
+            summary: None,
+            lineage_id: None,
+            tags: None,
+            domain: None,
+            expires_at: None,
+            data_period: None,
+            metadata,
+            schema_uri: None,
+            anchors: None,
+        }
+    }
+
+    /// Positive control: a shape-conformant request is accepted, and
+    /// classifies as producer-signed — proving the rejection tests below
+    /// aren't passing vacuously.
+    #[test]
+    fn from_publish_request_valid_case_is_accepted() {
+        let req = publish_request_with_metadata(Some(pr_valid_metadata()));
+        let rev =
+            KeyRevocation::from_publish_request(&req).expect("shape-conformant request must parse");
+        assert_eq!(rev.trust_class, RevocationTrustClass::ProducerSigned);
+        assert_eq!(rev.publisher.as_str(), PR_PRODUCER_DID);
+        assert_eq!(rev.revoked_key_controller.as_str(), PR_PRODUCER_DID);
+    }
+
+    #[test]
+    fn from_publish_request_wrong_context_type_rejected() {
+        let mut req = publish_request_with_metadata(Some(pr_valid_metadata()));
+        req.context_type = ContextType::Analysis;
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_non_public_visibility_rejected() {
+        let mut req = publish_request_with_metadata(Some(pr_valid_metadata()));
+        req.visibility = Visibility::Restricted;
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_missing_metadata_rejected() {
+        let req = publish_request_with_metadata(None);
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_missing_fingerprint_rejected() {
+        let mut meta = pr_valid_metadata();
+        meta.as_object_mut()
+            .unwrap()
+            .remove("revoked_key_fingerprint");
+        let req = publish_request_with_metadata(Some(meta));
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_malformed_fingerprint_rejected() {
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_fingerprint"] = serde_json::json!("not-a-fingerprint");
+        let req = publish_request_with_metadata(Some(meta));
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_missing_compromised_since_rejected() {
+        let mut meta = pr_valid_metadata();
+        meta.as_object_mut().unwrap().remove("compromised_since");
+        let req = publish_request_with_metadata(Some(meta));
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_non_canonical_compromised_since_rejected() {
+        let mut meta = pr_valid_metadata();
+        // No fractional-seconds component — RFC 3339-valid but not the
+        // canonical millisecond form RFC-ACDP-0001 §5.3 requires.
+        meta["compromised_since"] = serde_json::json!("2026-05-01T00:00:00Z");
+        let req = publish_request_with_metadata(Some(meta));
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_reason_over_limit_rejected() {
+        let mut meta = pr_valid_metadata();
+        meta["reason"] = serde_json::json!("x".repeat(MAX_REASON_CHARS + 1));
+        let req = publish_request_with_metadata(Some(meta));
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    /// `from_body` and `from_publish_request` share `from_parts`: over
+    /// the five fields the §4 table touches, equivalent input must
+    /// produce an identical parsed `KeyRevocation`, not merely the same
+    /// pass/fail verdict.
+    #[test]
+    fn from_body_and_from_publish_request_agree_on_equivalent_input() {
+        let metadata = Some(pr_valid_metadata());
+        let req = publish_request_with_metadata(metadata.clone());
+        let body = body_from_pr_request(&req);
+
+        assert_eq!(
+            KeyRevocation::from_publish_request(&req).unwrap(),
+            KeyRevocation::from_body(&body).unwrap()
+        );
+    }
+
+    /// Builds the `Body` a registry would derive from `req`, mirroring
+    /// `from_body_and_from_publish_request_agree_on_equivalent_input`'s
+    /// fixture so error-path equivalence tests can reuse it verbatim.
+    fn body_from_pr_request(req: &PublishRequest) -> Body {
+        Body::from_publish_request(
+            req,
+            CtxId("acdp://registry.example.com/00000000-0000-4000-8000-000000000000".into()),
+            LineageId(format!("lin:sha256:{}", "0".repeat(64))),
+            "registry.example.com",
+            DateTime::parse_from_rfc3339("2026-05-02T08:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+    }
+
+    /// Gap E: agreement must hold on the ERROR path too, and not merely
+    /// at the variant level — every §4 shape violation returns
+    /// `SchemaViolation`, so comparing variants alone would pass even if
+    /// `from_body` and `from_publish_request` disagreed on the message.
+    /// Covers two distinct violations: non-public visibility (a
+    /// top-level-field check) and a malformed fingerprint (a
+    /// metadata-field check).
+    #[test]
+    fn from_body_and_from_publish_request_agree_on_error_message() {
+        // Violation 1: non-public visibility.
+        let mut req = publish_request_with_metadata(Some(pr_valid_metadata()));
+        req.visibility = Visibility::Restricted;
+        let body = body_from_pr_request(&req);
+        let pr_err = KeyRevocation::from_publish_request(&req).unwrap_err();
+        let body_err = KeyRevocation::from_body(&body).unwrap_err();
+        assert!(matches!(pr_err, AcdpError::SchemaViolation(_)));
+        assert_eq!(pr_err.to_string(), body_err.to_string());
+
+        // Violation 2: malformed fingerprint.
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_fingerprint"] = serde_json::json!("not-a-fingerprint");
+        let req = publish_request_with_metadata(Some(meta));
+        let body = body_from_pr_request(&req);
+        let pr_err = KeyRevocation::from_publish_request(&req).unwrap_err();
+        let body_err = KeyRevocation::from_body(&body).unwrap_err();
+        assert!(matches!(pr_err, AcdpError::SchemaViolation(_)));
+        assert_eq!(pr_err.to_string(), body_err.to_string());
+    }
+
+    // ── from_publish_request: revoked_key_controller classification ────
+
+    /// Controller present and equal to `agent_id` is the explicit form
+    /// of the producer-signed binding (distinct from the
+    /// controller-absent case `from_publish_request_valid_case_is_accepted`
+    /// already covers).
+    #[test]
+    fn from_publish_request_controller_equal_to_agent_id_is_producer_signed() {
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(PR_PRODUCER_DID);
+        let req = publish_request_with_metadata(Some(meta));
+        let rev = KeyRevocation::from_publish_request(&req).unwrap();
+        assert_eq!(rev.trust_class, RevocationTrustClass::ProducerSigned);
+        assert_eq!(rev.revoked_key_controller.as_str(), PR_PRODUCER_DID);
+    }
+
+    /// Controller present and different from `agent_id` classifies as
+    /// registry-attested. Classification only — Phase 6 owns enforcing
+    /// that the publisher really is a trusted registry.
+    #[test]
+    fn from_publish_request_controller_different_from_agent_id_is_registry_attested() {
+        const OTHER_PRODUCER: &str = "did:web:agents.example.com:other-producer";
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(OTHER_PRODUCER);
+        let req = publish_request_with_metadata(Some(meta));
+        let rev = KeyRevocation::from_publish_request(&req).unwrap();
+        assert_eq!(rev.trust_class, RevocationTrustClass::RegistryAttested);
+        assert_eq!(rev.revoked_key_controller.as_str(), OTHER_PRODUCER);
+        assert_eq!(rev.publisher.as_str(), PR_PRODUCER_DID);
+    }
+
+    #[test]
+    fn from_publish_request_controller_not_a_string_rejected() {
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(42);
+        let req = publish_request_with_metadata(Some(meta));
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    #[test]
+    fn from_publish_request_controller_invalid_did_rejected() {
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_controller"] = serde_json::json!("not-a-did");
+        let req = publish_request_with_metadata(Some(meta));
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::SchemaViolation(_))
+        ));
+    }
+
+    // ── from_publish_request: §5 step 2 did:key self-sign tail ─────────
+    // All tests above use a did:web key_id, leaving `from_parts`' pure
+    // did:key self-sign check (revocation.rs ~252-258) dead in every one
+    // of them. These drive it explicitly through `from_publish_request`,
+    // reusing the fixture approach of
+    // `tests/key_revocation.rs::rev_001_did_key_self_revocation_rejected_at_parse`
+    // but built from primitives already in acdp-types's dependency graph
+    // (acdp-crypto and acdp-did are ordinary, non-dev dependencies —
+    // `from_parts` itself already calls into them) rather than
+    // `acdp-producer`'s `Producer`, which sits above acdp-types in the
+    // crate stack and is unavailable here.
+
+    /// Builds a did:key `signature.key_id` and its RFC-ACDP-0010 §6
+    /// fingerprint from an Ed25519 seed, mirroring
+    /// `rev_001_did_key_self_revocation_rejected_at_parse`'s fixture.
+    fn did_key_fixture(seed: [u8; 32]) -> (String, String) {
+        let signing_key = acdp_crypto::SigningKey::from_bytes(&seed);
+        let public_key = signing_key.verifying_key_bytes();
+        let did = acdp_did::key::did_key_from_ed25519(&public_key);
+        let key_id = acdp_did::key::did_key_url(&did).unwrap();
+        let fingerprint = acdp_crypto::fingerprint::fingerprint_ed25519(&public_key);
+        (key_id, fingerprint)
+    }
+
+    /// Negative: `signature.key_id` is a did:key URL whose derived
+    /// fingerprint EQUALS `metadata.revoked_key_fingerprint` — the
+    /// revocation is signed by the very key it revokes (RFC-ACDP-0014 §5
+    /// step 2) — rejected even though the request never goes through
+    /// `from_body`.
+    #[test]
+    fn from_publish_request_did_key_self_revocation_rejected() {
+        let (key_id, fingerprint) = did_key_fixture([1u8; 32]);
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_fingerprint"] = serde_json::json!(fingerprint);
+        let mut req = publish_request_with_metadata(Some(meta));
+        req.signature.key_id = key_id;
+        assert!(matches!(
+            KeyRevocation::from_publish_request(&req),
+            Err(AcdpError::KeyNotAuthorized(_))
+        ));
+    }
+
+    /// Positive control for the test above: same did:key shape, but the
+    /// signing key's fingerprint DIFFERS from `revoked_key_fingerprint`
+    /// — accepted. Without this, the negative test could be passing for
+    /// an unrelated reason (e.g. a bug that always rejects did:key
+    /// signers).
+    #[test]
+    fn from_publish_request_did_key_different_key_accepted() {
+        let (key_id, _fingerprint) = did_key_fixture([2u8; 32]);
+        let meta = pr_valid_metadata(); // fingerprint is all-'a', unrelated to key [2u8; 32]
+        let mut req = publish_request_with_metadata(Some(meta));
+        req.signature.key_id = key_id;
+        let rev = KeyRevocation::from_publish_request(&req)
+            .expect("did:key signer whose fingerprint differs from the revoked key must pass");
+        assert_eq!(rev.trust_class, RevocationTrustClass::ProducerSigned);
+    }
+
+    /// A malformed did:key `signature.key_id` (fragment does not match
+    /// the method-specific identifier) makes fingerprint derivation fail
+    /// `Ok(...)`-checked inside `from_parts`, which by design leaves the
+    /// self-sign check unrun rather than rejecting here — signature
+    /// verification is expected to reject the body instead. Pinning this
+    /// deliberate leniency so a future change to it is visible.
+    #[test]
+    fn from_publish_request_malformed_did_key_key_id_not_rejected_here() {
+        let (key_id, fingerprint) = did_key_fixture([3u8; 32]);
+        let malformed_key_id = format!("{}-not-the-msi", key_id); // breaks the #fragment == msi rule
+        let mut meta = pr_valid_metadata();
+        meta["revoked_key_fingerprint"] = serde_json::json!(fingerprint);
+        let mut req = publish_request_with_metadata(Some(meta));
+        req.signature.key_id = malformed_key_id;
+        let rev = KeyRevocation::from_publish_request(&req).expect(
+            "malformed did:key key_id is left for signature verification, not rejected here",
+        );
+        assert_eq!(rev.trust_class, RevocationTrustClass::ProducerSigned);
+    }
 
     fn registry_attested_rev(publisher: &str) -> KeyRevocation {
         KeyRevocation {
