@@ -8,6 +8,7 @@ use acdp_types::{
     capabilities::CapabilitiesDocument,
     primitives::{ContentHash, CtxId, LineageId},
     publish::PublishRequest,
+    revocation::KeyRevocation,
 };
 
 /// Outcome of a successful validation — the registry can now assign
@@ -211,12 +212,127 @@ impl<'a> PublishValidator<'a> {
             }
         }
 
+        // RFC-ACDP-0014 §4 publish-time gate: registries advertising
+        // acdp_version >= 0.3.0 MUST reject malformed key-revocation
+        // bodies with schema_violation. See `key_revocation_gate_applies`
+        // for the fail-closed polarity on a malformed acdp_version.
+        if req.context_type.is_key_revocation()
+            && key_revocation_gate_applies(&self.caps.acdp_version)
+        {
+            let revocation = KeyRevocation::from_publish_request(req)?;
+            self.check_revocation_controller(req, &revocation)?;
+        }
+
         // Steps 7–8 (key resolution + signature verification) require async
         // DID resolution; the caller should invoke Verifier::verify_body for those.
         Ok(ValidatedPublish {
             recomputed_hash: recomputed,
         })
     }
+
+    /// RFC-ACDP-0014 §4/§6 controller-class rule — the one clause
+    /// `KeyRevocation::from_publish_request` cannot enforce on its own
+    /// because it needs the registry's own identity
+    /// (`caps.registry_did`), which lives only here.
+    ///
+    /// Five arms (§4 makes the controller OPTIONAL — defaulting to
+    /// `agent_id` — on producer-signed revocations; §6 makes it REQUIRED
+    /// and different on registry-attested ones):
+    ///
+    /// 1. absent, `agent_id != registry_did` ⇒ OK (producer-signed, defaulted).
+    /// 2. present, `== agent_id` ⇒ OK (producer-signed, explicit).
+    /// 3. present, `!= agent_id`, `agent_id == registry_did` ⇒ OK (§6 registry-attested).
+    /// 4. present, `!= agent_id`, `agent_id != registry_did` ⇒ `SchemaViolation`.
+    /// 5. absent, `agent_id == registry_did` ⇒ `SchemaViolation` — §4 and §6 step 2
+    ///    both make the controller REQUIRED on registry-attested revocations; without
+    ///    this arm a registry publishing under its own DID with no controller would be
+    ///    silently classified `ProducerSigned` by `from_parts`, i.e. treated as revoking
+    ///    its own key.
+    ///
+    /// Arm 5 is indistinguishable from arm 2 by inspecting the returned
+    /// `KeyRevocation` alone — `from_parts` collapses an absent controller
+    /// to `(agent_id.clone(), ProducerSigned)`, exactly what arm 2
+    /// produces. So presence is read directly off `req.metadata` here,
+    /// not inferred from the parsed struct.
+    fn check_revocation_controller(
+        &self,
+        req: &PublishRequest,
+        revocation: &KeyRevocation,
+    ) -> Result<(), AcdpError> {
+        let controller_present = req
+            .metadata
+            .as_ref()
+            .and_then(|m| m.as_object())
+            .is_some_and(|m| m.contains_key("revoked_key_controller"));
+
+        let agent_is_registry = req.agent_id.as_str() == self.caps.registry_did;
+        let controller_differs = revocation.revoked_key_controller != req.agent_id;
+
+        if controller_present && controller_differs && !agent_is_registry {
+            // Arm 4.
+            return Err(AcdpError::SchemaViolation(format!(
+                "metadata.revoked_key_controller '{}' differs from agent_id '{}', but \
+                 agent_id is not this registry's own DID ('{}'); a controller different \
+                 from agent_id is only valid on a §6 registry-attested revocation \
+                 (RFC-ACDP-0014 §4, §6)",
+                revocation.revoked_key_controller, req.agent_id, self.caps.registry_did
+            )));
+        }
+
+        if !controller_present && agent_is_registry {
+            // Arm 5.
+            return Err(AcdpError::SchemaViolation(format!(
+                "key-revocation published under this registry's own DID ('{}') has no \
+                 metadata.revoked_key_controller; a registry-attested revocation MUST \
+                 name the affected producer's DID as the controller (RFC-ACDP-0014 §4, §6)",
+                self.caps.registry_did
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+/// True when `v` is a well-formed `major.minor.patch` version string:
+/// exactly three non-empty, all-ASCII-digit, dot-separated parts. Mirrors
+/// `acdp_validation::validate_semver_pattern`'s notion of well-formedness
+/// (kept as a private, local copy here rather than a shared export, since
+/// this gate's fail-closed polarity on malformed input is specific to an
+/// admission check and should not be exposed as a general-purpose helper).
+fn is_well_formed_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// RFC-ACDP-0014 §4 version gate, fail-closed.
+///
+/// A malformed `acdp_version` must turn the gate ON, never OFF. This
+/// checks well-formedness first (exactly three non-empty, all-digit,
+/// dot-separated parts — same criteria as
+/// `acdp_validation::validate_semver_pattern`) before doing any numeric
+/// comparison. Merely counting how many dot-separated parts parse as a
+/// number *anywhere* in the string is not enough: `"0.3x.0"` and
+/// `"0. 3.0"` both contain two parseable numeric parts (`0` and `0`) and
+/// would be silently misread as version `0.0`, and `"0.2.0 "` /
+/// `"0.2.0;"` would be misread as `0.2` — all turning the gate OFF when
+/// it must stay ON for anything that isn't a clean `major.minor.patch`.
+fn key_revocation_gate_applies(acdp_version: &str) -> bool {
+    if !is_well_formed_version(acdp_version) {
+        return true;
+    }
+    let mut parts = acdp_version.split('.');
+    let major: u64 = match parts.next().and_then(|p| p.parse().ok()) {
+        Some(m) => m,
+        None => return true,
+    };
+    let minor: u64 = match parts.next().and_then(|p| p.parse().ok()) {
+        Some(m) => m,
+        None => return true,
+    };
+    major > 0 || minor >= 3
 }
 
 /// Assign registry identifiers after successful validation per
@@ -443,6 +559,476 @@ mod tests {
         };
         let supersedes = Some(CtxId("acdp://x/y".into()));
         let err = assign_identifiers("registry.example.com", &supersedes, None, &v).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    // ── Phase 6: RFC-ACDP-0014 §4 key-revocation publish-time gate ─────
+
+    fn test_caps_v030() -> CapabilitiesDocument {
+        CapabilitiesDocument {
+            acdp_version: "0.3.0".into(),
+            ..test_caps()
+        }
+    }
+
+    fn test_caps_v020() -> CapabilitiesDocument {
+        CapabilitiesDocument {
+            acdp_version: "0.2.0".into(),
+            ..test_caps()
+        }
+    }
+
+    const REVOCATION_PRODUCER_DID: &str = "did:web:agents.example.com:test-producer";
+    const REVOCATION_OTHER_PRODUCER_DID: &str = "did:web:agents.example.com:other-producer";
+    const REVOCATION_FP: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const REVOCATION_SINCE: &str = "2026-05-01T00:00:00.000Z";
+
+    fn valid_revocation_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "revoked_key_fingerprint": REVOCATION_FP,
+            "compromised_since": REVOCATION_SINCE,
+        })
+    }
+
+    /// Builds a signed `key-revocation` `PublishRequest` published under
+    /// `agent_did`, with the given `metadata` and wire `acdp_version`
+    /// field (independent of the *registry's* `caps.acdp_version` under
+    /// test).
+    fn build_revocation_request(
+        agent_did: &str,
+        metadata: serde_json::Value,
+        acdp_version: &str,
+    ) -> PublishRequest {
+        let key = SigningKey::from_bytes(&[0u8; 32]);
+        let p = Producer::new(key, AgentDid::new(agent_did), format!("{agent_did}#key-1"));
+        p.publish_request()
+            .title("Key revocation test")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .acdp_version(acdp_version)
+            .metadata(metadata)
+            .build()
+            .unwrap()
+    }
+
+    // Arm 1: controller absent, agent_id != registry_did ⇒ OK
+    // (producer-signed, defaulted).
+    #[test]
+    fn revocation_arm1_absent_controller_accepted_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let req = build_revocation_request(
+            REVOCATION_PRODUCER_DID,
+            valid_revocation_metadata(),
+            "0.3.0",
+        );
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    // Arm 2: controller present and == agent_id ⇒ OK (producer-signed,
+    // explicit).
+    #[test]
+    fn revocation_arm2_explicit_matching_controller_accepted_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(REVOCATION_PRODUCER_DID);
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    // Arm 3: controller present, != agent_id, agent_id == registry_did ⇒
+    // OK (§6 registry-attested).
+    #[test]
+    fn revocation_arm3_registry_attested_accepted_at_0_3_0() {
+        let caps = test_caps_v030();
+        let registry_did = caps.registry_did.clone();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(REVOCATION_PRODUCER_DID);
+        let req = build_revocation_request(&registry_did, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    // Arm 4: controller present, != agent_id, agent_id != registry_did ⇒
+    // SchemaViolation.
+    #[test]
+    fn revocation_arm4_mismatched_controller_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(REVOCATION_OTHER_PRODUCER_DID);
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_arm4_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(REVOCATION_OTHER_PRODUCER_DID);
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    // Arm 5 — the one everyone misses: controller absent, agent_id ==
+    // registry_did ⇒ SchemaViolation. Indistinguishable from arm 1/2 by
+    // inspecting the returned `KeyRevocation` alone (`from_parts`
+    // collapses an absent controller to `(agent_id.clone(),
+    // ProducerSigned)`), so the gate must read presence off
+    // `req.metadata` directly.
+    #[test]
+    fn revocation_arm5_absent_controller_under_registry_did_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let registry_did = caps.registry_did.clone();
+        let v = PublishValidator::new(&caps);
+        let req = build_revocation_request(&registry_did, valid_revocation_metadata(), "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_arm5_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let registry_did = caps.registry_did.clone();
+        let v = PublishValidator::new(&caps);
+        let req = build_revocation_request(&registry_did, valid_revocation_metadata(), "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    #[test]
+    fn revocation_non_public_visibility_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let key = SigningKey::from_bytes(&[0u8; 32]);
+        let p = Producer::new(
+            key,
+            AgentDid::new(REVOCATION_PRODUCER_DID),
+            format!("{REVOCATION_PRODUCER_DID}#key-1"),
+        );
+        let req = p
+            .publish_request()
+            .title("Key revocation test")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(REVOCATION_PRODUCER_DID)])
+            .acdp_version("0.3.0")
+            .metadata(valid_revocation_metadata())
+            .build()
+            .unwrap();
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_non_public_visibility_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let v = PublishValidator::new(&caps);
+        let key = SigningKey::from_bytes(&[0u8; 32]);
+        let p = Producer::new(
+            key,
+            AgentDid::new(REVOCATION_PRODUCER_DID),
+            format!("{REVOCATION_PRODUCER_DID}#key-1"),
+        );
+        let req = p
+            .publish_request()
+            .title("Key revocation test")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Restricted)
+            .audience(vec![AgentDid::new(REVOCATION_PRODUCER_DID)])
+            .acdp_version("0.3.0")
+            .metadata(valid_revocation_metadata())
+            .build()
+            .unwrap();
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    #[test]
+    fn revocation_missing_fingerprint_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta.as_object_mut()
+            .unwrap()
+            .remove("revoked_key_fingerprint");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_missing_fingerprint_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta.as_object_mut()
+            .unwrap()
+            .remove("revoked_key_fingerprint");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    #[test]
+    fn revocation_missing_compromised_since_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta.as_object_mut().unwrap().remove("compromised_since");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_missing_compromised_since_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta.as_object_mut().unwrap().remove("compromised_since");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    #[test]
+    fn revocation_malformed_fingerprint_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_fingerprint"] = serde_json::json!("not-a-fingerprint");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_malformed_fingerprint_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_fingerprint"] = serde_json::json!("not-a-fingerprint");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    #[test]
+    fn revocation_non_canonical_compromised_since_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["compromised_since"] = serde_json::json!("2026-05-01T00:00:00Z");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_non_canonical_compromised_since_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["compromised_since"] = serde_json::json!("2026-05-01T00:00:00Z");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    #[test]
+    fn revocation_reason_over_limit_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["reason"] =
+            serde_json::json!("x".repeat(acdp_types::revocation::MAX_REASON_CHARS + 1));
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_reason_over_limit_accepted_at_0_2_0_positive_control() {
+        let caps = test_caps_v020();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta["reason"] =
+            serde_json::json!("x".repeat(acdp_types::revocation::MAX_REASON_CHARS + 1));
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    // Malformed `acdp_version` must turn the gate ON (fail closed), not
+    // off — `key_revocation_gate_applies` treats anything that is not a
+    // well-formed `major.minor.patch` string as malformed rather than
+    // reinterpreting it as some other version.
+    #[test]
+    fn revocation_gate_fails_closed_on_unparseable_acdp_version() {
+        let mut caps = test_caps_v030();
+        caps.acdp_version = "not-a-version".into();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta.as_object_mut()
+            .unwrap()
+            .remove("revoked_key_fingerprint");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn revocation_gate_fails_closed_on_empty_acdp_version() {
+        let mut caps = test_caps_v030();
+        caps.acdp_version = "".into();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta.as_object_mut()
+            .unwrap()
+            .remove("revoked_key_fingerprint");
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    // Non-key-revocation bodies are entirely unaffected by the gate,
+    // even under a 0.3.0 registry.
+    #[test]
+    fn non_key_revocation_body_unaffected_by_gate_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let req = test_request();
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    // `key_revocation_gate_applies` well-formedness truth table.
+    //
+    // The gate must NOT silently reinterpret a malformed `acdp_version`
+    // string as whatever version its first two parseable numeric
+    // fragments happen to spell — that reinterpretation is exactly the
+    // bug being fixed here. Every entry left of `=>` is malformed (or,
+    // for the last three rows, well-formed-and-comparable) and the
+    // right-hand side is the required gate outcome.
+    #[test]
+    fn key_revocation_gate_truth_table() {
+        let cases: &[(&str, bool)] = &[
+            // Malformed: a typo'd patch segment must not be silently
+            // read as "0.3" truncated down to "0.0".
+            ("0.3x.0", true),
+            // Malformed: an embedded space breaks the numeric parse of
+            // that segment, and must not be read as "0.0".
+            ("0. 3.0", true),
+            // Malformed: trailing whitespace/punctuation after a
+            // perfectly-formed "0.2.0" must not let the first two
+            // fragments ("0", "2") stand in for the whole string.
+            ("0.2.0 ", true),
+            ("0.2.0;", true),
+            // Malformed: a non-numeric minor segment.
+            ("0.x.1", true),
+            // Malformed: a unicode digit (ARABIC-INDIC THREE, U+0663)
+            // fails `char::is_ascii_digit`, so this segment is not
+            // ASCII-digit-only and the whole string is not well-formed.
+            ("0.\u{0663}.0", true),
+            // Already-covered malformed cases, kept here too so the
+            // whole table lives in one place.
+            ("not-a-version", true),
+            ("", true),
+            // Well-formed and >= 0.3.0 ⇒ gate ON.
+            ("0.3.0", true),
+            ("0.4.0", true),
+            ("1.0.0", true),
+            // Well-formed and < 0.3.0 ⇒ gate OFF.
+            ("0.2.9", false),
+            ("0.2.0", false),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                key_revocation_gate_applies(input),
+                *expected,
+                "input {input:?} should gate {}",
+                if *expected { "ON" } else { "OFF" }
+            );
+        }
+    }
+
+    /// Like `build_revocation_request`, but lets the test pick the
+    /// `ContextType` — used to publish the RFC-ACDP-0014 §10 interim
+    /// `acdp:key-revocation` custom form through the gate, since
+    /// `build_revocation_request` always uses the standard
+    /// `ContextType::KeyRevocation`.
+    fn build_revocation_request_with_type(
+        agent_did: &str,
+        metadata: serde_json::Value,
+        acdp_version: &str,
+        context_type: ContextType,
+    ) -> PublishRequest {
+        let key = SigningKey::from_bytes(&[0u8; 32]);
+        let p = Producer::new(key, AgentDid::new(agent_did), format!("{agent_did}#key-1"));
+        p.publish_request()
+            .title("Key revocation test (interim §10 type)")
+            .context_type(context_type)
+            .visibility(Visibility::Public)
+            .acdp_version(acdp_version)
+            .metadata(metadata)
+            .build()
+            .unwrap()
+    }
+
+    // §10: a >= 0.3.0 registry ACCEPTS the interim `acdp:key-revocation`
+    // custom type — not just the standard `key-revocation` type — and
+    // applies the same §4 shape validation to it, since
+    // `ContextType::is_key_revocation()` treats both forms as
+    // equivalent and the gate is keyed off that predicate.
+    #[test]
+    fn revocation_interim_custom_type_valid_body_accepted_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let req = build_revocation_request_with_type(
+            REVOCATION_PRODUCER_DID,
+            valid_revocation_metadata(),
+            "0.3.0",
+            ContextType::Custom(ContextType::KEY_REVOCATION_INTERIM.into()),
+        );
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        v.validate_post_schema(&req, raw_len).unwrap();
+    }
+
+    #[test]
+    fn revocation_interim_custom_type_violation_rejected_at_0_3_0() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let mut meta = valid_revocation_metadata();
+        meta.as_object_mut()
+            .unwrap()
+            .remove("revoked_key_fingerprint");
+        let req = build_revocation_request_with_type(
+            REVOCATION_PRODUCER_DID,
+            meta,
+            "0.3.0",
+            ContextType::Custom(ContextType::KEY_REVOCATION_INTERIM.into()),
+        );
+        let raw_len = serde_json::to_vec(&req).unwrap().len();
+        let err = v.validate_post_schema(&req, raw_len).unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
     }
 }
