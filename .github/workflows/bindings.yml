@@ -40,9 +40,9 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-      - run: cargo fmt --all -- --check --manifest-path bindings/acdp-py/Cargo.toml
-      - run: cargo fmt --all -- --check --manifest-path bindings/acdp-node/Cargo.toml
-      - run: cargo fmt --all -- --check --manifest-path bindings/acdp-wasm/Cargo.toml
+      - run: cargo fmt --all --manifest-path bindings/acdp-py/Cargo.toml -- --check
+      - run: cargo fmt --all --manifest-path bindings/acdp-node/Cargo.toml -- --check
+      - run: cargo fmt --all --manifest-path bindings/acdp-wasm/Cargo.toml -- --check
 
   acdp-py:
     name: acdp-py (python ${{ matrix.python }})
