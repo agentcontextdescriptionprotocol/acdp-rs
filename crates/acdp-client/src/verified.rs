@@ -964,7 +964,17 @@ impl VerifiedContext {
 ///   timeout, …).
 ///
 /// `AcdpError` doesn't implement `Clone`, so the report is move-only.
+///
+/// `#[non_exhaustive]`: this struct has already gained a field once as a
+/// non-optional consequence of a security fix (the RFC-ACDP-0006 §4.1
+/// context-identity binding), and it is output-only — constructed solely
+/// inside this crate (`verified.rs`) — so downstream loses nothing by
+/// being unable to construct it directly. Same rationale as `SsrfReason`
+/// in `crates/acdp-safe-http/src/lib.rs` ("future spec revisions may add
+/// ranges"): future fields stop being breaking changes for callers that
+/// only read this report.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct VerificationReport {
     /// `content_hash` recomputed from the body matches the declared one.
     pub body_hash_ok: bool,

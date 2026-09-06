@@ -11,7 +11,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Top-level error type.
+///
+/// `#[non_exhaustive]`: the wire vocabulary (RFC-ACDP-0007 §5) keeps growing
+/// as new RFCs land — 25 wire codes now, up from 21 not long ago, with
+/// RFC-ACDP-0009 reserved and still unimplemented. Without this attribute,
+/// every new variant is a semver-breaking change for any downstream crate
+/// that matches on `AcdpError` exhaustively. Same rationale as
+/// `SsrfReason` in `crates/acdp-safe-http/src/lib.rs` ("future spec
+/// revisions may add ranges"); match with a wildcard arm.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AcdpError {
     // ── Cryptography ─────────────────────────────────────────────────────────
     /// JCS canonicalization failed (input not serializable).
