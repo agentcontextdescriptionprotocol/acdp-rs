@@ -41,6 +41,7 @@ use acdp::crypto::{
 };
 use acdp::types::revocation::KeyRevocation;
 use acdp::types::{Body, ContentHash, CtxId, PublishRequest, RegistryReceipt};
+use acdp::verify::verify_ctx_id_binding;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, Utc};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -124,6 +125,32 @@ impl PyAcdpVerifier {
         verify_content_hash(&body, &stored)
             .map(|_| true)
             .map_err(|e| PyRuntimeError::new_err(format!("content_hash mismatch: {e}")))
+    }
+
+    /// Verify that a body's *served* `ctx_id` matches the `ctx_id` the
+    /// caller *expected* (RFC-ACDP-0006 §4.1 step 7, NORMATIVE) — the
+    /// context-identity binding check for the receipt-less retrieval
+    /// path, since `ctx_id` is registry-assigned and outside
+    /// `content_hash`/signature coverage.
+    ///
+    /// Argument order is `(body_json, expected_ctx_id)`: the body's own
+    /// `ctx_id` is the *served* identity, `expected_ctx_id` is what the
+    /// caller requested — the same `(served, expected)` order as
+    /// `verify_ctx_id_binding` and `RegistryReceipt::cross_check`.
+    ///
+    /// * `body_json` — the `body` object from a `FullContext` retrieval.
+    /// * `expected_ctx_id` — the `ctx_id` the caller requested.
+    ///
+    /// Returns `True` on success. Raises `ValueError` on malformed JSON
+    /// or a malformed `ctx_id` on either side, or `RuntimeError` on
+    /// mismatch.
+    #[staticmethod]
+    fn verify_ctx_id_binding(body_json: &str, expected_ctx_id: &str) -> PyResult<bool> {
+        let body: Body = serde_json::from_str(body_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid body JSON: {e}")))?;
+        verify_ctx_id_binding(body.ctx_id.as_str(), expected_ctx_id)
+            .map(|_| true)
+            .map_err(map_acdp_error)
     }
 
     /// Verify an Ed25519 signature over a `content_hash` string.
@@ -342,12 +369,10 @@ impl PyAcdpVerifier {
         let registry_key = decode_ed25519_b64(registry_public_key_b64)?;
         let recomputed = ContentHash::parse(recomputed_body_hash)
             .map_err(|e| PyValueError::new_err(format!("invalid content_hash: {e}")))?;
+        let expected_ctx = CtxId::parse(expected_ctx_id)
+            .map_err(|e| PyValueError::new_err(format!("invalid expected_ctx_id: {e}")))?;
         receipt
-            .cross_check(
-                &CtxId(expected_ctx_id.to_string()),
-                &recomputed,
-                producer_key_fingerprint,
-            )
+            .cross_check(&expected_ctx, &recomputed, producer_key_fingerprint)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         // Normative raw-JSON rule: hash the receipt exactly as received
         // (minus `signature`), not a re-serialization of the parsed

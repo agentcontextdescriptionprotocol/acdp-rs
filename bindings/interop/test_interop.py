@@ -25,6 +25,7 @@ or simply ``make interop``, which builds both bindings first.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -276,6 +277,98 @@ def test_python_verifies_node_signature(node):
         req["signature"]["value"],
         req["content_hash"],
     )
+
+
+CTX_BINDING_CTX = (
+    "acdp://registry.example.com/12345678-1234-4321-8123-123456781234"
+)
+CTX_BINDING_OTHER_UUID = (
+    "acdp://registry.example.com/00000000-0000-4000-8000-000000000000"
+)
+CTX_BINDING_OTHER_AUTHORITY = (
+    "acdp://other.example.com/12345678-1234-4321-8123-123456781234"
+)
+
+
+def _body_with_ctx_id(ctx_id):
+    """A full retrieval-shape `Body` JSON with the given `ctx_id` —
+    `verify_ctx_id_binding` only reads `ctx_id`, so content_hash/signature need
+    not be mutually consistent here."""
+    return json.dumps(
+        {
+            "ctx_id": ctx_id,
+            "lineage_id": "lin:sha256:" + "a" * 64,
+            "origin_registry": "registry.example.com",
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "version": 1,
+            "supersedes": None,
+            "agent_id": AGENT_DID,
+            "contributors": [],
+            "title": "interop ctx_id binding",
+            "type": "data_snapshot",
+            "data_refs": [],
+            "derived_from": [],
+            "visibility": "public",
+            "content_hash": GOLDEN_HASH,
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": KEY_ID,
+                "value": GOLDEN_SIG,
+            },
+        }
+    )
+
+
+def test_verify_ctx_id_agrees_across_bindings_on_match(node):
+    """Positive control: py and node both accept matching ids."""
+    body = _body_with_ctx_id(CTX_BINDING_CTX)
+    assert acdp.AcdpVerifier.verify_ctx_id_binding(body, CTX_BINDING_CTX)
+    assert node.call(
+        "verify_ctx_id_binding", body_json=body, expected_ctx_id=CTX_BINDING_CTX
+    )["ok"]
+
+
+def test_verify_ctx_id_agrees_across_bindings_on_mismatch(node):
+    """py and node both reject a UUID-only mismatch AND an
+    authority-only mismatch — and, critically, both reject it for the
+    SAME reason (a served/expected mismatch), not just "both fail"."""
+    body = _body_with_ctx_id(CTX_BINDING_CTX)
+    with pytest.raises(Exception, match=r"(?i)context substitution") as py_exc:
+        acdp.AcdpVerifier.verify_ctx_id_binding(body, CTX_BINDING_OTHER_UUID)
+    node_err = node.call_expect_error(
+        "verify_ctx_id_binding",
+        body_json=body,
+        expected_ctx_id=CTX_BINDING_OTHER_UUID,
+    )
+    assert "context substitution" in str(py_exc.value).lower()
+    assert "context substitution" in node_err.lower()
+
+    with pytest.raises(Exception, match=r"(?i)context substitution") as py_exc:
+        acdp.AcdpVerifier.verify_ctx_id_binding(body, CTX_BINDING_OTHER_AUTHORITY)
+    node_err = node.call_expect_error(
+        "verify_ctx_id_binding",
+        body_json=body,
+        expected_ctx_id=CTX_BINDING_OTHER_AUTHORITY,
+    )
+    assert "context substitution" in str(py_exc.value).lower()
+    assert "context substitution" in node_err.lower()
+
+
+def test_verify_ctx_id_agrees_across_bindings_on_malformed(node):
+    """py and node both reject a malformed expected ctx_id — and both
+    for the SAME reason (a schema/parse violation, not a mismatch)."""
+    body = _body_with_ctx_id(CTX_BINDING_CTX)
+    with pytest.raises(ValueError) as py_exc:
+        acdp.AcdpVerifier.verify_ctx_id_binding(body, "not-a-ctx-id")
+    node_err = node.call_expect_error(
+        "verify_ctx_id_binding", body_json=body, expected_ctx_id="not-a-ctx-id"
+    )
+    reason_re = re.compile(r"schema violation|invalid|ctx_id", re.IGNORECASE)
+    assert reason_re.search(str(py_exc.value))
+    assert reason_re.search(node_err)
+    # And it must NOT be misreported as a mismatch on either side.
+    assert "context substitution" not in str(py_exc.value).lower()
+    assert "context substitution" not in node_err.lower()
 
 
 def test_sign_challenge_is_deterministic_across_bindings(node):

@@ -378,6 +378,25 @@ export declare class AcdpVerifier {
    */
   static verifyContentHash(bodyJson: string, expectedHash: string): boolean
   /**
+   * Verify that a body's *served* `ctx_id` matches the `ctx_id` the
+   * caller *expected* (RFC-ACDP-0006 §4.1 step 7, NORMATIVE) — the
+   * context-identity binding check for the receipt-less retrieval
+   * path, since `ctx_id` is registry-assigned and outside
+   * `content_hash`/signature coverage.
+   *
+   * Argument order is `(bodyJson, expectedCtxId)`: the body's own
+   * `ctx_id` is the *served* identity, `expectedCtxId` is what the
+   * caller requested — the same `(served, expected)` order as
+   * `verify_ctx_id_binding` and `RegistryReceipt::cross_check`.
+   *
+   * * `bodyJson` — the `body` object from a `FullContext` retrieval.
+   * * `expectedCtxId` — the `ctx_id` the caller requested.
+   *
+   * Returns `true` on success; throws on malformed JSON, a malformed
+   * `ctx_id` on either side, or a mismatch.
+   */
+  static verifyCtxIdBinding(bodyJson: string, expectedCtxId: string): boolean
+  /**
    * Verify an Ed25519 signature over a `content_hash` string.
    *
    * The signing input per RFC-ACDP-0001 §5.8 is the ASCII bytes of

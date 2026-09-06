@@ -182,6 +182,72 @@ def test_verify_body_offline_roundtrip():
         acdp.AcdpVerifier.verify_body_offline(json.dumps(body))
 
 
+# ── ctx_id binding (RFC-ACDP-0006 §4.1 step 7) ──────────────────────────
+
+CTX = "acdp://registry.example.com/12345678-1234-4321-8123-123456781234"
+OTHER_CTX_UUID = "acdp://registry.example.com/00000000-0000-4000-8000-000000000000"
+OTHER_CTX_AUTHORITY = "acdp://other.example.com/12345678-1234-4321-8123-123456781234"
+# Mirrors the core `verify_ctx_id_binding` test fixture: only the last
+# three UUID hex chars are uppercase.
+UPPERCASE_UUID = "acdp://registry.example.com/00000000-0000-4000-8000-000000000AAA"
+
+
+def _body_with_ctx_id(ctx_id):
+    req = json.loads(_sig003_request_json())
+    return {
+        **req,
+        "ctx_id": ctx_id,
+        "lineage_id": "lin:sha256:" + "a" * 64,
+        "origin_registry": "registry.example.com",
+        "created_at": "2026-01-01T00:00:00.000Z",
+    }
+
+
+def test_verify_ctx_id_matching_ids_ok():
+    """Positive control for every failure case below."""
+    body = _body_with_ctx_id(CTX)
+    assert acdp.AcdpVerifier.verify_ctx_id_binding(json.dumps(body), CTX)
+
+
+def test_verify_ctx_id_rejects_uuid_only_mismatch():
+    body = _body_with_ctx_id(CTX)
+    with pytest.raises(Exception, match=r"(?i)context substitution"):
+        acdp.AcdpVerifier.verify_ctx_id_binding(json.dumps(body), OTHER_CTX_UUID)
+
+
+def test_verify_ctx_id_rejects_authority_only_mismatch():
+    """A mismatch differing only in the authority (not the UUID) must
+    also be rejected."""
+    body = _body_with_ctx_id(CTX)
+    with pytest.raises(Exception, match=r"(?i)context substitution"):
+        acdp.AcdpVerifier.verify_ctx_id_binding(json.dumps(body), OTHER_CTX_AUTHORITY)
+
+
+def test_verify_ctx_id_rejects_malformed_expected():
+    body = _body_with_ctx_id(CTX)
+    with pytest.raises(ValueError):
+        acdp.AcdpVerifier.verify_ctx_id_binding(json.dumps(body), "not-a-ctx-id")
+
+
+def test_verify_ctx_id_rejects_uppercase_uuid_on_served_side():
+    """Uppercase-UUID rejection must be enforced on the *served* side
+    too (the body's own ctx_id), not just the expected side."""
+    body = _body_with_ctx_id(UPPERCASE_UUID)
+    with pytest.raises(ValueError):
+        acdp.AcdpVerifier.verify_ctx_id_binding(json.dumps(body), CTX)
+
+
+def test_verify_ctx_id_rejects_uppercase_uuid_on_expected_side():
+    body = _body_with_ctx_id(CTX)
+    with pytest.raises(ValueError):
+        acdp.AcdpVerifier.verify_ctx_id_binding(json.dumps(body), UPPERCASE_UUID)
+
+
+def test_verify_ctx_id_rejects_malformed_body_json():
+    with pytest.raises(ValueError):
+        acdp.AcdpVerifier.verify_ctx_id_binding("not json", CTX)
+
+
 # ── Key fingerprints (fp-001) ───────────────────────────────────────────
 
 def test_fp001_fingerprint_of_zero_seed_key():

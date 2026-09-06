@@ -26,6 +26,7 @@ use acdp::crypto::{
 use acdp::did::{resolve_did_key, DidKeyMaterial};
 use acdp::types::revocation::KeyRevocation;
 use acdp::types::{Body, ContentHash, CtxId, PublishRequest, RegistryReceipt};
+use acdp::verify::verify_ctx_id_binding;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use chrono::{DateTime, Utc};
 
@@ -100,6 +101,40 @@ pub fn verify_content_hash_json(body_json: &str, expected_hash: &str) -> Result<
         Ok(()) => verdict_ok(),
         Err(e) => verdict_fail(e),
     })
+}
+
+/// Verify that a body's *served* `ctx_id` matches the `ctx_id` the
+/// caller *expected* (RFC-ACDP-0006 §4.1 step 7, NORMATIVE) — the
+/// context-identity binding check for the receipt-less retrieval path,
+/// since `ctx_id` is registry-assigned and outside
+/// `content_hash`/signature coverage.
+///
+/// Argument order is `(body_json, expected_ctx_id)`: the body's own
+/// `ctx_id` is the *served* identity, `expected_ctx_id` is what the
+/// caller requested — the same `(served, expected)` order as
+/// `verify_ctx_id_binding` and `RegistryReceipt::cross_check`.
+///
+/// `expected_ctx_id` is host input, so a malformed value is pre-parsed
+/// and `Err`s (throws), mirroring `verify_content_hash_json`'s
+/// `expected_hash` and `verify_receipt_json`'s `expected_ctx_id`. The
+/// *served* side is registry data: a malformed served `ctx_id`, or a
+/// served/expected mismatch, stays a verification outcome
+/// (`{"valid": false, ...}`) via `verify_ctx_id_binding`. `Err`
+/// otherwise only on malformed body JSON.
+pub fn verify_ctx_id_binding_json(
+    body_json: &str,
+    expected_ctx_id: &str,
+) -> Result<String, String> {
+    let body: Body =
+        serde_json::from_str(body_json).map_err(|e| format!("invalid body JSON: {e}"))?;
+    let expected =
+        CtxId::parse(expected_ctx_id).map_err(|e| format!("invalid expected_ctx_id: {e}"))?;
+    Ok(
+        match verify_ctx_id_binding(body.ctx_id.as_str(), expected.as_str()) {
+            Ok(()) => verdict_ok(),
+            Err(e) => verdict_fail(e),
+        },
+    )
 }
 
 /// Verify an Ed25519 signature over the ASCII `"sha256:<hex>"` string
@@ -215,6 +250,8 @@ pub fn verify_receipt_json(
     let registry_key = decode_ed25519_b64(registry_public_key_b64)?;
     let recomputed = ContentHash::parse(recomputed_body_hash)
         .map_err(|e| format!("invalid recomputed_body_hash: {e}"))?;
+    let expected_ctx =
+        CtxId::parse(expected_ctx_id).map_err(|e| format!("invalid expected_ctx_id: {e}"))?;
 
     // §8 step 6: reject non-canonical created_at byte forms first — a
     // parsed struct would silently normalize them. This is a
@@ -226,11 +263,7 @@ pub fn verify_receipt_json(
         Ok(r) => r,
         Err(e) => return Ok(verdict_fail(e)),
     };
-    if let Err(e) = receipt.cross_check(
-        &CtxId(expected_ctx_id.to_string()),
-        &recomputed,
-        producer_key_fingerprint,
-    ) {
+    if let Err(e) = receipt.cross_check(&expected_ctx, &recomputed, producer_key_fingerprint) {
         return Ok(verdict_fail(e));
     }
     let raw_hash = match RegistryReceipt::preimage_hash_of_value(&value) {

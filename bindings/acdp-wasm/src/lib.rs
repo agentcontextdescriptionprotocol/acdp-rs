@@ -59,6 +59,19 @@ pub fn verify_content_hash(body_json: &str, expected_hash: &str) -> Result<Strin
     out(core::verify_content_hash_json(body_json, expected_hash))
 }
 
+/// Verify that a body's *served* `ctx_id` matches the `ctx_id` the
+/// caller *expected* (RFC-ACDP-0006 §4.1 step 7, NORMATIVE). Argument
+/// order is `(bodyJson, expectedCtxId)`: the body's own `ctx_id` is the
+/// *served* identity, `expectedCtxId` is what the caller requested.
+/// Returns a verdict for the served side (a malformed served `ctx_id`,
+/// or a served/expected mismatch, is a fail verdict). Throws on
+/// malformed body JSON or a malformed `expectedCtxId` — that value is
+/// host input, mirroring `verifyContentHash`'s `expectedHash`.
+#[wasm_bindgen(js_name = verifyCtxIdBinding)]
+pub fn verify_ctx_id_binding(body_json: &str, expected_ctx_id: &str) -> Result<String, JsError> {
+    out(core::verify_ctx_id_binding_json(body_json, expected_ctx_id))
+}
+
 /// Verify an Ed25519 signature over the ASCII `"sha256:<hex>"` string.
 /// `pubKeyB64` is the raw 32-byte key, base64. Returns a verdict.
 #[wasm_bindgen(js_name = verifySignatureEd25519)]

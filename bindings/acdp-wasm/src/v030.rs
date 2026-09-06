@@ -209,7 +209,9 @@ pub(crate) fn parse_expected_head(json: &str) -> Result<ExpectedHead, String> {
     let lineage_id =
         LineageId::parse(get_str("lineage_id").ok_or("expected.lineage_id is required")?)
             .map_err(|e| format!("expected.lineage_id: {e}"))?;
-    let head_ctx_id = CtxId(get_str("head_ctx_id").ok_or("expected.head_ctx_id is required")?);
+    let head_ctx_id =
+        CtxId::parse(get_str("head_ctx_id").ok_or("expected.head_ctx_id is required")?)
+            .map_err(|e| format!("expected.head_ctx_id: {e}"))?;
     let head_version = obj
         .get("head_version")
         .and_then(|v| v.as_u64())

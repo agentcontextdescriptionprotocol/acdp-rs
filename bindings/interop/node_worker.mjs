@@ -171,6 +171,10 @@ const methods = {
     ok: AcdpVerifier.verifyContentHash(p.body_json, p.expected_hash),
   }),
 
+  verify_ctx_id_binding: (p) => ({
+    ok: AcdpVerifier.verifyCtxIdBinding(p.body_json, p.expected_ctx_id),
+  }),
+
   verify_signature: (p) => ({
     ok: AcdpVerifier.verifySignature(
       p.pub_key_b64,
