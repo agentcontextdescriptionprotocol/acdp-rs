@@ -35,7 +35,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
-      - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+      # This action's own action.yml hardcodes the cargo-semver-checks version
+      # it installs — that pin is what makes release-plz.toml's
+      # `semver_check = true` BLOCKING gate actually run (it is not
+      # reachable from ci.yml). v0.5.131 carried a cargo-semver-checks@0.48
+      # that dies on current stable rustdoc's output format and fails OPEN
+      # (silently reports "compatible"). v0.5.133's action.yml pins @0.50,
+      # which supports the current rustdoc formats. Bumping this is not a
+      # routine dependency bump: re-verify which cargo-semver-checks version
+      # the target tag's action.yml installs before moving this pin again.
+      - uses: MarcoIeni/release-plz-action@aec534bbd8631793b9b3b8f1ee6cd886c322e17f # v0.5.133
         id: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
