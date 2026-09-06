@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-verify-v0.9.0...acdp-verify-v0.9.1) - 2026-09-06
+
+### Added
+
+- *(bindings)* bind ctx_id on the receipt-less path in py/node/wasm ([#206](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/206)) ([#214](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/214))
+
 ## [0.9.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-verify-v0.8.5...acdp-verify-v0.9.0) - 2026-09-06
 
 ### Other

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.9.0...acdp-v0.9.1) - 2026-09-06
+
+### Added
+
+- *(server)* enforce RFC-ACDP-0014 §4/§5 key-revocation validation at publish ([#207](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/207)) ([#217](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/217))
+- *(bindings)* bind ctx_id on the receipt-less path in py/node/wasm ([#206](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/206)) ([#214](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/214))
+
+### Other
+
+- re-arm the release semver gate ([#208](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/208)) ([#212](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/212))
+
 ### Changed
 
 - **`PublishValidator` now enforces the RFC-ACDP-0014 §4 `key-revocation` shape table at
