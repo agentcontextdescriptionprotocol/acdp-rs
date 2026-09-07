@@ -305,21 +305,23 @@ impl AcdpVerifier {
     /// with `AcdpDidDocument.keyForAlgorithm`).
     ///
     /// **Two checks remain the HOST's obligation** — this binding makes
-    /// no HTTP calls and never sees the accompanying body:
+    /// no HTTP calls, so it cannot perform them:
     ///
     /// 1. **Serving-authority binding** — `receipt.registry_did` MUST
     ///    equal `"did:web:" + <authority>` where `<authority>` is the
     ///    authority the response was *actually fetched from*, not
     ///    whatever the receipt claims.
-    /// 2. **Body bindings** — the receipt's `lineage_id`,
-    ///    `origin_registry`, and `created_at` MUST equal the
-    ///    accompanying body's fields, and the `recomputedBodyHash`
-    ///    argument MUST be independently recomputed from that body
-    ///    (run `AcdpVerifier.verifyContentHash` first) — never the
-    ///    body's echoed `content_hash` field.
+    /// 2. **Recompute, don't trust, the body hash** —
+    ///    `recomputedBodyHash` MUST be the body hash you independently
+    ///    RECOMPUTED (run `AcdpVerifier.verifyContentHash` on the body
+    ///    first and pass that verified hash) — never the body's echoed
+    ///    `content_hash` field taken on faith.
     ///
     /// * `receiptJson` — the `registry_receipt` object from a
     ///   `FullContext` retrieval.
+    /// * `bodyJson` — the accompanying `body` object from the same
+    ///   `FullContext` retrieval, used for the §8 step 3 body bindings
+    ///   (`lineage_id` / `origin_registry` / `created_at`).
     /// * `registryPublicKeyB64` — standard base64 of the registry's
     ///   32-byte raw Ed25519 receipt key.
     /// * `expectedCtxId` — the ctx_id the caller actually requested.
@@ -333,6 +335,7 @@ impl AcdpVerifier {
     #[napi]
     pub fn verify_receipt(
         receipt_json: String,
+        body_json: String,
         registry_public_key_b64: String,
         expected_ctx_id: String,
         recomputed_body_hash: String,
@@ -340,6 +343,8 @@ impl AcdpVerifier {
     ) -> Result<bool> {
         let value: serde_json::Value = serde_json::from_str(&receipt_json)
             .map_err(|e| Error::from_reason(format!("invalid receipt JSON: {e}")))?;
+        let body: Body = serde_json::from_str(&body_json)
+            .map_err(|e| Error::from_reason(format!("invalid body JSON: {e}")))?;
         // §8 step 6: the raw `created_at` bytes must already be in the
         // canonical millisecond-precision form before anything is hashed.
         RegistryReceipt::validate_created_at_form(&value)
@@ -352,6 +357,11 @@ impl AcdpVerifier {
             .map_err(|e| Error::from_reason(format!("invalid expectedCtxId: {e}")))?;
         receipt
             .cross_check(&expected_ctx, &body_hash, &producer_key_fingerprint)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        // §8 step 3 body bindings: lineage_id / origin_registry /
+        // created_at must equal the accompanying body's fields.
+        receipt
+            .cross_check_body(&body)
             .map_err(|e| Error::from_reason(e.to_string()))?;
         let pub_bytes: Vec<u8> = STANDARD
             .decode(&registry_public_key_b64)

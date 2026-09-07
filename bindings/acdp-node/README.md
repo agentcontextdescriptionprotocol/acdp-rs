@@ -78,13 +78,40 @@ success and throws on failure — never `false` — so
 `if (AcdpVerifier.verifyCtxIdBinding(...))` guards a branch that can't be
 reached.
 
+### Verifying a registry receipt
+
+`verifyReceipt` (RFC-ACDP-0010 §8) takes the accompanying `bodyJson` as a
+**required** second argument — it binds the receipt's `lineage_id`,
+`origin_registry`, and `created_at` to the served body's own fields (§8
+step 3):
+
+```javascript
+AcdpVerifier.verifyReceipt(
+  receiptJson,            // the `registry_receipt` object, as received
+  bodyJson,                // the accompanying `body`, same retrieval
+  registryPublicKeyB64,    // resolved via AcdpDid.webToUrl + fetch
+  expectedCtxId,           // the ctx_id you actually requested
+  recomputedBodyHash,      // YOUR OWN verifyContentHash result — never
+                            // the body's echoed content_hash field
+  producerKeyFingerprint,  // fingerprint of the resolved producer key
+);
+```
+
+Throws on a malformed `bodyJson` (host input) or a body/receipt mismatch
+(verification failure) alike — never `false`. Two checks still stay the
+HOST's obligation, because neither needs the body: the serving-authority
+binding (`receipt.registry_did` must equal the authority you actually
+fetched from) and recomputing (never trusting) the body hash you pass in.
+
 ## Verification surface
 
 `AcdpVerifier` covers the full 0.2.0 surface in addition to the basics
 above: identity binding (`verifyCtxIdBinding`, see
 [Verifying a retrieved body](#verifying-a-retrieved-body) above),
 offline `did:key` verification (`verifyBodyOffline`,
-`verifyPublishRequestOffline`), registry receipts (`verifyReceipt`,
+`verifyPublishRequestOffline`), registry receipts
+(`verifyReceipt(receiptJson, bodyJson, registryPublicKeyB64, expectedCtxId, recomputedBodyHash, producerKeyFingerprint)`,
+see [Verifying a registry receipt](#verifying-a-registry-receipt) above;
 `verifyLineageHeadReceipt`), the transparency log (`verifyLogCheckpoint`,
 `verifyLogInclusion`, `verifyLogConsistency`), lifecycle events
 (`verifyLifecycleEvent`), key revocation (`parseKeyRevocation`,

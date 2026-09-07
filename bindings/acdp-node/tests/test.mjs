@@ -990,6 +990,37 @@ const RCPT_REGISTRY_KEY_B64 = AcdpProducer.fromSeed(
   'did:web:x#k',
 ).publicKeyB64;
 
+// The sig-001 body `RCPT_001` attests, assembled from sig-001's
+// `producer_content`/`publish_request_body` plus its
+// `registry_assigned` block (schemas/conformance/sig-001*.json:49-54) —
+// rcpt-001-receipt-golden.json ships no paired body, so `verifyReceipt`
+// callers must assemble one. `supersedes` is included as `null` (not
+// omitted): `Body` has no `#[serde(default)]` on that field, so the key
+// MUST be present even when null.
+const RCPT_BODY = {
+  ctx_id: RCPT_001.ctx_id,
+  lineage_id: RCPT_001.lineage_id,
+  origin_registry: RCPT_001.origin_registry,
+  created_at: RCPT_001.created_at,
+  content_hash: RCPT_001.content_hash,
+  signature: {
+    algorithm: 'ed25519',
+    key_id: 'did:web:agents.example.com:test-producer#key-1',
+    value:
+      'ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ==',
+  },
+  version: 1,
+  supersedes: null,
+  agent_id: 'did:web:agents.example.com:test-producer',
+  contributors: [],
+  title: 'Golden test vector — minimal first version',
+  type: 'data_snapshot',
+  data_refs: [],
+  derived_from: [],
+  visibility: 'public',
+};
+const RCPT_BODY_JSON = JSON.stringify(RCPT_BODY);
+
 test('rcpt-001 registry signing key matches the spec-pinned public key', () => {
   assert.equal(
     RCPT_REGISTRY_KEY_B64,
@@ -1001,6 +1032,7 @@ test('verifyReceipt accepts rcpt-001', () => {
   assert.equal(
     AcdpVerifier.verifyReceipt(
       JSON.stringify(RCPT_001),
+      RCPT_BODY_JSON,
       RCPT_REGISTRY_KEY_B64,
       RCPT_001.ctx_id,
       RCPT_001.content_hash,
@@ -1014,6 +1046,7 @@ test('verifyReceipt rejects a producer-key fingerprint mismatch', () => {
   assert.throws(() =>
     AcdpVerifier.verifyReceipt(
       JSON.stringify(RCPT_001),
+      RCPT_BODY_JSON,
       RCPT_REGISTRY_KEY_B64,
       RCPT_001.ctx_id,
       RCPT_001.content_hash,
@@ -1023,15 +1056,25 @@ test('verifyReceipt rejects a producer-key fingerprint mismatch', () => {
 });
 
 test('verifyReceipt rejects a mutated created_at (signature break)', () => {
-  const tampered = { ...RCPT_001, created_at: '2026-04-16T10:30:15.124Z' };
-  assert.throws(() =>
-    AcdpVerifier.verifyReceipt(
-      JSON.stringify(tampered),
-      RCPT_REGISTRY_KEY_B64,
-      RCPT_001.ctx_id,
-      RCPT_001.content_hash,
-      RCPT_001.key_fingerprint,
-    ),
+  // The body's created_at is mutated identically so the §8 step 3
+  // body-binding check (which would otherwise catch the mismatch
+  // first) still passes and the test exercises the signature check.
+  const tamperedReceipt = {
+    ...RCPT_001,
+    created_at: '2026-04-16T10:30:15.124Z',
+  };
+  const tamperedBody = { ...RCPT_BODY, created_at: '2026-04-16T10:30:15.124Z' };
+  assert.throws(
+    () =>
+      AcdpVerifier.verifyReceipt(
+        JSON.stringify(tamperedReceipt),
+        JSON.stringify(tamperedBody),
+        RCPT_REGISTRY_KEY_B64,
+        RCPT_001.ctx_id,
+        RCPT_001.content_hash,
+        RCPT_001.key_fingerprint,
+      ),
+    /signature/i,
   );
 });
 
@@ -1046,6 +1089,7 @@ test('verifyReceipt rejects a non-canonical created_at byte form', () => {
     () =>
       AcdpVerifier.verifyReceipt(
         JSON.stringify(nonCanonical),
+        RCPT_BODY_JSON,
         RCPT_REGISTRY_KEY_B64,
         RCPT_001.ctx_id,
         RCPT_001.content_hash,
@@ -1062,11 +1106,80 @@ test('verifyReceipt rejects unknown receipt members (closed schema)', () => {
   assert.throws(() =>
     AcdpVerifier.verifyReceipt(
       JSON.stringify(extended),
+      RCPT_BODY_JSON,
       RCPT_REGISTRY_KEY_B64,
       RCPT_001.ctx_id,
       RCPT_001.content_hash,
       RCPT_001.key_fingerprint,
     ),
+  );
+});
+
+test('verifyReceipt rejects a malformed body_json (host-input error)', () => {
+  // A malformed body_json is a host-input error — it never gets far
+  // enough to be cross-checked against the receipt.
+  assert.throws(
+    () =>
+      AcdpVerifier.verifyReceipt(
+        JSON.stringify(RCPT_001),
+        'not json',
+        RCPT_REGISTRY_KEY_B64,
+        RCPT_001.ctx_id,
+        RCPT_001.content_hash,
+        RCPT_001.key_fingerprint,
+      ),
+    /invalid body JSON/,
+  );
+});
+
+test('verifyReceipt rejects a body lineage_id mismatch (§8 step 3)', () => {
+  const mismatchedBody = {
+    ...RCPT_BODY,
+    lineage_id: 'lin:sha256:' + 'a'.repeat(64),
+  };
+  assert.throws(
+    () =>
+      AcdpVerifier.verifyReceipt(
+        JSON.stringify(RCPT_001),
+        JSON.stringify(mismatchedBody),
+        RCPT_REGISTRY_KEY_B64,
+        RCPT_001.ctx_id,
+        RCPT_001.content_hash,
+        RCPT_001.key_fingerprint,
+      ),
+    /lineage_id/,
+  );
+});
+
+test('verifyReceipt rejects a body origin_registry mismatch (§8 step 3)', () => {
+  const mismatchedBody = { ...RCPT_BODY, origin_registry: 'other.example.com' };
+  assert.throws(
+    () =>
+      AcdpVerifier.verifyReceipt(
+        JSON.stringify(RCPT_001),
+        JSON.stringify(mismatchedBody),
+        RCPT_REGISTRY_KEY_B64,
+        RCPT_001.ctx_id,
+        RCPT_001.content_hash,
+        RCPT_001.key_fingerprint,
+      ),
+    /origin_registry/,
+  );
+});
+
+test('verifyReceipt rejects a body created_at mismatch (§8 step 3)', () => {
+  const mismatchedBody = { ...RCPT_BODY, created_at: '2026-04-16T10:30:15.999Z' };
+  assert.throws(
+    () =>
+      AcdpVerifier.verifyReceipt(
+        JSON.stringify(RCPT_001),
+        JSON.stringify(mismatchedBody),
+        RCPT_REGISTRY_KEY_B64,
+        RCPT_001.ctx_id,
+        RCPT_001.content_hash,
+        RCPT_001.key_fingerprint,
+      ),
+    /created_at/,
   );
 });
 

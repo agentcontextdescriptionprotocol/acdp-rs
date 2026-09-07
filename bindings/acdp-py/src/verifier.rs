@@ -327,24 +327,24 @@ impl PyAcdpVerifier {
     /// `AcdpDidDocument.key_for_algorithm`, then pass the key here.
     ///
     /// **Two RFC-ACDP-0010 checks remain the HOST's obligation** —
-    /// this binding makes no HTTP calls and never sees the accompanying
-    /// body, so it cannot perform them:
+    /// this binding makes no HTTP calls, so it cannot perform them:
     ///
     /// 1. **Serving-authority binding** — `receipt.registry_did` MUST
     ///    equal `"did:web:" + <authority>` where `<authority>` is the
     ///    authority the response was *actually fetched from*. Compare
     ///    it against your HTTP client's request URL, not against any
     ///    field inside the response.
-    /// 2. **Body bindings** — the receipt's `lineage_id`,
-    ///    `origin_registry`, and `created_at` MUST equal the
-    ///    accompanying body's fields. And `recomputed_body_hash` MUST
-    ///    be the body hash you independently RECOMPUTED (run
-    ///    `AcdpVerifier.verify_content_hash` on the body first and pass
-    ///    that verified hash) — never the body's echoed `content_hash`
-    ///    field taken on faith.
+    /// 2. **Recompute, don't trust, the body hash** —
+    ///    `recomputed_body_hash` MUST be the body hash you
+    ///    independently RECOMPUTED (run `AcdpVerifier.verify_content_hash`
+    ///    on the body first and pass that verified hash) — never the
+    ///    body's echoed `content_hash` field taken on faith.
     ///
     /// * `receipt_json` — the `registry_receipt` object from a
     ///   `FullContext` retrieval, exactly as received on the wire.
+    /// * `body_json` — the accompanying `body` object from the same
+    ///   `FullContext` retrieval, used for the §8 step 3 body bindings
+    ///   (`lineage_id` / `origin_registry` / `created_at`).
     /// * `registry_public_key_b64` — standard base64 of the registry's
     ///   raw 32-byte Ed25519 receipt key.
     /// * `expected_ctx_id` — the ctx_id the consumer requested.
@@ -359,6 +359,7 @@ impl PyAcdpVerifier {
     #[staticmethod]
     fn verify_receipt(
         receipt_json: &str,
+        body_json: &str,
         registry_public_key_b64: &str,
         expected_ctx_id: &str,
         recomputed_body_hash: &str,
@@ -366,6 +367,8 @@ impl PyAcdpVerifier {
     ) -> PyResult<bool> {
         let value: serde_json::Value = serde_json::from_str(receipt_json)
             .map_err(|e| PyValueError::new_err(format!("invalid receipt JSON: {e}")))?;
+        let body: Body = serde_json::from_str(body_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid body JSON: {e}")))?;
         // §8 step 6: reject non-canonical created_at byte forms before
         // anything else — a parsed struct would silently normalize them.
         RegistryReceipt::validate_created_at_form(&value)
@@ -379,6 +382,11 @@ impl PyAcdpVerifier {
             .map_err(|e| PyValueError::new_err(format!("invalid expected_ctx_id: {e}")))?;
         receipt
             .cross_check(&expected_ctx, &recomputed, producer_key_fingerprint)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        // §8 step 3 body bindings: lineage_id / origin_registry /
+        // created_at must equal the accompanying body's fields.
+        receipt
+            .cross_check_body(&body)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         // Normative raw-JSON rule: hash the receipt exactly as received
         // (minus `signature`), not a re-serialization of the parsed

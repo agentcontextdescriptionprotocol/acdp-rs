@@ -236,8 +236,35 @@ def test_retired_receipt_key_verifies_rcpt001_receipt():
             },
         }
     )
+    # The sig-001 body this receipt attests (assembled from
+    # `producer_content` + `registry_assigned`; see RCPT_BODY in
+    # test_offline.py for the full derivation).
+    body = json.dumps(
+        {
+            "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+            "lineage_id": "lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a",
+            "origin_registry": "registry.example.com",
+            "created_at": "2026-04-16T10:30:15.123Z",
+            "content_hash": "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5",
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": "did:web:agents.example.com:test-producer#key-1",
+                "value": "ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ==",
+            },
+            "version": 1,
+            "supersedes": None,
+            "agent_id": "did:web:agents.example.com:test-producer",
+            "contributors": [],
+            "title": "Golden test vector — minimal first version",
+            "type": "data_snapshot",
+            "data_refs": [],
+            "derived_from": [],
+            "visibility": "public",
+        }
+    )
     assert acdp.AcdpVerifier.verify_receipt(
         receipt,
+        body,
         resolved["public_key_b64"],
         "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
         "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5",

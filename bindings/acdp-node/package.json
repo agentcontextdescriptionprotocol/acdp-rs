@@ -1,6 +1,6 @@
 {
   "name": "@agentcontextdistributionprotocol/acdp",
-  "version": "0.8.0",
+  "version": "0.10.0",
   "description": "Agent Context Distribution Protocol \u2014 Node.js SDK",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -47,9 +47,9 @@
     "registry": "https://registry.npmjs.org/"
   },
   "optionalDependencies": {
-    "@agentcontextdistributionprotocol/acdp-darwin-x64": "0.8.1",
-    "@agentcontextdistributionprotocol/acdp-darwin-arm64": "0.8.1",
-    "@agentcontextdistributionprotocol/acdp-linux-x64-gnu": "0.8.1",
-    "@agentcontextdistributionprotocol/acdp-linux-arm64-gnu": "0.8.1"
+    "@agentcontextdistributionprotocol/acdp-darwin-x64": "0.10.0",
+    "@agentcontextdistributionprotocol/acdp-darwin-arm64": "0.10.0",
+    "@agentcontextdistributionprotocol/acdp-linux-x64-gnu": "0.10.0",
+    "@agentcontextdistributionprotocol/acdp-linux-arm64-gnu": "0.10.0"
   }
 }

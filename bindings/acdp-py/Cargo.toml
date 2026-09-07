@@ -8,7 +8,7 @@
 # requests — so we deliberately keep `default-features = false`.
 [package]
 name        = "acdp-py"
-version = "0.8.0"
+version = "0.10.0"
 edition     = "2021"
 description = "Agent Context Distribution Protocol — Python SDK"
 license     = "MIT OR Apache-2.0"
