@@ -56,9 +56,28 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      # Pinned (not `stable`) so a release rebuild resolves the same
+      # compiler every time instead of whatever `stable` happens to be on
+      # the day the tag is pushed. 1.98.0 is the rustc both the v0.8.3 and
+      # v0.8.5 published builds actually used, so this pin is a verifiable
+      # no-op today (see #196).
+      #
+      # This pin is deliberately INDEPENDENT of both the workspace MSRV
+      # (1.86, Cargo.toml's `rust-version` / ci.yml's pinned MSRV job) and
+      # every other job's floating `toolchain: stable` (including this
+      # repo's own `bindings.yml` acdp-wasm CI job) — it exists solely for
+      # reproducibility of the published npm artifact, not for MSRV
+      # compatibility. Nothing enforces it: PR CI floats on `stable`, so a
+      # wasm-crate change that adopts a rustc feature newer than 1.98.0
+      # stays green on every PR and fails ONLY here, on a tag push, with a
+      # compiler-version error from this exact build step. When that
+      # happens: bump this pin to the new rustc version and regenerate
+      # `bindings/acdp-wasm/Cargo.lock` (`cargo update` / rebuild with the
+      # new toolchain). Do not wire a CI job to enforce this pin proactively
+      # — that's a separate, unstarted piece of work.
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          toolchain: 1.98.0
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
@@ -66,6 +85,20 @@ jobs:
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
         with:
           tool: wasm-pack
+      # Gate the THIRD-PARTY dependency graph against the committed
+      # Cargo.lock *before* the version stamp below touches Cargo.toml.
+      # This must run pre-stamp, not post-stamp: `wasm-pack build`'s own
+      # internal `cargo metadata` call (used to read crate name/version)
+      # does not pass --locked and will happily rewrite Cargo.lock's
+      # self-referential `acdp-wasm` version entry to match a stamped
+      # Cargo.toml — that's an expected, harmless no-op for the local
+      # path package. But it means a `--locked` check placed *after* the
+      # stamp would spuriously fail on every release (stamped version !=
+      # committed lock version) while a real third-party dependency drift
+      # would go unnoticed. Checking here, against the still-original
+      # manifest, is what actually proves the resolved graph is frozen.
+      - name: Verify committed lockfile is up to date (--locked)
+        run: cargo metadata --locked --format-version 1 > /dev/null
       # Stamp the release version (dispatch input, or tag on a tag-push) into
       # Cargo.toml so wasm-pack emits a pkg at the acdp release version.
       - name: Stamp release version
@@ -76,10 +109,22 @@ jobs:
       # `--scope agentcontextdistributionprotocol` makes wasm-pack derive the
       # package name `@agentcontextdistributionprotocol/acdp-wasm` from the
       # crate name — the cleanest supported rename (no manual name edit).
+      # `-- --locked` is forwarded by wasm-pack to the underlying `cargo
+      # build`, but it is NOT a second gate: wasm-pack's own internal
+      # `cargo metadata` call (used to read the crate name/version) runs
+      # unlocked and silently repairs Cargo.lock before cargo ever sees
+      # --locked, so a genuinely drifted lock would be rewritten and
+      # accepted here, not rejected (verified locally by removing an entry
+      # from Cargo.lock — this command succeeds and rewrites the lock).
+      # It's kept because it's harmless and correct if wasm-pack's
+      # internals ever change, but the real gate against third-party drift
+      # is the `cargo metadata --locked` step above, which runs before
+      # wasm-pack ever touches the lock.
       - name: wasm-pack build (--target web, scoped)
         run: |
           wasm-pack build --target web --out-dir pkg \
-            --scope agentcontextdistributionprotocol
+            --scope agentcontextdistributionprotocol \
+            -- --locked
           test -f pkg/acdp_wasm.js
           test -f pkg/acdp_wasm_bg.wasm
           test -f pkg/acdp_wasm.d.ts

@@ -65,6 +65,18 @@ jobs:
             manylinux: auto
     steps:
       - uses: actions/checkout@v7
+      # Gate the THIRD-PARTY dependency graph against the committed
+      # Cargo.lock *before* the version stamp below touches Cargo.toml /
+      # pyproject.toml. Must run pre-stamp: maturin's own `--locked` flag
+      # would, like napi, choke on the harmless stamped-Cargo.toml-vs-
+      # committed-Cargo.lock version mismatch rather than catching real
+      # third-party drift — same reasoning as acdp-wasm-release.yml's and
+      # bindings-release.yml's identical pre-stamp gates. So this repo
+      # checks here, against the still-original manifest, instead of
+      # passing `--locked` to the maturin-action build below.
+      - name: Verify committed lockfile is up to date (--locked)
+        working-directory: bindings/acdp-py
+        run: cargo metadata --locked --format-version 1 > /dev/null
       # Stamp the release version (from the dispatch input, or the tag on a
       # tag-push) into the manifests so the published wheel version matches
       # the acdp release. Portable sed (anchored ^version → package line only).
@@ -77,6 +89,7 @@ jobs:
       # maturin-action picks up `abi3-py39` from Cargo.toml and emits a
       # single cp39-abi3 wheel per target; `manylinux: auto` builds the
       # Linux wheels in a manylinux container (and cross-compiles aarch64).
+      # No --locked here — see the gate step above for why.
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           working-directory: bindings/acdp-py
@@ -106,6 +119,12 @@ jobs:
       attestations: write # write the SLSA provenance attestation
     steps:
       - uses: actions/checkout@v7
+      # See the `wheels` job's identical pre-stamp gate for why this runs
+      # here (before the version stamp) rather than as a `--locked` flag on
+      # the maturin-action step below.
+      - name: Verify committed lockfile is up to date (--locked)
+        working-directory: bindings/acdp-py
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Stamp release version
         working-directory: bindings/acdp-py
         run: |

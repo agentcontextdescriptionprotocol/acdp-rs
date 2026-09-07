@@ -332,3 +332,58 @@
   job hard-reds on the PR that introduces it, with a misleading "tool error" diagnosis. Caught
   immediately (first CI run on that PR), fixed by an exclusion or an exit-code carve-out.
 - **Status:** UNCONFIRMED
+
+## Binding lockfiles resolve independently of the root Cargo.lock
+- **Plan:** plans/issues-196-199-215-216-followups.md
+- **Assumed/Chose:** accept that the three binding lockfiles
+  (`bindings/{acdp-py,acdp-node,acdp-wasm}/Cargo.lock`) resolve independently of the root
+  `Cargo.lock` — each binding is its own standalone Cargo workspace, and 20-25 shared
+  dependencies differ from root today, including `der` 0.8.1 → 0.8.2 (the P-256 parsing
+  path) and `wasm-bindgen` 0.2.127 → 0.2.128.
+- **Why it is defensible:** the bindings have their own test suites that exercise *their*
+  graph — `make sdk-py`, `make sdk-node`, `make interop`, and `cd bindings/acdp-wasm &&
+  cargo test` (which runs the conformance fixtures and golden vectors against the
+  binding's own resolution). So the divergent graph is tested, just by a different suite
+  than the root workspace's.
+- **Alternatives rejected:** pinning ~25 deps in each binding lock to match root, which
+  would be a permanent manual maintenance burden with no mechanism to enforce it, and
+  which fights cargo's own resolution across genuinely separate workspaces.
+- **Blast radius if wrong:** a crypto-path dependency (`der`) could in principle behave
+  differently in the published SDK than in the root test suite. Named explicitly because
+  it is the P-256 parsing path.
+- **Also noted:** nothing currently asserts the binding locks stay current with their
+  manifests — a dependency bump without regeneration surfaces as cargo's generic "cannot
+  update the lock file" rather than an actionable "run `cargo generate-lockfile`". Known
+  and accepted for now; no tripwire built in this phase.
+- **Status:** UNCONFIRMED
+- **Update (2026-09-06, plans/issues-196-199-215-216-followups.md Phase 2, #196a):**
+  `cargo-deny`'s advisory gate (`bindings-deny` in `.github/workflows/bindings.yml`) now
+  runs `--locked`, so it audits the pinned graph that ships rather than a freshly-resolved
+  one. Trade-off, stated honestly: this loses the early-warning property of the unpinned
+  form — an advisory affecting a *newer* version of an already-pinned dependency will no
+  longer surface here until the lockfile is regenerated. Accepted because knowing "what we
+  ship is clean" matters more for a crypto verifier than "what we might ship next is
+  clean", and because Dependabot (`.github/dependabot.yml` has cargo entries for all three
+  binding dirs) will regenerate the locks and surface it then.
+
+## `Swatinem/rust-cache` runs before the `--locked` gate in three workflows
+- **Plan:** plans/issues-196-199-215-216-followups.md (Phase 2, #196a)
+- **Assumed:** that `Swatinem/rust-cache` cannot defeat the lockfile gate the way
+  `cargo test` did (finding NEW-1, where an unlocked cargo invocation running *before* the
+  gate silently repaired a stale lock, so the gate then passed).
+- **Chose:** proceed without verifying. rust-cache runs before the gate in three places —
+  `bindings.yml:179` (before `:190`), `bindings-release.yml:71` (before `:94`),
+  `acdp-wasm-release.yml:82` (before `:100`). The round-3 verifier's reading is that
+  rust-cache's `cargo metadata` call lives in its **post/cleanup** step, which runs after
+  all job steps and therefore cannot repair a lock before the gate sees it. It explicitly
+  did **not** confirm this against the action's source and recorded it as unconfirmed
+  rather than asserting it.
+- **Alternatives:** read `Swatinem/rust-cache`'s source at the pinned SHA
+  (`f0d9c3887740aee45f6153b24b3a6b815192ec16`, v2.9.1) to confirm which step invokes
+  `cargo metadata`; or move the gate above the cache restore, which would cost the gate
+  step a cold registry fetch on every run.
+- **Blast radius if wrong:** the same fail-open class as NEW-1 — the binding lockfile gates
+  would look like protection while silently permitting a drifted lock. It would not fail
+  loudly; it would just never catch anything. Cheap to fix (reorder two steps), but only if
+  someone knows to look.
+- **Status:** UNCONFIRMED
