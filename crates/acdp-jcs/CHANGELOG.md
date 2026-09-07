@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-jcs-v0.9.1...acdp-jcs-v0.10.0) - 2026-09-07
+
+### Other
+
+- *(changelog)* backfill the 0.9.1 stanza for eight sub-crates ([#220](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/220))
+
 ## [0.9.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-jcs-v0.9.0...acdp-jcs-v0.9.1) - 2026-09-06
 
 ### Other

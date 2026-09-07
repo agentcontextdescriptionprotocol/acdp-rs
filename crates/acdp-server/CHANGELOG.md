@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.9.1...acdp-server-v0.10.0) - 2026-09-07
+
+### Added
+
+- *(server)* [**breaking**] enforce the RFC-ACDP-0014 §4 supersedes row at publish ([#227](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/227))
+
 ## [0.9.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-server-v0.9.0...acdp-server-v0.9.1) - 2026-09-06
 
 ### Added

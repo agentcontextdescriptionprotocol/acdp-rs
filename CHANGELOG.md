@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.9.1...acdp-v0.10.0) - 2026-09-07
+
+### Added
+
+- *(bindings)* [**breaking**] bind the receipt to the served body via a required body_json ([#230](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/230))
+- *(server)* [**breaking**] enforce the RFC-ACDP-0014 §4 supersedes row at publish ([#227](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/227))
+
+### Other
+
+- *(wasm)* remap build paths and gate the release on a real determinism check
+- *(supply-chain)* pin every install-action tool version and make misses fail closed
+- *(bindings)* commit binding lockfiles, pin the wasm toolchain, gate every build on --locked
+- *(release)* only cut a release for feat/fix/perf commits ([#222](https://github.com/agentcontextdistributionprotocol/acdp-rs/pull/222))
+
 ### Changed
 
 - **[BREAKING] `acdp-server`'s `PublishCommit` gained a new field,
