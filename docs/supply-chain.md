@@ -70,6 +70,16 @@ gh attestation verify ./node_modules/@agentcontextdistributionprotocol/acdp-wasm
     --repo agentcontextdistributionprotocol/acdp-rs
 ```
 
+**This attestation is the trust root, not byte reproduction** — for every release
+through `acdp-wasm-v0.8.5` the published module embeds runner-absolute paths and
+cannot be independently rebuilt to a matching hash on your own machine. Releases built
+after `--remap-path-prefix` + the in-job determinism gate landed (#196c) are proven
+reproducible same-runner, by the gate itself; cross-runner reproduction (e.g. your
+laptop vs. `ubuntu-latest`) is plausible given a matching toolchain but has not been
+tested by anyone. See `docs/release-runbook.md`'s "Reproducibility of the `acdp-wasm`
+artifact" section for exactly which releases that covers and why an unexplained byte
+delta between two releases is not automatically a red flag.
+
 ### PyPI (`acdp` Python SDK)
 
 Published by [`acdp-py-release.yml`](../.github/workflows/acdp-py-release.yml)

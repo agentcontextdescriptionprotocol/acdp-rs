@@ -87,6 +87,17 @@
   not a flake to silence — but if it proves too noisy in practice, reversing this decision
   (committing the lockfiles) is a bigger, separate change.
 - **Status:** CONFIRMED (2026-08-28) — see DECISIONS.md
+- **Update (2026-09-06, plans/issues-196-199-215-216-followups.md Phase 2, superseded):**
+  this plan's Phase 2 did exactly the reverse of what this entry confirmed — the three
+  binding lockfiles (`bindings/{acdp-py,acdp-node,acdp-wasm}/Cargo.lock`) are now
+  committed, and every binding build (`bindings.yml`, `bindings-release.yml`,
+  `acdp-wasm-release.yml`) is gated on `--locked` against them. The original reasoning no
+  longer holds: it was scoped to "wire up advisory scanning" for what were then treated as
+  ordinary library dependency graphs, but the bindings are published application artifacts
+  (an npm/PyPI/crates-equivalent end product, not a library other Rust crates depend on),
+  and the unpinned release path was re-resolving on the order of ~217 packages fresh on
+  every release build with no lockfile diff to review. This entry is left verbatim above as
+  a record of the original decision and its reasoning at the time.
 
 ## pyo3 version: bumped to 0.29 instead of the planned 0.24 line
 - **Plan:** plans/rs-wave1-conformance-hardening.md
@@ -408,7 +419,10 @@
   gate silently repaired a stale lock, so the gate then passed).
 - **Chose:** proceed without verifying. rust-cache runs before the gate in three places —
   `bindings.yml:179` (before `:190`), `bindings-release.yml:71` (before `:94`),
-  `acdp-wasm-release.yml:82` (before `:100`). The round-3 verifier's reading is that
+  `acdp-wasm-release.yml`'s `Swatinem/rust-cache` step (before its `--locked` gate step,
+  a few steps later in the same job — exact line numbers have already shifted once
+  during this plan and aren't worth re-pinning here). The round-3 verifier's reading is
+  that
   rust-cache's `cargo metadata` call lives in its **post/cleanup** step, which runs after
   all job steps and therefore cannot repair a lock before the gate sees it. It explicitly
   did **not** confirm this against the action's source and recorded it as unconfirmed
