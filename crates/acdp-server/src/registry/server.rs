@@ -29,7 +29,9 @@
 
 use crate::registry::rate_limit::{NoopRateLimiter, RateLimiter};
 use crate::registry::store::RegistryStore;
-use crate::registry::validator::{key_revocation_gate_applies, PublishValidator};
+use crate::registry::validator::{
+    check_revocation_supersession, key_revocation_gate_applies, PublishValidator,
+};
 use acdp_primitives::error::AcdpError;
 use acdp_types::{
     body::{Body, FullContext},
@@ -696,6 +698,34 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
             _ => None,
         };
         let minted_expected = minter.is_some();
+
+        // RFC-ACDP-0014 §4 `supersedes`-row admission hook. `Some` iff
+        // the version gate is on AND this request actually carries a
+        // `supersedes` — the mandatory carry-forward from Phase 5:
+        // `check_revocation_supersession` has no internal version
+        // guard, so calling it unconditionally would reject a
+        // key-revocation-shaped body at e.g. acdp_version 0.2.0, where
+        // RFC §4:60 reserves that rejection for ≥0.3.0 registries.
+        //
+        // Captures `req` by reference (not `move`-owned data like
+        // `receipt_minter` above) so it can call
+        // `check_revocation_supersession(prev, req)` — the closure's
+        // hidden lifetime is exactly `req`'s, which the store threads
+        // through the same call as `PublishCommit::req`, so the two
+        // `'a`-tied fields agree.
+        let admission_closure =
+            if key_revocation_gate_applies(&self.caps.acdp_version) && req.supersedes.is_some() {
+                Some(move |prev: &Body| check_revocation_supersession(prev, req))
+            } else {
+                None
+            };
+        #[allow(clippy::type_complexity)]
+        let predecessor_admission: Option<
+            &(dyn Fn(&Body) -> Result<(), AcdpError> + Send + Sync),
+        > = admission_closure
+            .as_ref()
+            .map(|f| f as &(dyn Fn(&Body) -> Result<(), AcdpError> + Send + Sync));
+
         let outcome = self
             .store
             .commit_publish(crate::registry::store::PublishCommit {
@@ -704,6 +734,7 @@ impl<S: RegistryStore, L: RateLimiter> RegistryServer<S, L> {
                 idempotency,
                 tenant,
                 receipt_minter: minter.as_deref(),
+                predecessor_admission,
             })?;
         let (response, replayed) = match outcome {
             crate::registry::store::PublishCommitOutcome::Inserted(r) => (r, false),

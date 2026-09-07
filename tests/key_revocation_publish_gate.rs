@@ -30,11 +30,13 @@ mod common;
 
 use acdp::crypto::{fingerprint_ed25519, SigningKey};
 use acdp::did::WebResolver;
-use acdp::error::AcdpError;
+use acdp::error::{AcdpError, SupersessionReason};
 use acdp::producer::Producer;
 use acdp::registry::{InMemoryStore, RegistryServer};
 use acdp::types::capabilities::Limits;
-use acdp::types::{AgentDid, CapabilitiesDocument, ContextType, PublishRequest, Visibility};
+use acdp::types::{
+    AgentDid, CapabilitiesDocument, ContextType, CtxId, PublishRequest, Status, Visibility,
+};
 use axum::{routing::get, Json, Router};
 use common::TlsTestServer;
 use serde_json::json;
@@ -105,6 +107,35 @@ fn analysis_request(signing_key: SigningKey, key_fragment: &str) -> PublishReque
     .visibility(Visibility::Public)
     .build()
     .expect("valid analysis publish request")
+}
+
+/// Build a v2+ **non-revocation** (`ContextType::Analysis`) publish request
+/// that `supersedes` an existing ctx_id — used by the Phase 6 (RFC-ACDP-0014
+/// §4 `supersedes`-row) tests below to attempt taking over a key-revocation
+/// lineage with an ordinary body. `agent_did` is passed explicitly (rather
+/// than hardcoded to `PRODUCER_DID` like `revocation_request`/`analysis_request`
+/// above) so the same helper builds both the owner's and a hostile
+/// non-owner's attempt.
+fn analysis_supersede_request(
+    signing_key: SigningKey,
+    agent_did: &str,
+    key_fragment: &str,
+    supersedes: CtxId,
+    version: u32,
+) -> PublishRequest {
+    Producer::new(
+        signing_key,
+        AgentDid::new(agent_did),
+        format!("{agent_did}#{key_fragment}"),
+    )
+    .supersede(supersedes)
+    .version(version)
+    .acdp_version("0.3.0")
+    .title("An ordinary context superseding a key-revocation")
+    .context_type(ContextType::Analysis)
+    .visibility(Visibility::Public)
+    .build()
+    .expect("valid analysis-supersedes publish request")
 }
 
 /// Serve `PRODUCER_DID`'s DID document (`did:web:localhost:producer` ⇒
@@ -406,5 +437,305 @@ fn pinned_malformed_verified_public_key_b64_fails_closed_on_key_revocation() {
     assert!(
         matches!(err, AcdpError::KeyResolution(_)),
         "expected KeyResolution (base64 decode failure), got {err:?}"
+    );
+}
+
+// ── RFC-ACDP-0014 §4 `supersedes`-row enforcement (Phase 6) ──────────────────
+//
+// Phase 5 (already merged) added `check_revocation_supersession` — the type
+// + signer-class rule for what may supersede a `key-revocation` context —
+// but nothing called it. This section pins Phase 6's wiring:
+// `RegistryServer::commit_via_store` threads a `predecessor_admission` hook
+// through `RegistryStore::commit_publish`, gated identically to the §5
+// step 2 hook above (`key_revocation_gate_applies(&caps.acdp_version) &&
+// req.supersedes.is_some()`), and `InMemoryStore::commit_publish` invokes it
+// AFTER producer-continuity, lineage/version coherence, and
+// `AlreadySuperseded` — never before.
+//
+// Every test below builds a v1 key-revocation whose `revoked_key_fingerprint`
+// names a DIFFERENT key than the one signing it, specifically so these tests
+// exercise ONLY the §4 supersedes-row rule and never trip the unrelated §5
+// step 2 self-revocation checks pinned earlier in this file.
+
+/// did:web path (`publish_verified`/`publish_verified_in_tenant`) —
+/// acceptance criterion 4, one of the four entry points.
+#[tokio::test]
+async fn did_web_revocation_superseded_by_non_revocation_rejected_at_0_3_0() {
+    let seed = [21u8; 32];
+    let other_fp = fingerprint_ed25519(&SigningKey::from_bytes(&[22u8; 32]).verifying_key_bytes());
+    let (_tls, resolver) =
+        start_producer_harness(&SigningKey::from_bytes(&seed).verifying_key_bytes()).await;
+    let server =
+        RegistryServer::try_new(InMemoryStore::new(), caps_at("0.3.0"), REGISTRY_AUTHORITY)
+            .expect("server");
+
+    let v1_req = revocation_request(SigningKey::from_bytes(&seed), "key-1", &other_fp);
+    let v1 = server
+        .publish_verified(&v1_req, None, &resolver)
+        .await
+        .expect("v1 key-revocation publish must succeed");
+
+    let v2_req = analysis_supersede_request(
+        SigningKey::from_bytes(&seed),
+        PRODUCER_DID,
+        "key-1",
+        v1.ctx_id.clone(),
+        2,
+    );
+    let err = server
+        .publish_verified(&v2_req, None, &resolver)
+        .await
+        .expect_err(
+            "RFC-ACDP-0014 §4: a key-revocation context MAY only be superseded by \
+             another key-revocation context",
+        );
+    assert!(
+        matches!(err, AcdpError::SchemaViolation(_)),
+        "expected SchemaViolation (arm 3), got {err:?}"
+    );
+}
+
+/// did:key path (`publish_verified_did_key`/`_in_tenant`) — acceptance
+/// criterion 4.
+#[test]
+fn did_key_revocation_superseded_by_non_revocation_rejected_at_0_3_0() {
+    let seed = [23u8; 32];
+    let other_fp = fingerprint_ed25519(&SigningKey::from_bytes(&[24u8; 32]).verifying_key_bytes());
+    let server =
+        RegistryServer::try_new(InMemoryStore::new(), caps_at("0.3.0"), REGISTRY_AUTHORITY)
+            .expect("server");
+
+    let v1_req = Producer::new_did_key(SigningKey::from_bytes(&seed))
+        .publish_request()
+        .acdp_version("0.3.0")
+        .title("Key revocation — did:key")
+        .context_type(ContextType::KeyRevocation)
+        .visibility(Visibility::Public)
+        .metadata(json!({
+            "revoked_key_fingerprint": other_fp,
+            "compromised_since": COMPROMISED_SINCE,
+            "reason": "test compromise",
+        }))
+        .build()
+        .expect("valid revocation publish request");
+    let v1 = server
+        .publish_verified_did_key(&v1_req, None)
+        .expect("v1 key-revocation publish must succeed");
+
+    // Same seed ⇒ same did:key DID ⇒ same owner as v1.
+    let v2_req = Producer::new_did_key(SigningKey::from_bytes(&seed))
+        .supersede(v1.ctx_id.clone())
+        .version(2)
+        .acdp_version("0.3.0")
+        .title("An ordinary context superseding a key-revocation")
+        .context_type(ContextType::Analysis)
+        .visibility(Visibility::Public)
+        .build()
+        .expect("valid analysis-supersedes publish request");
+
+    let err = server
+        .publish_verified_did_key(&v2_req, None)
+        .expect_err("RFC-ACDP-0014 §4 arm 3 must reject on the did:key path too");
+    assert!(
+        matches!(err, AcdpError::SchemaViolation(_)),
+        "expected SchemaViolation (arm 3), got {err:?}"
+    );
+}
+
+/// `publish_unverified_for_tests` — acceptance criterion 4 explicitly calls
+/// this one out: issue #207's §5 step 2 wiring left it unhooked, and Phase 6
+/// must not repeat that gap, since all four entry points funnel through the
+/// same `commit_via_store` construction site.
+#[test]
+fn unverified_for_tests_revocation_superseded_by_non_revocation_rejected_at_0_3_0() {
+    let seed = [25u8; 32];
+    let other_fp = fingerprint_ed25519(&SigningKey::from_bytes(&[26u8; 32]).verifying_key_bytes());
+    let server =
+        RegistryServer::try_new(InMemoryStore::new(), caps_at("0.3.0"), REGISTRY_AUTHORITY)
+            .expect("server");
+
+    let v1_req = revocation_request(SigningKey::from_bytes(&seed), "key-1", &other_fp);
+    let v1 = server
+        .publish_unverified_for_tests(&v1_req)
+        .expect("v1 key-revocation publish must succeed");
+
+    let v2_req = analysis_supersede_request(
+        SigningKey::from_bytes(&seed),
+        PRODUCER_DID,
+        "key-1",
+        v1.ctx_id.clone(),
+        2,
+    );
+    let err = server.publish_unverified_for_tests(&v2_req).expect_err(
+        "RFC-ACDP-0014 §4 arm 3 must reject on publish_unverified_for_tests too — \
+         #207 left this entry point unhooked for the §5 step 2 rule",
+    );
+    assert!(
+        matches!(err, AcdpError::SchemaViolation(_)),
+        "expected SchemaViolation (arm 3), got {err:?}"
+    );
+}
+
+/// Pinned path (`publish_pinned_verified_in_tenant`) — acceptance
+/// criterion 4.
+#[test]
+fn pinned_revocation_superseded_by_non_revocation_rejected_at_0_3_0() {
+    let seed = [27u8; 32];
+    let pinned_pub_b64 = encode_pinned_key(&SigningKey::from_bytes(&seed).verifying_key_bytes());
+    let other_fp = fingerprint_ed25519(&SigningKey::from_bytes(&[28u8; 32]).verifying_key_bytes());
+    let server =
+        RegistryServer::try_new(InMemoryStore::new(), caps_at("0.3.0"), REGISTRY_AUTHORITY)
+            .expect("server");
+
+    let v1_req = revocation_request(SigningKey::from_bytes(&seed), "key-1", &other_fp);
+    let v1 = server
+        .publish_pinned_verified_in_tenant(&v1_req, None, None, &pinned_pub_b64, "ed25519")
+        .expect("v1 key-revocation publish must succeed");
+
+    let v2_req = analysis_supersede_request(
+        SigningKey::from_bytes(&seed),
+        PRODUCER_DID,
+        "key-1",
+        v1.ctx_id.clone(),
+        2,
+    );
+    let err = server
+        .publish_pinned_verified_in_tenant(&v2_req, None, None, &pinned_pub_b64, "ed25519")
+        .expect_err("RFC-ACDP-0014 §4 arm 3 must reject on the pinned path too");
+    assert!(
+        matches!(err, AcdpError::SchemaViolation(_)),
+        "expected SchemaViolation (arm 3), got {err:?}"
+    );
+}
+
+/// **The anti-oracle test — acceptance criterion 3, the most important test
+/// in this phase.** A non-owner (a completely different DID) attempts to
+/// supersede a victim's key-revocation with an ordinary body. If
+/// `predecessor_admission` ran BEFORE producer-continuity, this would
+/// surface `SchemaViolation` — a live existence-and-type oracle telling any
+/// caller "the ctx_id you don't own is a key-revocation". Because
+/// `InMemoryStore::commit_publish` invokes the hook only after
+/// producer-continuity has already rejected the request, the non-owner
+/// instead gets the SAME uniform `SupersededTarget::NotFound` a non-owner
+/// gets against any other predecessor type — mirrors
+/// `hostile_supersession_by_non_owner_rejected_predecessor_unchanged` in
+/// `crates/acdp-server/src/registry/server.rs`.
+#[test]
+fn hostile_supersession_of_revocation_by_non_owner_rejected_not_schema_violation() {
+    let seed = [41u8; 32];
+    let owner_fp = fingerprint_ed25519(&SigningKey::from_bytes(&[42u8; 32]).verifying_key_bytes());
+    let server =
+        RegistryServer::try_new(InMemoryStore::new(), caps_at("0.3.0"), REGISTRY_AUTHORITY)
+            .expect("server");
+
+    let v1_req = revocation_request(SigningKey::from_bytes(&seed), "key-1", &owner_fp);
+    let v1 = server
+        .publish_unverified_for_tests(&v1_req)
+        .expect("v1 key-revocation publish must succeed");
+
+    // Attacker: an entirely different DID, publishing a non-revocation v2
+    // that names the victim's revocation as its `supersedes`.
+    const ATTACKER_DID: &str = "did:web:evil.example.com:attacker";
+    let v2_req = analysis_supersede_request(
+        SigningKey::from_bytes(&[43u8; 32]),
+        ATTACKER_DID,
+        "key-1",
+        v1.ctx_id.clone(),
+        2,
+    );
+
+    let err = server
+        .publish_unverified_for_tests(&v2_req)
+        .expect_err("a non-owner must never be allowed to supersede another producer's context");
+    match err {
+        AcdpError::SupersededTarget { reason, .. } => {
+            assert_eq!(
+                reason,
+                SupersessionReason::NotFound,
+                "a non-owner must get the uniform NotFound reason, never a \
+                 type-revealing one — this is the anti-oracle property"
+            );
+        }
+        other => panic!(
+            "expected uniform SupersededTarget::NotFound (anti-oracle), got {other:?} — a \
+             SchemaViolation here would leak to a non-owner that the predecessor is a \
+             key-revocation"
+        ),
+    }
+
+    // Predecessor MUST be untouched by the rejected attacker publish.
+    let cur = server
+        .current(&v1.lineage_id, None)
+        .unwrap()
+        .expect("predecessor must still be current");
+    assert_eq!(cur.body.ctx_id, v1.ctx_id);
+    assert_eq!(
+        cur.registry_state.status,
+        Status::Active,
+        "predecessor must remain Active, not disturbed by the rejected attacker publish"
+    );
+}
+
+/// Positive control for the four entry-point tests above (acceptance
+/// criterion 5): the identical request shape, at a registry that has not
+/// turned the RFC-ACDP-0014 §4 gate on yet, is ACCEPTED — proving
+/// `predecessor_admission` is `None`/skipped below 0.3.0, not merely that
+/// something else happened to let it through.
+#[test]
+fn revocation_superseded_by_non_revocation_accepted_at_0_2_0() {
+    let seed = [45u8; 32];
+    let other_fp = fingerprint_ed25519(&SigningKey::from_bytes(&[46u8; 32]).verifying_key_bytes());
+    let server =
+        RegistryServer::try_new(InMemoryStore::new(), caps_at("0.2.0"), REGISTRY_AUTHORITY)
+            .expect("server");
+
+    let v1_req = revocation_request(SigningKey::from_bytes(&seed), "key-1", &other_fp);
+    let v1 = server
+        .publish_unverified_for_tests(&v1_req)
+        .expect("v1 key-revocation publish must succeed");
+
+    let v2_req = analysis_supersede_request(
+        SigningKey::from_bytes(&seed),
+        PRODUCER_DID,
+        "key-1",
+        v1.ctx_id.clone(),
+        2,
+    );
+    server.publish_unverified_for_tests(&v2_req).expect(
+        "a 0.2.0 registry has not turned the RFC-ACDP-0014 §4 gate on — \
+         predecessor_admission must be None and this publish must succeed",
+    );
+}
+
+/// Fail-closed on a malformed `acdp_version` (acceptance criterion 6),
+/// matching Phase 6's `check_revocation_supersession` carry-forward
+/// requirement and #207's identical polarity test for §5 step 2 above.
+#[test]
+fn revocation_superseded_by_non_revocation_rejected_under_malformed_acdp_version() {
+    let seed = [47u8; 32];
+    let other_fp = fingerprint_ed25519(&SigningKey::from_bytes(&[48u8; 32]).verifying_key_bytes());
+    let mut caps = caps_at("0.2.0");
+    caps.acdp_version = "0.3x.0".into(); // malformed: not MAJOR.MINOR.PATCH
+    let server = RegistryServer::new(InMemoryStore::new(), caps, REGISTRY_AUTHORITY);
+
+    let v1_req = revocation_request(SigningKey::from_bytes(&seed), "key-1", &other_fp);
+    let v1 = server
+        .publish_unverified_for_tests(&v1_req)
+        .expect("v1 key-revocation publish must succeed even under a malformed acdp_version");
+
+    let v2_req = analysis_supersede_request(
+        SigningKey::from_bytes(&seed),
+        PRODUCER_DID,
+        "key-1",
+        v1.ctx_id.clone(),
+        2,
+    );
+    let err = server.publish_unverified_for_tests(&v2_req).expect_err(
+        "a malformed acdp_version must turn the RFC-ACDP-0014 §4 gate ON, not OFF \
+         (fail-closed, matching Phase 6's carry-forward requirement)",
+    );
+    assert!(
+        matches!(err, AcdpError::SchemaViolation(_)),
+        "expected SchemaViolation (arm 3), got {err:?}"
     );
 }
