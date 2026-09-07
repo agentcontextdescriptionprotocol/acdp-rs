@@ -140,11 +140,13 @@ pub fn fingerprint_ed25519(public_key_b64: &str) -> Result<String, JsError> {
 }
 
 /// Verify a registry receipt (RFC-ACDP-0010) against the consumer's own
-/// recomputed body hash / expected ctx_id / producer key fingerprint.
-/// Returns a verdict.
+/// recomputed body hash / expected ctx_id / producer key fingerprint,
+/// and bind it to the accompanying `body_json` (§8 step 3). Returns a
+/// verdict.
 #[wasm_bindgen(js_name = verifyReceipt)]
 pub fn verify_receipt(
     receipt_json: &str,
+    body_json: &str,
     registry_public_key_b64: &str,
     expected_ctx_id: &str,
     recomputed_body_hash: &str,
@@ -152,6 +154,7 @@ pub fn verify_receipt(
 ) -> Result<String, JsError> {
     out(core::verify_receipt_json(
         receipt_json,
+        body_json,
         registry_public_key_b64,
         expected_ctx_id,
         recomputed_body_hash,

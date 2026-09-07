@@ -505,22 +505,19 @@ export declare class AcdpVerifier {
    * DID document via `AcdpDid.webToUrl` + `fetch`, extract the key
    * with `AcdpDidDocument.keyForAlgorithm`).
    *
-   * **Two checks remain the HOST's obligation** — this binding makes
-   * no HTTP calls and never sees the accompanying body:
+   * **One check remains the HOST's obligation** — this binding makes
+   * no HTTP calls, so it cannot perform it:
    *
    * 1. **Serving-authority binding** — `receipt.registry_did` MUST
    *    equal `"did:web:" + <authority>` where `<authority>` is the
    *    authority the response was *actually fetched from*, not
    *    whatever the receipt claims.
-   * 2. **Body bindings** — the receipt's `lineage_id`,
-   *    `origin_registry`, and `created_at` MUST equal the
-   *    accompanying body's fields, and the `recomputedBodyHash`
-   *    argument MUST be independently recomputed from that body
-   *    (run `AcdpVerifier.verifyContentHash` first) — never the
-   *    body's echoed `content_hash` field.
    *
    * * `receiptJson` — the `registry_receipt` object from a
    *   `FullContext` retrieval.
+   * * `bodyJson` — the accompanying `body` object from the same
+   *   `FullContext` retrieval, used for the §8 step 3 body bindings
+   *   (`lineage_id` / `origin_registry` / `created_at`).
    * * `registryPublicKeyB64` — standard base64 of the registry's
    *   32-byte raw Ed25519 receipt key.
    * * `expectedCtxId` — the ctx_id the caller actually requested.
@@ -532,7 +529,7 @@ export declare class AcdpVerifier {
    * Returns `true` on success; throws with the failing check's
    * message otherwise.
    */
-  static verifyReceipt(receiptJson: string, registryPublicKeyB64: string, expectedCtxId: string, recomputedBodyHash: string, producerKeyFingerprint: string): boolean
+  static verifyReceipt(receiptJson: string, bodyJson: string, registryPublicKeyB64: string, expectedCtxId: string, recomputedBodyHash: string, producerKeyFingerprint: string): boolean
   /**
    * Verify a lineage-head receipt offline per RFC-ACDP-0011 §7:
    * closed parse, registry/lineage/head bindings, `as_of` clock

@@ -241,20 +241,29 @@ pub fn fingerprint_ed25519_b64(public_key_b64: &str) -> Result<String, String> {
 /// Verify a registry receipt (RFC-ACDP-0010): reject non-canonical
 /// `created_at` byte forms, run the offline cross-checks against the
 /// consumer's own recomputed body hash / expected ctx_id / producer key
-/// fingerprint, then verify the registry's Ed25519 signature over the
-/// preimage hashed from the RAW wire JSON (never a re-serialized struct).
+/// fingerprint, bind the receipt's `lineage_id` / `origin_registry` /
+/// `created_at` to the accompanying `body_json` (§8 step 3), then verify
+/// the registry's Ed25519 signature over the preimage hashed from the
+/// RAW wire JSON (never a re-serialized struct).
 ///
-/// The serving-authority binding and the "hash you recomputed yourself"
-/// obligations stay with the HOST/caller (see the py binding docs). This
-/// returns a verdict.
+/// `body_json` must parse into a full `Body` — a malformed value is a
+/// host-input error (`Err`), distinct from a `cross_check_body`
+/// mismatch, which is a `{"valid": false, ...}` verdict like any other
+/// receipt cross-check failure.
+///
+/// The serving-authority binding obligation stays with the HOST/caller
+/// (see the py binding docs). This returns a verdict.
 pub fn verify_receipt_json(
     receipt_json: &str,
+    body_json: &str,
     registry_public_key_b64: &str,
     expected_ctx_id: &str,
     recomputed_body_hash: &str,
     producer_key_fingerprint: &str,
 ) -> Result<String, String> {
     let value: serde_json::Value = parse_json(receipt_json, "receipt")?;
+    let body: Body =
+        serde_json::from_str(body_json).map_err(|e| format!("invalid body JSON: {e}"))?;
     let registry_key = decode_ed25519_b64(registry_public_key_b64)?;
     let recomputed = ContentHash::parse(recomputed_body_hash)
         .map_err(|e| format!("invalid recomputed_body_hash: {e}"))?;
@@ -272,6 +281,13 @@ pub fn verify_receipt_json(
         Err(e) => return Ok(verdict_fail(e)),
     };
     if let Err(e) = receipt.cross_check(&expected_ctx, &recomputed, producer_key_fingerprint) {
+        return Ok(verdict_fail(e));
+    }
+    // §8 step 3 body bindings: lineage_id / origin_registry / created_at
+    // must equal the accompanying body's fields. A mismatch is a
+    // verification outcome, not a host error — the body itself parsed
+    // fine.
+    if let Err(e) = receipt.cross_check_body(&body) {
         return Ok(verdict_fail(e));
     }
     let raw_hash = match RegistryReceipt::preimage_hash_of_value(&value) {
