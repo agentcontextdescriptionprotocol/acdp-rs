@@ -201,7 +201,12 @@ jobs:
       #    imports. Proves the FFI surface links end to end.
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
         with:
-          tool: wasm-pack
+          tool: wasm-pack@0.15.0
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
       - name: wasm-pack build (--target web)
         working-directory: bindings/acdp-wasm
         # `-- --locked` is forwarded to the underlying `cargo build`, but it
@@ -336,7 +341,12 @@ jobs:
       # why not EmbarkStudios/cargo-deny-action).
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-deny
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19.9
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
       # advisories only (not bare `check`): the root deny.toml's
       # [licenses]/[bans]/[sources] policy was never audited against the
       # bindings' transitive graphs, so keep this gate narrowly about

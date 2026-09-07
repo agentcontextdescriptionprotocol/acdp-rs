@@ -366,6 +366,41 @@
   clean", and because Dependabot (`.github/dependabot.yml` has cargo entries for all three
   binding dirs) will regenerate the locks and surface it then.
 
+## Two remaining implicit-resolution tool ranges left unpinned (napi-rs, maturin)
+- **Plan:** plans/issues-196-199-215-216-followups.md
+- **Assumed:** Phase 3's remit is pinning `taiki-e/install-action` tool versions and
+  Action SHAs so the *installed* tool bytes are deterministic — not auditing every
+  package-manager version range anywhere in the repo's release tooling. Two pre-existing,
+  unrelated instances of the same underlying risk (a build tool that can silently
+  re-resolve to a newer release between runs) were found while doing that work but are
+  out of scope for this phase.
+- **What was found:**
+  1. `bindings-release.yml` runs `npx napi …` at **release** time.
+     `bindings/acdp-node/package-lock.json` is **not committed**, `@napi-rs/cli` is
+     pinned only as `^3.8.6` in `package.json`, and the workflow uses `npm install`, not
+     `npm ci`. The tool that builds the published `.node` binaries therefore re-resolves
+     its own dependency graph on every release run, with no lockfile to make that
+     resolution reproducible or diff-reviewable.
+  2. `bindings.yml` runs `pip install 'maturin>=1.5,<2.0'` — an open range with no pin at
+     all, so any `1.x` release maturin cuts is picked up immediately on the next CI run.
+- **Why out of scope here:** fixing #1 properly means committing
+  `bindings/acdp-node/package-lock.json` and switching `npm install` → `npm ci` across
+  the node-touching workflow steps — a distinct change with its own blast radius (every
+  npm-installing step in `bindings.yml`/`bindings-release.yml` would need auditing for
+  compatibility with `ci`'s stricter lockfile-must-match-manifest behavior, and the
+  lockfile itself becomes a file that needs to stay in sync going forward). Fixing #2
+  means picking and pinning a specific maturin version/SHA-equivalent, a separate,
+  independent decision. Neither is a `taiki-e/install-action` pin, and bundling either
+  into this phase's diff would mix an unrelated fix into a PR whose stated purpose is the
+  install-action tool-version/`fallback` hardening.
+- **Blast radius:** the napi-rs one sits on the **release** path specifically — it builds
+  the `.node` binaries that get published to npm, so an unreviewed transitive dependency
+  bump there ships directly to consumers with no lockfile diff to catch it in review. The
+  maturin one is lower-severity (an open semver range on a single build tool, not the
+  publishable artifact's own dependency graph) but has the same "re-resolves silently"
+  shape.
+- **Status:** UNCONFIRMED
+
 ## `Swatinem/rust-cache` runs before the `--locked` gate in three workflows
 - **Plan:** plans/issues-196-199-215-216-followups.md (Phase 2, #196a)
 - **Assumed:** that `Swatinem/rust-cache` cannot defeat the lockfile gate the way
@@ -386,4 +421,75 @@
   would look like protection while silently permitting a drifted lock. It would not fail
   loudly; it would just never catch anything. Cheap to fix (reorder two steps), but only if
   someone knows to look.
+- **Status:** UNCONFIRMED
+
+## `cargo-vet` is knowingly installed from QuickInstall, not upstream
+- **Plan:** plans/issues-196-199-215-216-followups.md (Phase 3)
+- **Assumed:** that no other `taiki-e/install-action` pin/version combination gets
+  `cargo-vet` 0.10.2 from a verified upstream artifact, and that `fallback: none` — the
+  policy applied to every other pinned tool in this repo — is not viable for this one
+  step.
+- **What was found:** three alternatives were tried and each is closed off.
+  1. **Bump the `install-action` SHA.** Not possible: `manifests/cargo-vet.json` has never
+     carried a `0.10.2` entry at any SHA, checked through the latest release (v2.87.7),
+     which still tops out at `0.10`/`0.10.0`. There is no SHA to bump to.
+  2. **Downgrade the `tool:` pin to `0.10.0`** (the version the manifest does have).
+     Verified locally that `cargo-vet 0.10.0` cannot parse this repo's
+     `supply-chain/imports.lock`, which uses crates.io's newer trusted-publisher schema
+     (`trusted-publisher = "github:..."`, no `user-id` field): fails with `missing field
+     `user-id``. Regenerating the lockfile with 0.10.0 would discard that
+     trusted-publisher provenance data, a real quality regression, not just a version bump.
+  3. **`fallback: none`**, the policy on every other install-action step in this repo.
+     Would turn the manifest miss into a hard failure of `vet`, a required status check on
+     `main`, on every single run.
+- **Chose:** set `fallback: cargo-binstall` explicitly on the `cargo-vet` step (rather than
+  relying on install-action's identical implicit default), and documented the gap plainly
+  in both the step's comment and `docs/supply-chain.md`'s "Pinned-tool inventory" instead
+  of letting it read as if every pin installs from a verified upstream artifact.
+- **Filed upstream:** https://github.com/taiki-e/install-action/issues/1997, asking for a
+  `cargo-vet` `0.10.2` manifest entry — the actual fix, once available, is to add that
+  manifest coverage and this gap closes on its own with no further code change needed here.
+- **Blast radius:** `cargo-vet` — the tool this repo relies on to audit its own dependency
+  supply chain — is itself installed from QuickInstall, a third-party rebuild service, not
+  a verified upstream release. A compromised or tampered QuickInstall rebuild of
+  `cargo-vet` could produce a false-clean supply-chain audit result (the `vet` job passing
+  while auditing with a tampered binary), which is a meaningfully different risk profile
+  than every other tool in the table, none of which have this exposure.
+- **Status:** UNCONFIRMED
+
+## `cargo-fuzz` is knowingly installed with an unconditional, undisableable QuickInstall fallback
+- **Plan:** plans/issues-196-199-215-216-followups.md (Phase 3)
+- **Assumed:** that the `fuzz.yml` comments this phase set out to correct had the direction
+  of the gap backwards — they claimed a missing `tool:` version at the pinned
+  `install-action` SHA (`82fc4055…`) "already hard-fails the step with no silent
+  QuickInstall path," when reading `main.sh` at that SHA (`:612-618`, `:621-632`,
+  `:692-700`) shows a manifest or version miss for a tool with `rust_crate` set (which
+  `cargo-fuzz.json` has) falls through to `cargo binstall --force --no-confirm --locked`,
+  not `bail`. The `fallback` input didn't exist yet at this SHA to disable that behavior —
+  its absence means the binstall fallback is unconditional and cannot be turned off, not
+  that it doesn't exist.
+- **What was found:** two alternatives were tried and each is closed off, same shape as
+  the `cargo-vet` gap above.
+  1. **Bump the `install-action` SHA to get the `fallback` input.** Not possible without
+     trading one gap for a worse one: `manifests/cargo-fuzz.json` does not exist at
+     `0751bff5` (the SHA this repo already uses for `wasm-pack`/`cargo-deny`) —
+     cargo-fuzz has been dropped from install-action's manifest set entirely (also absent
+     from its `TOOLS.md`). A bump makes cargo-fuzz a permanent manifest miss: silent
+     QuickInstall under the default `fallback`, or a hard-failing fuzz job if
+     `fallback: none` were added.
+  2. **Add `fallback: none` at the current SHA anyway.** Not possible: this SHA predates
+     the `fallback` input's existence in `install-action`'s `action.yml` (only
+     `tool`/`checksum` exist), so the key would be an undefined input — inert at best,
+     misleading (implying a control that isn't there) at worst. This round is explicitly
+     text-only and does not add a `fallback:` key for exactly this reason.
+- **Chose:** left the `tool:` pin and SHA untouched (`cargo-fuzz@0.11.2` @ `82fc4055…`,
+  currently present in that SHA's manifest and equal to its `latest`, so nothing installs
+  from QuickInstall today) and rewrote the `fuzz.yml` comments plus
+  `docs/supply-chain.md`'s "Pinned-tool inventory" to state the gap plainly — a second
+  disclosed exception alongside `cargo-vet`, not a false reassurance that no gap exists.
+- **Blast radius:** a future bump of the `cargo-fuzz@0.11.2` pin to a version absent from
+  this SHA's manifest would silently pull a QuickInstall rebuild into the fuzzing job with
+  no way to make that fail loudly at this SHA. Lower than the `cargo-vet` gap's blast
+  radius: the fuzz job is not a required status check on `main` (weekly schedule + a
+  PR-triggered build-only check), whereas `cargo-vet` gates every PR.
 - **Status:** UNCONFIRMED

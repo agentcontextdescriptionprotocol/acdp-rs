@@ -129,7 +129,12 @@ jobs:
       # cargo-llvm-cov.
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-deny
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19.9
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
       # Sole RUSTSEC advisory gate: `deny check` covers advisories, bans,
       # licenses, and sources from deny.toml, so a separate cargo-audit job
       # (which duplicated the RUSTSEC ignore list) is unnecessary.
@@ -147,6 +152,20 @@ jobs:
       - uses: taiki-e/install-action@c0ae9b92c15529ec87e792a1233f3f4a6c726bfa # cargo-vet
         with:
           tool: cargo-vet@0.10.2
+          # KNOWN, ACCEPTED GAP: no install-action manifest at any SHA
+          # carries cargo-vet 0.10.2 (checked through v2.87.7's
+          # manifests/cargo-vet.json — only 0.10/0.10.0), so a SHA bump
+          # cannot fix this. 0.10.0, the newest version the manifest does
+          # have, can't parse this repo's supply-chain/imports.lock
+          # (crates.io trusted-publisher schema — verified locally: "missing
+          # field `user-id`"), so downgrading is blocked too. That leaves
+          # only this: fall back to cargo-binstall explicitly, which installs
+          # from QuickInstall, a third-party rebuild, not the upstream
+          # release artifact. Every other install-action step in this repo
+          # sets `fallback: none` and hard-fails on a manifest miss; this is
+          # the one exception. See docs/supply-chain.md "Pinned-tool
+          # inventory".
+          fallback: cargo-binstall
       # BLOCKING supply-chain gate: every third-party dependency in the
       # locked graph must be covered by a cargo-vet audit, an imported
       # audit from a trusted set (mozilla/google/bytecode-alliance), or an
@@ -187,6 +206,11 @@ jobs:
       - uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: cargo-semver-checks@0.50.0
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
       # Make the installed version deterministic in the log rather than
       # relying on install-action's own post-install `--version` call
       # (a third party's logging side effect, not ours to depend on).
@@ -300,7 +324,12 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
       - uses: taiki-e/install-action@7c1105379b6217809b9ed26c163a46c65c7a528f # cargo-llvm-cov
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.8.7
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
       - run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
