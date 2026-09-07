@@ -5,6 +5,7 @@
 use acdp_crypto::hash::{compute_content_hash, derive_lineage_id};
 use acdp_primitives::error::AcdpError;
 use acdp_types::{
+    body::Body,
     capabilities::CapabilitiesDocument,
     primitives::{ContentHash, CtxId, LineageId},
     publish::PublishRequest,
@@ -320,12 +321,16 @@ fn is_well_formed_version(v: &str) -> bool {
 /// `"0.2.0;"` would be misread as `0.2` — all turning the gate OFF when
 /// it must stay ON for anything that isn't a clean `major.minor.patch`.
 ///
-/// `pub(crate)` rather than private: `RegistryServer::publish_verified_in_tenant`
+/// `pub` (not merely `pub(crate)`): `RegistryServer::publish_verified_in_tenant`
 /// (server.rs) reuses this exact predicate to gate the §5 step 2
 /// did:web self-sign check on the same version boundary as the §4
 /// shape gate above — a second, independent version-comparison helper
-/// would risk drifting from this one's fail-closed polarity.
-pub(crate) fn key_revocation_gate_applies(acdp_version: &str) -> bool {
+/// would risk drifting from this one's fail-closed polarity. It is
+/// also the version predicate an external registry implementer needs
+/// to decide whether [`check_revocation_supersession`] applies to a
+/// given publish — the two are promoted to `pub` together so a rule
+/// is never reachable without the gate that decides when to call it.
+pub fn key_revocation_gate_applies(acdp_version: &str) -> bool {
     if !is_well_formed_version(acdp_version) {
         return true;
     }
@@ -339,6 +344,152 @@ pub(crate) fn key_revocation_gate_applies(acdp_version: &str) -> bool {
         None => return true,
     };
     major > 0 || minor >= 3
+}
+
+/// RFC-ACDP-0014 §4 `supersedes` row for `key-revocation` contexts.
+///
+/// Verbatim (§4): "A revocation context MAY be superseded only by
+/// another `key-revocation` context from the same signer class (e.g.
+/// to widen — never narrow — the compromise window by moving T
+/// earlier). Consumers MUST treat the earliest `compromised_since`
+/// across a revocation lineage as effective."
+///
+/// This function enforces exactly the *type* and *signer-class*
+/// halves of that sentence — nothing else. It does NOT compare
+/// `compromised_since` in either direction: the RFC's "widen, never
+/// narrow" clause is illustrative of *why* a producer would supersede
+/// a revocation, not an additional publish-time constraint — per §4:58
+/// the monotonicity protection belongs on the consumer side, as the
+/// earliest-T rule. [`acdp_types::revocation::effective_boundary`]
+/// implements that fold correctly, but assembling its input from a
+/// registry is not wired end-to-end today (see issue #226), so this
+/// publish-time allow is spec-correct while that end-to-end guarantee
+/// remains incomplete.
+///
+/// "Signer class" is [`acdp_types::revocation::RevocationTrustClass`]
+/// (`ProducerSigned` vs. `RegistryAttested`) — **not** same-DID; RFC-ACDP-0014
+/// §13 explicitly blesses cross-producer registry-attested revocations
+/// superseding one another.
+///
+/// Caller contract (this function does NOT re-derive these on its
+/// own):
+/// - `prev` is the current, non-superseded version of the lineage the
+///   incoming request's `supersedes` names — the store has already
+///   confirmed the target exists, belongs to the same tenant, is
+///   owned by the requester, and is not already superseded (§4's "arm
+///   5" concerns, entirely outside this function's scope).
+/// - Call this only when [`key_revocation_gate_applies`] returns
+///   `true` for the registry's advertised `acdp_version` — pre-0.3.0
+///   registries have no `key-revocation` vocabulary to enforce this
+///   against.
+///
+/// Arms (see the Phase 5 plan for the full table):
+///
+/// **Arm 1** — `prev` key-revocation, `req` key-revocation, same class
+/// ⇒ `Ok` (regardless of `compromised_since` direction — arm 6 is just
+/// a special case of this).
+///
+/// **Arm 2** — `prev` key-revocation, `req` key-revocation, different
+/// class ⇒ `SchemaViolation`.
+///
+/// **Arm 3** — `prev` key-revocation, `req` NOT a key-revocation ⇒
+/// `SchemaViolation` — the security payload: without this, the holder
+/// of a compromised key could re-point the lineage head away from the
+/// revocation with an ordinary body, since #207's §5 step 2
+/// not-self-signed check only fires for `is_key_revocation()` bodies.
+///
+/// **Arm 4** — `prev` NOT a key-revocation ⇒ `Ok` unconditionally —
+/// out of scope for this §4 row; whatever `req` is, nothing here
+/// constrains it.
+///
+/// **Arm 6b** — `prev` is (interim-form) a key-revocation but
+/// `KeyRevocation::from_body(prev)` fails to parse (a malformed
+/// pre-0.3.0-stored body) ⇒ arm 3's type rule still applies (`req`
+/// must be a key-revocation), but the signer-class comparison is
+/// skipped since there is no parsed `prev` class to compare against —
+/// allow. This arm is unreachable on a ≥ 0.3.0 registry: every publish
+/// path routes through `validate_post_schema`, which runs
+/// `KeyRevocation::from_publish_request(req)?` when
+/// [`key_revocation_gate_applies`] is true, and `Body::from_publish_request`
+/// (`acdp_types::body`) copies verbatim the exact five fields
+/// `KeyRevocation::from_parts` reads — so a `Body` stored through that
+/// path always has `from_body(stored) ≡ from_publish_request(req)`,
+/// meaning `from_body` cannot fail there either. A future normalizing
+/// change to `Body` that broke that equivalence would turn this arm
+/// into a live escape hatch — see the inline comment at the match arm
+/// below.
+pub fn check_revocation_supersession(prev: &Body, req: &PublishRequest) -> Result<(), AcdpError> {
+    if !prev.context_type.is_key_revocation() {
+        // Arm 4: whatever `prev` is, this §4 row does not constrain
+        // its supersession.
+        return Ok(());
+    }
+
+    if !req.context_type.is_key_revocation() {
+        // Arm 3: the security payload. `prev` is a safety broadcast;
+        // only another key-revocation may take over its lineage head.
+        return Err(AcdpError::SchemaViolation(format!(
+            "ctx_id '{}' is a key-revocation context and MAY only be superseded by \
+             another key-revocation context (RFC-ACDP-0014 §4); the incoming publish \
+             from agent_id '{}' has type '{}'",
+            prev.ctx_id,
+            req.agent_id,
+            context_type_label(&req.context_type),
+        )));
+    }
+
+    // Both PREV and IN are key-revocations. Arms 1/2/6/6b turn on the
+    // signer class, which requires parsing PREV's metadata.
+    let prev_revocation = match KeyRevocation::from_body(prev) {
+        Ok(r) => r,
+        Err(_) => {
+            // Arm 6b: PREV was stored as a key-revocation (by type) but
+            // does not shape-validate today — most plausibly a
+            // pre-0.3.0 body admitted before this rule existed. Arm 3's
+            // type rule already passed above; there is no parsed class
+            // to compare IN against, so allow rather than fail closed
+            // on a predecessor this function did not admit.
+            //
+            // Load-bearing equivalence: on ≥ 0.3.0 this branch is
+            // unreachable, because `from_body(stored) ≡
+            // from_publish_request(req)` — `Body::from_publish_request`
+            // copies verbatim the same five fields
+            // `KeyRevocation::from_parts` reads, and the publish gate
+            // already required `from_publish_request` to succeed. If a
+            // future change to `Body::from_publish_request` ever stops
+            // copying one of those fields verbatim, this arm silently
+            // becomes reachable again as an allow-anything escape
+            // hatch for a well-formed stored revocation.
+            return Ok(());
+        }
+    };
+
+    let incoming_revocation = KeyRevocation::from_publish_request(req)?;
+
+    if prev_revocation.trust_class == incoming_revocation.trust_class {
+        // Arms 1 and 6: same signer class, any `compromised_since`
+        // direction.
+        Ok(())
+    } else {
+        // Arm 2: signer class changed across the supersession.
+        Err(AcdpError::SchemaViolation(format!(
+            "ctx_id '{}' is a key-revocation with signer class {:?}; the incoming \
+             supersession from agent_id '{}' is a key-revocation with signer class {:?} \
+             — a revocation MAY only be superseded by another key-revocation from the \
+             same signer class (RFC-ACDP-0014 §4)",
+            prev.ctx_id, prev_revocation.trust_class, req.agent_id, incoming_revocation.trust_class,
+        )))
+    }
+}
+
+/// Human-readable label for a [`acdp_types::primitives::ContextType`]
+/// for use in error messages only (mirrors the `serde_json` round-trip
+/// `acdp_types::revocation` already uses for the same purpose).
+fn context_type_label(context_type: &acdp_types::primitives::ContextType) -> String {
+    serde_json::to_value(context_type)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "<unrepresentable>".into())
 }
 
 /// Assign registry identifiers after successful validation per
@@ -382,6 +533,7 @@ mod tests {
     use acdp_types::{
         capabilities::Limits,
         primitives::{AgentDid, ContextType, Visibility},
+        revocation::RevocationTrustClass,
     };
 
     fn test_caps() -> CapabilitiesDocument {
@@ -1036,5 +1188,283 @@ mod tests {
         let raw_len = serde_json::to_vec(&req).unwrap().len();
         let err = v.validate_post_schema(&req, raw_len).unwrap_err();
         assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    // ── Phase 5 (#216a): RFC-ACDP-0014 §4 `supersedes` rule —
+    // `check_revocation_supersession`. Dead code until Phase 6 wires it
+    // in; these tests exercise it directly. ─────────────────────────────
+
+    /// Materializes the `Body` a registry would have stored from `req`,
+    /// so `check_revocation_supersession`'s `prev: &Body` parameter can
+    /// be exercised without a real store.
+    fn body_from_request(req: &PublishRequest) -> Body {
+        Body::from_publish_request(
+            req,
+            CtxId("acdp://registry.example.com/00000000-0000-4000-8000-000000000001".into()),
+            LineageId(format!("lin:sha256:{}", "0".repeat(64))),
+            "registry.example.com",
+            chrono::DateTime::parse_from_rfc3339("2026-05-01T00:00:00.000Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+    }
+
+    // Arm 1: PREV key-revocation, IN key-revocation, SAME signer class
+    // ⇒ allow, regardless of `compromised_since` direction — here IN's
+    // T is EARLIER than PREV's.
+    #[test]
+    fn revocation_supersession_same_class_allowed_t_earlier() {
+        let prev_req = build_revocation_request(
+            REVOCATION_PRODUCER_DID,
+            valid_revocation_metadata(), // T = 2026-05-01
+            "0.3.0",
+        );
+        let prev = body_from_request(&prev_req);
+
+        let mut meta = valid_revocation_metadata();
+        meta["compromised_since"] = serde_json::json!("2026-04-01T00:00:00.000Z"); // earlier
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+
+        check_revocation_supersession(&prev, &req)
+            .expect("same signer class supersession must be allowed regardless of T direction");
+    }
+
+    // Arm 2: PREV key-revocation, IN key-revocation, DIFFERENT signer
+    // class (producer-signed → registry-attested) ⇒ reject
+    // SchemaViolation.
+    #[test]
+    fn revocation_supersession_different_class_rejected() {
+        let prev_req = build_revocation_request(
+            REVOCATION_PRODUCER_DID,
+            valid_revocation_metadata(), // no controller ⇒ ProducerSigned
+            "0.3.0",
+        );
+        let prev = body_from_request(&prev_req);
+
+        let registry_did = test_caps().registry_did;
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(REVOCATION_PRODUCER_DID);
+        let req = build_revocation_request(&registry_did, meta, "0.3.0"); // RegistryAttested
+
+        let err = check_revocation_supersession(&prev, &req).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    // Arm 3: PREV key-revocation, IN NOT a key-revocation ⇒ reject
+    // SchemaViolation. The security payload: without this, the holder
+    // of the compromised key could re-point the lineage head away from
+    // its own revocation with an ordinary body.
+    #[test]
+    fn revocation_superseded_by_non_revocation_rejected() {
+        let prev_req = build_revocation_request(
+            REVOCATION_PRODUCER_DID,
+            valid_revocation_metadata(),
+            "0.3.0",
+        );
+        let prev = body_from_request(&prev_req);
+        let req = test_request(); // ordinary DataSnapshot body
+
+        let err = check_revocation_supersession(&prev, &req).unwrap_err();
+        assert!(matches!(err, AcdpError::SchemaViolation(_)));
+    }
+
+    // Arm 4: PREV NOT a key-revocation ⇒ allow unconditionally,
+    // whatever IN is — out of scope for this §4 row (RFC §4 constrains
+    // only what may supersede a revocation, not what a revocation may
+    // supersede).
+    #[test]
+    fn non_revocation_predecessor_superseded_by_revocation_allowed() {
+        let prev_req = test_request();
+        let prev = body_from_request(&prev_req);
+        let req = build_revocation_request(
+            REVOCATION_PRODUCER_DID,
+            valid_revocation_metadata(),
+            "0.3.0",
+        );
+
+        check_revocation_supersession(&prev, &req)
+            .expect("a non-revocation predecessor is out of scope for this §4 row");
+    }
+
+    // Arm 6: same code path as arm 1, but exercising the genuinely
+    // distinct direction — NARROWING the compromise window by moving T
+    // LATER (arm 1 already covers "same class, T earlier"; a test that
+    // also moves T earlier would just be arm 1 again). This is the arm
+    // carrying real residual risk: `check_revocation_supersession` does
+    // not compare `compromised_since` direction at all, so a narrowing
+    // supersession is allowed at publish. That is spec-correct per §4:58
+    // (the monotonicity protection belongs on the consumer side via
+    // `effective_boundary`) but the guarantee is incomplete end-to-end
+    // until issue #226 is addressed — see the doc comment above
+    // `check_revocation_supersession`.
+    #[test]
+    fn revocation_supersession_same_class_narrowing_t_allowed_at_publish() {
+        let mut prev_meta = valid_revocation_metadata();
+        prev_meta["compromised_since"] = serde_json::json!("2026-05-01T00:00:00.000Z");
+        let prev_req = build_revocation_request(REVOCATION_PRODUCER_DID, prev_meta, "0.3.0");
+        let prev = body_from_request(&prev_req);
+
+        let mut meta = valid_revocation_metadata();
+        meta["compromised_since"] = serde_json::json!("2026-06-01T00:00:00.000Z"); // later — narrows
+        let req = build_revocation_request(REVOCATION_PRODUCER_DID, meta, "0.3.0");
+
+        check_revocation_supersession(&prev, &req).expect(
+            "narrowing the compromise window (T moved later) is allowed at publish time; \
+             this function enforces only type + signer class, not compromised_since \
+             direction (RFC-ACDP-0014 §4:58)",
+        );
+    }
+
+    // Arm 6b: PREV is a key-revocation by type but its stored body
+    // fails `KeyRevocation::from_body` (malformed pre-0.3.0 body with
+    // no metadata object at all) ⇒ arm 3's type rule still applies (IN
+    // must be a key-revocation) but the signer-class comparison is
+    // skipped since there is no parsed PREV class to compare.
+    #[test]
+    fn revocation_supersession_malformed_predecessor_skips_class_comparison() {
+        let key = SigningKey::from_bytes(&[0u8; 32]);
+        let p = Producer::new(
+            key,
+            AgentDid::new(REVOCATION_PRODUCER_DID),
+            format!("{REVOCATION_PRODUCER_DID}#key-1"),
+        );
+        let prev_req = p
+            .publish_request()
+            .title("Malformed pre-0.3.0 key-revocation (no metadata)")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .acdp_version("0.2.0")
+            .build()
+            .unwrap();
+        let prev = body_from_request(&prev_req);
+        assert!(
+            KeyRevocation::from_body(&prev).is_err(),
+            "fixture must actually fail from_body, or this test proves nothing"
+        );
+
+        let req = build_revocation_request(
+            REVOCATION_OTHER_PRODUCER_DID,
+            valid_revocation_metadata(),
+            "0.3.0",
+        );
+
+        check_revocation_supersession(&prev, &req).expect(
+            "arm 6b: a malformed predecessor skips the class comparison but a \
+             well-formed key-revocation successor is still allowed",
+        );
+    }
+
+    // Arm 6b + arm 3: the other half of arm 6b's criterion. The test
+    // above only proves the signer-class comparison is skipped for a
+    // malformed predecessor; it does NOT prove arm 3's type rule still
+    // applies to one. This is the half that carries the security
+    // weight: an unparseable stored revocation must still not be
+    // supersedable by an ordinary (non-key-revocation) context.
+    #[test]
+    fn revocation_supersession_malformed_predecessor_still_blocks_non_revocation_successor() {
+        let key = SigningKey::from_bytes(&[0u8; 32]);
+        let p = Producer::new(
+            key,
+            AgentDid::new(REVOCATION_PRODUCER_DID),
+            format!("{REVOCATION_PRODUCER_DID}#key-1"),
+        );
+        let prev_req = p
+            .publish_request()
+            .title("Malformed pre-0.3.0 key-revocation (no metadata)")
+            .context_type(ContextType::KeyRevocation)
+            .visibility(Visibility::Public)
+            .acdp_version("0.2.0")
+            .build()
+            .unwrap();
+        let prev = body_from_request(&prev_req);
+        assert!(
+            KeyRevocation::from_body(&prev).is_err(),
+            "fixture must actually fail from_body, or this test proves nothing"
+        );
+
+        let req = test_request(); // ordinary DataSnapshot body, not a key-revocation
+
+        let err = check_revocation_supersession(&prev, &req).unwrap_err();
+        assert!(
+            matches!(err, AcdpError::SchemaViolation(_)),
+            "arm 3's type rule must still reject a non-revocation successor even when the \
+             predecessor is malformed and the class comparison is skipped"
+        );
+    }
+
+    // Arm 2, isolating CLASS from DID (part 1 of 2): same-DID class
+    // flip → reject. PREV and IN are published under the exact same
+    // agent_id (the registry's own DID), so a same-DID criterion would
+    // treat this as no change and allow it — but the controller field
+    // differs, flipping the class from ProducerSigned (controller ==
+    // agent_id, explicit — RFC-ACDP-0014 §5 rule 3) to RegistryAttested
+    // (controller != agent_id — §6). Both fixtures independently pass
+    // `check_revocation_controller` (verified below against
+    // `KeyRevocation::from_parts`'s §5/§6 classification), so this is a
+    // legitimately admissible pair, not merely abstractly constructible.
+    #[test]
+    fn revocation_supersession_same_did_class_flip_rejected() {
+        let caps = test_caps_v030();
+        let v = PublishValidator::new(&caps);
+        let registry_did = caps.registry_did.clone();
+
+        let mut prev_meta = valid_revocation_metadata();
+        prev_meta["revoked_key_controller"] = serde_json::json!(registry_did);
+        let prev_req = build_revocation_request(&registry_did, prev_meta, "0.3.0"); // ProducerSigned (controller == agent_id)
+        let prev_revocation = KeyRevocation::from_publish_request(&prev_req).unwrap();
+        assert_eq!(
+            prev_revocation.trust_class,
+            RevocationTrustClass::ProducerSigned
+        );
+        v.check_revocation_controller(&prev_req, &prev_revocation)
+            .expect("PREV fixture must be a legitimately publishable revocation");
+        let prev = body_from_request(&prev_req);
+
+        let mut meta = valid_revocation_metadata();
+        meta["revoked_key_controller"] = serde_json::json!(REVOCATION_PRODUCER_DID);
+        let req = build_revocation_request(&registry_did, meta, "0.3.0"); // RegistryAttested (controller != agent_id)
+        let in_revocation = KeyRevocation::from_publish_request(&req).unwrap();
+        assert_eq!(
+            in_revocation.trust_class,
+            RevocationTrustClass::RegistryAttested
+        );
+        v.check_revocation_controller(&req, &in_revocation)
+            .expect("IN fixture must be a legitimately publishable revocation");
+
+        let err = check_revocation_supersession(&prev, &req).unwrap_err();
+        assert!(
+            matches!(err, AcdpError::SchemaViolation(_)),
+            "same agent_id on both sides must NOT be enough to allow this supersession — \
+             the criterion is signer class, not DID"
+        );
+    }
+
+    // Arm 2, isolating CLASS from DID (part 2 of 2): cross-DID, same
+    // class → allow. This is RFC-ACDP-0014 §13's cross-producer case,
+    // currently verified nowhere else: PREV and IN are published under
+    // different agent_id values (cross-DID) but classify to the same
+    // signer class (both ProducerSigned, controller absent/defaulted),
+    // so the supersession must be allowed. Together with the test
+    // above, this pins the criterion to trust class, not identity.
+    #[test]
+    fn revocation_supersession_cross_did_same_class_allowed() {
+        let prev_req = build_revocation_request(
+            REVOCATION_PRODUCER_DID,
+            valid_revocation_metadata(), // no controller ⇒ ProducerSigned
+            "0.3.0",
+        );
+        let prev = body_from_request(&prev_req);
+
+        let req = build_revocation_request(
+            REVOCATION_OTHER_PRODUCER_DID, // different agent_id ⇒ cross-DID
+            valid_revocation_metadata(),   // no controller ⇒ ProducerSigned
+            "0.3.0",
+        );
+
+        check_revocation_supersession(&prev, &req).expect(
+            "cross-DID, same signer class (ProducerSigned) must be allowed — \
+             RFC-ACDP-0014 §13 blesses cross-producer supersession; the criterion is \
+             class, not DID",
+        );
     }
 }
