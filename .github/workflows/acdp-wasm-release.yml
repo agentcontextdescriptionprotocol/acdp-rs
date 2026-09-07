@@ -86,7 +86,8 @@ jobs:
       # Env RUSTFLAGS fully DISPLACES bindings/acdp-wasm/.cargo/config.toml's
       # [target.wasm32-unknown-unknown].rustflags (measured: with env
       # RUSTFLAGS set, `--cfg getrandom_backend` appeared on 0 of 97 rustc
-      # invocations) — so it re-includes that cfg verbatim for consistency
+      # invocations — reverify with `cargo build -v` and grep the `Running
+      # `rustc`` lines) — so it re-includes that cfg verbatim for consistency
       # with that file. At the current getrandom 0.4.3, the cfg is inert
       # (see the corrected comment in that config file: the backend is
       # selected by the `wasm_js` feature alone) and no check in this job
@@ -105,9 +106,10 @@ jobs:
       # registry+workspace remapping alone left 19 of 83 `/Users/...`
       # path strings, all `.../lib/rustlib/src/rust/library/alloc/...`
       # standard-library paths that come from neither the registry nor the
-      # workspace. The sysroot is derived at runtime via `rustc --print
-      # sysroot` rather than hardcoded, since it varies by toolchain
-      # install layout.
+      # workspace (reverify: `strings acdp_wasm_bg.wasm | grep -c '/Users/'`
+      # vs the same piped to `grep -c lib/rustlib`). The sysroot is derived
+      # at runtime via `rustc --print sysroot` rather than hardcoded, since
+      # it varies by toolchain install layout.
       - name: Compose reproducible RUSTFLAGS
         run: |
           SYSROOT="$(rustc --print sysroot)"
@@ -177,6 +179,50 @@ jobs:
       # FFI surface. A broken .wasm fails here, before publish.
       - name: Smoke test (sig-001 golden vector)
         run: node scripts/smoke.mjs
+      # Host-path leak gate (#196c follow-up): the RUSTFLAGS composed above
+      # are what make this artifact reproducible off-runner — but nothing
+      # upstream of this step actually checks that the remaps worked.
+      # `wasm-pack build`'s own success proves nothing here: a renamed env
+      # var, a relocated CARGO_HOME, or a new dependency that embeds paths
+      # some other way (e.g. `file!()` output, an include_str! of a
+      # generated file) would silently put this runner's absolute paths
+      # back in the published .wasm, and every check upstream (build,
+      # the `test -f` file-existence checks, smoke test) would still pass.
+      # This step is the only thing that would notice. Checked against the
+      # actual values used to build RUSTFLAGS above (not hardcoded
+      # literals) so it can't drift out of sync with what was actually
+      # remapped; `/home/runner` is
+      # additionally checked as a literal belt-and-braces catch in case an
+      # env var above were empty/unset. Deliberately does NOT check for
+      # `/rustc/<hash>/...` — those come from rustc's own precompiled std
+      # (pre-remapped at rustc's build time, present in every build
+      # regardless of our flags; verified locally: a remapped build still
+      # has several of these) and are not host paths. Placed here, right
+      # before the (expensive) determinism rebuild, so a broken remap fails
+      # fast rather than burning the ~3-5 minutes below first; and it must
+      # run in dry_run too since dry_run dispatch is this workflow's only
+      # routine exercise.
+      - name: Verify no host-absolute paths leaked into the .wasm
+        run: |
+          WASM=pkg/acdp_wasm_bg.wasm
+          SYSROOT="$(rustc --print sysroot)"
+          CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+          n_home=$(grep -aoF "$HOME" "$WASM" | wc -l)
+          n_workspace=$(grep -aoF "$GITHUB_WORKSPACE" "$WASM" | wc -l)
+          n_cargo=$(grep -aoF "$CARGO_HOME_DIR" "$WASM" | wc -l)
+          n_sysroot=$(grep -aoF "$SYSROOT" "$WASM" | wc -l)
+          n_runner_literal=$(grep -aoF '/home/runner' "$WASM" | wc -l)
+          echo "Host-path occurrence counts (prefixes overlap by construction, e.g. \$CARGO_HOME and \$SYSROOT both live under \$HOME — any nonzero count fails):"
+          echo "  \$HOME              ($HOME): $n_home"
+          echo "  \$GITHUB_WORKSPACE  ($GITHUB_WORKSPACE): $n_workspace"
+          echo "  CARGO_HOME registry ($CARGO_HOME_DIR): $n_cargo"
+          echo "  rustc sysroot       ($SYSROOT): $n_sysroot"
+          echo "  literal /home/runner: $n_runner_literal"
+          if [ "$n_home" -ne 0 ] || [ "$n_workspace" -ne 0 ] || [ "$n_cargo" -ne 0 ] || [ "$n_sysroot" -ne 0 ] || [ "$n_runner_literal" -ne 0 ]; then
+            echo "::error::Host-absolute path(s) found in acdp_wasm_bg.wasm. A --remap-path-prefix stopped working (renamed env var, relocated CARGO_HOME/sysroot, or a new dependency embedding paths another way) — the published artifact is no longer reproducible off this runner. Investigate before retrying; do not publish this build." >&2
+            exit 1
+          fi
+          echo "No host-absolute paths found in acdp_wasm_bg.wasm."
       # Determinism gate (#196c): rebuild into a SECOND, distinct
       # CARGO_TARGET_DIR (under $RUNNER_TEMP, not the workspace) with a
       # different --out-dir, then `cmp` the two acdp_wasm_bg.wasm modules
