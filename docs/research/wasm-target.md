@@ -142,7 +142,9 @@ new **standalone** package `bindings/acdp-wasm` (its own `[workspace]`, like
   `reqwest`/`tokio`/`rustls`, identical to how the Python/Node bindings pull it).
 - Exposes a `wasm-bindgen` surface whose methods take and return **JSON
   strings** — e.g. `verify_offline(body_json) -> report_json`,
-  `verify_receipt(receipt_json, did_doc_json) -> report_json`,
+  `verify_receipt(receipt_json, body_json, registry_public_key_b64,
+  expected_ctx_id, recomputed_body_hash, producer_key_fingerprint) ->
+  report_json`,
   `content_hash(producer_content_json) -> "sha256:…"`,
   `sign_content_hash(seed_bytes, hash_string) -> sig_b64`. This mirrors the
   `AcdpProducer` seed-storage pattern (`SigningKey::seed_bytes()` /

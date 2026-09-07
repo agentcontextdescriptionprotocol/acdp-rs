@@ -1,13 +1,34 @@
 # release-plz configuration.
 #
 # Previously release-plz ran on pure defaults. This file makes the
-# defaults we rely on explicit and enables a blocking API-compatibility
-# check at release time.
+# defaults we rely on explicit and enables an API-compatibility check at
+# release time.
 [workspace]
 # Run cargo-semver-checks inside release-plz when computing the release
-# PR. Unlike the advisory `semver` job in ci.yml (continue-on-error), this
-# runs where the version bumps actually happen, so an API break that rides
-# an unmarked commit blocks the release PR instead of only warning on CI.
+# PR. This is a version-bump *corrector*, not a blocking gate: when it
+# detects a breaking change, release-plz raises the computed bump for the
+# affected crate(s) to a major version instead of the patch/minor bump the
+# commit prefixes alone would have produced. It never refuses to open the
+# release PR and never blocks on a detected break.
+#
+# Empirically confirmed against the pinned
+# `MarcoIeni/release-plz-action@aec534bb` (v0.5.133): PR #227 added a field
+# to `PublishCommit` (a `feat(server)!:` commit). `cargo semver-checks`
+# reported `constructible_struct_adds_field` ("semver requires new major
+# version") against that struct. release-plz did not refuse anything — it
+# opened release PR #228, computing 0.10.0 (from 0.9.1) across all 13
+# workspace crates, with the semver-checks failure reproduced verbatim in
+# the PR body alongside `acdp-server`'s major bump. (That specific bump was
+# already over-determined — PR #227 was itself marked `feat(server)!:`, and
+# `version_group = "acdp"` ties all 13 crates to one version — so this
+# observation confirms release-plz didn't block on the detected break, not
+# that the semver-checks failure is what raised the bump the commit
+# prefixes alone would not have produced.)
+#
+# That is still the property #208 cared about (PR #188 proposed a PATCH
+# bump that carried a break): without this check, a break can ride out
+# under a version number that promises compatibility. The protection is
+# against a *wrong-version publish*, never against *publishing* a break.
 semver_check = true
 
 # Label the release PRs release-plz opens.

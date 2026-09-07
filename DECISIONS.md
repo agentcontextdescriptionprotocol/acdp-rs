@@ -146,3 +146,128 @@ change, not a neutral no-op, so standing pat is the lower-churn option.
 
 **Status:** CONFIRMED (2026-08-30) — no code change; `ASSUMPTIONS.md` entry updated to
 CONFIRMED.
+
+## 2026-09-06 — Phase 9 dispositions (plans/issues-196-199-215-216-followups.md)
+
+Four `UNCONFIRMED` entries carried a disposition already recorded in Phase 9's own table
+in the plan. Recorded here as the reconciliation log entry, with `ASSUMPTIONS.md`
+cross-referenced back to this section.
+
+1. **Byte equality for CtxId comparison (fed-011)** — **CONFIRM as-is.** Fail-closed
+   behavior, documented at two independent call sites (client `verify_retrieved`/
+   `fetch_report_inner` and the bindings' `verify_ctx_id_binding`), no code change. A
+   non-canonical/alias form becoming legitimate would produce false refusals, never false
+   acceptances — the safe direction to be wrong in.
+2. **`String` (not `CtxId`) on `ContextIdMismatch`** — **CONFIRM as-is.** The correction is
+   prose/rationale only (the original "over-promise" argument didn't actually distinguish
+   this field from `HashMismatch`'s `ContentHash`); the shipped field types are unchanged.
+   Zero blast radius.
+3. **`semver-tool-health` is not a required status check** — **NEEDS-CHANGE.** The
+   assumption's stated blocker ("a required check that has never run green once would
+   block every PR") has expired: verified via `gh run list --workflow=ci.yml --branch
+   main --limit 15 --json databaseId,conclusion` that at least 13 consecutive runs on
+   `main` — from `34079142407` back through `34013243642` (the run 8 positions back from
+   `34079142407` is `34048649587`, not `34040888637`) — are all `success`, with the streak
+   breaking only at a `cancelled` run further back, and `semver-tool-health`
+   (`ci.yml:275-277`, whose `needs: [semver]` is at `ci.yml:277`) carries no
+   `continue-on-error`, so a workflow success implies the job passed. Add
+   `semver-tool-health` to `main`'s required contexts (10 → 11) via `gh api
+   .../branches/main/protection`. This is a repo-settings change, applied by the
+   orchestrator at Release choreography step 6 — after the 0.10.0 release PR (#228) has
+   merged, not before, since adding it while #228 is open would require it green on a PR
+   whose advisory `semver` job (`needs: [semver]`) is deliberately reddened by an
+   intentional `feat!`. Not applied in this phase's diff — out of this executor's scope.
+4. **Unpublished-crate baseline behaviour in cargo-semver-checks** — **DEFER/MOOT.**
+   Unreachable today: no phase in any active plan adds a new workspace crate. Self-
+   diagnosing the first time one does (either the job passes cleanly, or it hard-reds with
+   a misleading "tool error" diagnosis that immediately identifies the PR needing a
+   carve-out). No action taken.
+
+**User verdict:** None recorded. Unlike every other entry in this log, the owner gave no
+per-item verdict on these four dispositions — they were resolved by agents (Opus
+recommending, this executor applying) acting under the owner's standing delegation for
+this run's Phase 9 cleanup pass, not by an explicit owner decision on each item. This line
+exists to make that absence visible rather than silently omitting the field the top of
+this file promises: **these four dispositions are pending the owner's review**, not an
+owner-approved verdict, until the owner says otherwise.
+
+**What happened:** `ASSUMPTIONS.md` entries updated in place with the above dispositions
+and dated. No code changes for any of the four (item 3's branch-protection PATCH is
+explicitly deferred to the orchestrator's choreography step 6).
+
+**Status:** All four applied as dispositioned above (2026-09-06).
+
+## 2026-09-06 — Five additional `UNCONFIRMED` entries dispositioned (Phase 9)
+
+Entries added to `ASSUMPTIONS.md` during this plan's implementation, dispositioned as part
+of Phase 9's cleanup pass rather than left open indefinitely.
+
+1. **Binding lockfiles resolve independently of the root `Cargo.lock`** — **CONFIRM
+   as-is.** Accepted architectural trade-off: each binding is a standalone workspace
+   tested by its own suite (`make sdk-py`/`sdk-node`/`interop`, `cd bindings/acdp-wasm &&
+   cargo test`) against its own resolution. Already re-verified once, when Phase 2 moved
+   `bindings-deny`'s advisory scan to `--locked` (auditing the pinned graph that ships,
+   not a freshly-resolved one). No further action.
+2. **`Swatinem/rust-cache` runs before the `--locked` gate in three workflows** —
+   **CONFIRMED-as-safe. A prior revision of this entry recorded a "confirmed real gap"
+   here and it was wrong; that finding is retracted.** The prior text claimed that
+   `restore.js` — the action's `main` step, which runs in place in the job wherever the
+   step is listed, not in post/cleanup — reaches a `cargo metadata --all-features
+   --format-version 1` call with **no** `--locked` flag, and that because rust-cache
+   precedes the `--locked` gate step in all three workflows (`bindings.yml:179` before
+   `:190`, `bindings-release.yml:71` before `:94`, `acdp-wasm-release.yml:123` before
+   `:146`), it could silently repair a drifted binding lockfile before the gate ever
+   inspected it — the same fail-open shape as `NEW-1`, via a different actor. **That
+   conclusion does not hold.** The step-ordering premise (rust-cache before the gate, at
+   those exact line numbers) is true and unchanged. But the `cargo metadata` call that
+   `restore.js` actually reaches passes **`--no-deps`**
+   (`dist/cleanup-BPghO_DY.js:34492`), and `cargo metadata --no-deps` performs no
+   dependency resolution and does not write `Cargo.lock` — confirmed on a synthetic crate
+   with a deliberately drifted lock: with `--no-deps` the lockfile stayed byte-identical
+   and still drifted; without `--no-deps` it was repaired. The **resolving** variant
+   (`getPackagesOutsideWorkspaceRoot`, no `--no-deps`, `cleanup-BPghO_DY.js:34488`) has
+   **zero call sites in `restore.js`** — its only caller is **`save.js:64`**, the `post:`
+   step, which runs *after* the gate. In other words, the round-3 verifier's original
+   "hopeful reading" — that the resolving `cargo metadata` call lives in the post/cleanup
+   step, which runs after all job steps — was **correct**. The contrary finding recorded
+   in this entry's prior revision was an over-read (conflating the two distinct
+   `cargo metadata` invocations in rust-cache's source) and is now retracted. **The
+   existing gate placement in all three workflows is already sound; no workflow reorder
+   is needed and no follow-up issue should be filed.**
+3. **`cargo-vet` installed from QuickInstall, not upstream** — **DEFER.** Analysis
+   confirmed accurate; all three considered alternatives remain closed off (no
+   `install-action` manifest entry for `0.10.2` exists at any SHA; downgrading to
+   `0.10.0` breaks parsing of this repo's trusted-publisher lockfile schema;
+   `fallback: none` would hard-fail a required check on every PR). Tracked via the filed
+   upstream issue (`taiki-e/install-action#1997`); revisit once that manifest gains
+   `0.10.2` coverage.
+4. **`cargo-fuzz` installed with an unconditional, undisableable QuickInstall fallback** —
+   **DEFER.** Same shape as the `cargo-vet` gap, equally closed off locally (the
+   `install-action` SHA that would add the `fallback` input has no `cargo-fuzz.json`
+   manifest at all). Lower severity: `fuzz.yml` is not a required status check. No action
+   needed unless the `cargo-fuzz` pin or the `install-action` SHA changes.
+5. **Binding versions are NOT independently versioned in practice** — **CONFIRMED,
+   resolved this session.** All three binding release workflows overwrite the manifest
+   version with the dispatch input before building, and `release-plz.yml` dispatches all
+   three at the crate family's computed version — so "bindings go to 0.9.0" (the plan's
+   original default) could never actually ship once PR #227's break pushed the crate
+   family to 0.10.0. Referred to Fable per the owner's standing delegation; Fable decided
+   0.10.0 for the bindings, matching the crate family, and PR #230 implemented it.
+
+**User verdict:** None recorded for items 1-4 — like the four dispositions in the entry
+above, these were resolved by agents acting under the owner's standing delegation for this
+run's Phase 9 cleanup pass, not by an explicit owner decision on each item, and remain
+**pending the owner's review**. Item 5 is the one genuine exception, and it is *not* an
+owner verdict on "0.10.0" either: the owner did set an explicit position for this item
+specifically ("bindings go to 0.9.0") and explicitly delegated the final call to Fable;
+Fable then chose 0.10.0 on the evidence above, overriding the owner's stated default for
+cause. Record it accurately as that — a delegated decision with the owner's default
+overridden — not as the owner having verdicted "0.10.0."
+
+**What happened:** `ASSUMPTIONS.md` entries updated in place with the above dispositions
+and dated; no code changes from this pass except item 5, already shipped in PR #230.
+
+**Status:** Items 1, 2, 3, 4, 5 all closed/confirmed/deferred as above. Item 2
+(`rust-cache` ordering) was recorded in an earlier revision as a confirmed real gap
+needing a workflow reorder and a follow-up issue; that was wrong and has been retracted
+above — no reorder and no follow-up issue are needed.
