@@ -33,9 +33,22 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           workspaces: fuzz
+      # KNOWN, ACCEPTED GAP: this SHA predates install-action's `fallback`
+      # input entirely (only `tool`/`checksum` exist in its action.yml at
+      # this pin), so there is no `fallback: none` to add here — the
+      # cargo-binstall fallback is unconditional at this SHA and cannot be
+      # disabled. A `tool:` version absent from this SHA's manifest would
+      # therefore silently reinstall from QuickInstall, a third-party
+      # rebuild, rather than hard-failing. Today cargo-fuzz@0.11.2 IS in
+      # this SHA's manifest and equals its `latest`, so nothing falls back.
+      # Bumping the SHA is not a fix either: cargo-fuzz has been dropped
+      # from install-action's manifest set entirely (also gone from its
+      # TOOLS.md), so a newer SHA guarantees a permanent manifest miss. See
+      # docs/supply-chain.md "Pinned-tool inventory" / "Known gap —
+      # cargo-fuzz".
       - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.11.2
       - run: cargo fuzz build --target x86_64-unknown-linux-gnu
 
   run:
@@ -54,9 +67,22 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           workspaces: fuzz
+      # KNOWN, ACCEPTED GAP: this SHA predates install-action's `fallback`
+      # input entirely (only `tool`/`checksum` exist in its action.yml at
+      # this pin), so there is no `fallback: none` to add here — the
+      # cargo-binstall fallback is unconditional at this SHA and cannot be
+      # disabled. A `tool:` version absent from this SHA's manifest would
+      # therefore silently reinstall from QuickInstall, a third-party
+      # rebuild, rather than hard-failing. Today cargo-fuzz@0.11.2 IS in
+      # this SHA's manifest and equals its `latest`, so nothing falls back.
+      # Bumping the SHA is not a fix either: cargo-fuzz has been dropped
+      # from install-action's manifest set entirely (also gone from its
+      # TOOLS.md), so a newer SHA guarantees a permanent manifest miss. See
+      # docs/supply-chain.md "Pinned-tool inventory" / "Known gap —
+      # cargo-fuzz".
       - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.11.2
       - run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=300
       - name: Upload crash artifacts
         if: failure()

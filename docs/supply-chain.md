@@ -70,6 +70,16 @@ gh attestation verify ./node_modules/@agentcontextdistributionprotocol/acdp-wasm
     --repo agentcontextdistributionprotocol/acdp-rs
 ```
 
+**This attestation is the trust root, not byte reproduction** — for every release
+through `acdp-wasm-v0.8.5` the published module embeds runner-absolute paths and
+cannot be independently rebuilt to a matching hash on your own machine. Releases built
+after `--remap-path-prefix` + the in-job determinism gate landed (#196c) are proven
+reproducible same-runner, by the gate itself; cross-runner reproduction (e.g. your
+laptop vs. `ubuntu-latest`) is plausible given a matching toolchain but has not been
+tested by anyone. See `docs/release-runbook.md`'s "Reproducibility of the `acdp-wasm`
+artifact" section for exactly which releases that covers and why an unexplained byte
+delta between two releases is not automatically a red flag.
+
 ### PyPI (`acdp` Python SDK)
 
 Published by [`acdp-py-release.yml`](../.github/workflows/acdp-py-release.yml)
@@ -157,11 +167,16 @@ whose `action.yml` bakes in the default:
   `action.yml` defaults `toolchain: stable`, `nightly` → `nightly`, and the
   `1.86.0` branch hard-codes `toolchain: 1.86.0`. We pin each ref to *its own*
   branch SHA, so no explicit `toolchain:` input is needed and the toolchain
-  selection is unchanged. (The `@master` use already passes `toolchain:`
-  explicitly via the matrix.)
+  selection is unchanged.
 - **`taiki-e/install-action@cargo-deny|cargo-fuzz|…`** — each tool shorthand is a
-  tag whose `action.yml` defaults `tool:` to that tool. We pin each to its
-  shorthand-tag SHA; the `tool` default is preserved, no `with: tool:` needed.
+  tag whose `action.yml` defaults `tool:` to that tool, so the ref name alone
+  would resolve the right *tool*. It does **not**, however, pin the right
+  *version* of that tool: the shorthand tag's `action.yml` only fixes which
+  tool the Action installs, not which release, and that release is looked up
+  at runtime from a per-tool manifest baked into the same commit. We
+  therefore also set `with: tool: <name>@<version>` on every step (see
+  "Pinned-tool inventory" below) — that explicit `@<version>` is what's
+  actually load-bearing here, not the shorthand tag.
 
 The trailing comment on these records the ref name (`# stable`, `# cargo-deny`)
 rather than a semver, because that is what identifies the pinned behavior.
@@ -170,27 +185,116 @@ rather than a semver, because that is what identifies the pinned behavior.
 
 | Action | Pinned SHA | Version / ref |
 |---|---|---|
-| `Swatinem/rust-cache` | `e18b497796c12c097a38f9edb9d0641fb99eee32` | v2.9.1 |
+| `Swatinem/rust-cache` | `f0d9c3887740aee45f6153b24b3a6b815192ec16` | v2.9.1 |
 | `dtolnay/rust-toolchain` (stable) | `4be7066ada62dd38de10e7b70166bc74ed198c30` | stable branch |
 | `dtolnay/rust-toolchain` (nightly) | `efcb852328a9f50117170cc43094fb6f09eaf1ae` | nightly branch |
-| `dtolnay/rust-toolchain` (master) | `fa04a1451ff1842e2626ccb99004d0195b455a88` | master branch |
 | `dtolnay/rust-toolchain` (1.86.0) | `2767295e193a2ee92d23c1ff586f596cb6d94a7a` | 1.86.0 branch |
 | `taiki-e/install-action` (cargo-deny) | `0751bff5da373f43f04fdc57a72795931a822bd7` | cargo-deny tag |
-| `taiki-e/install-action` (cargo-semver-checks) | `28a94b8721026748876cf52d0a3048ff9e4c9769` | cargo-semver-checks tag |
+| `taiki-e/install-action` (cargo-semver-checks) | `7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c` | v2.87.6 |
 | `taiki-e/install-action` (cargo-llvm-cov) | `7c1105379b6217809b9ed26c163a46c65c7a528f` | cargo-llvm-cov tag |
 | `taiki-e/install-action` (cargo-fuzz) | `82fc405565b9cf90abfe700ba43b4751ce2fe422` | cargo-fuzz tag |
 | `taiki-e/install-action` (cargo-vet) | `c0ae9b92c15529ec87e792a1233f3f4a6c726bfa` | cargo-vet tag |
-| `mlugg/setup-zig` | `53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7` | v1.2.2 |
+| `mlugg/setup-zig` | `d1434d08867e3ee9daa34448df10607b98908d29` | v2.2.1 |
 | `PyO3/maturin-action` | `e83996d129638aa358a18fbd1dfb82f0b0fb5d3b` | v1.51.0 |
-| `rustsec/audit-check` | `69366f33c96575abad1ee0dba8212993eecbe998` | v2.0.0 |
-| `pypa/gh-action-pypi-publish` | `cef221092ed1bacb1cc03d23a2d87d1d172e277b` | release/v1 (v1.14.0) |
+| `pypa/gh-action-pypi-publish` | `dc37677b2e1c63e2034f94d8a5b11f265b73ba33` | release/v1 (v1.14.0) |
 | `peter-evans/repository-dispatch` | `28959ce8df70de7be546dd1250a005dd32156697` | v4.0.1 |
-| `MarcoIeni/release-plz-action` | `e8792575c7f2366cf6ff3ccc33ead9ace5b691c7` | v0.5.130 |
-| `codecov/codecov-action` | `b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238` | v4 |
+| `MarcoIeni/release-plz-action` | `aec534bbd8631793b9b3b8f1ee6cd886c322e17f` | v0.5.133 |
+| `codecov/codecov-action` | `fb8b3582c8e4def4969c97caa2f19720cb33a72f` | v7.0.0 |
+| `dependabot/fetch-metadata` | `25dd0e34f4fe68f24cc83900b1fe3fe149efef98` | v3.1.0 |
 
-**First-party (major tag by policy):** `actions/checkout@v4`,
-`actions/setup-node@v4`, `actions/setup-python@v5`, `actions/upload-artifact@v4`,
-`actions/download-artifact@v4`, `actions/attest-build-provenance@v2`.
+**First-party (major tag by policy):** `actions/checkout@v7`,
+`actions/setup-node@v7`, `actions/setup-python@v7`, `actions/upload-artifact@v7`,
+`actions/download-artifact@v8`, `actions/attest-build-provenance@v4`,
+`actions/create-github-app-token@v3`.
+
+### Pinned-tool inventory (`taiki-e/install-action`)
+
+Pinning the *Action* to a SHA is not sufficient on its own for
+`taiki-e/install-action`: it resolves the tool version to install from a
+per-tool manifest file that is baked into the Action's commit, so an
+unpinned `tool: cargo-deny` step can start installing a different
+`cargo-deny` release the day upstream cuts a new manifest on that same SHA's
+branch — the SHA pin freezes the *installer*, not the *installed bytes*.
+Every `tool:` input in this repo is therefore pinned `tool: <name>@<version>`
+in addition to the SHA, and each version below was checked against the
+manifest at the pinned SHA at the time it was written down (`gh api
+repos/taiki-e/install-action/contents/manifests/<tool>.json?ref=<sha>`).
+
+That check on its own is not enough to make a mismatch fail loudly, though.
+`taiki-e/install-action`'s `fallback` input **defaults to `cargo-binstall`**,
+so if a pinned version is later found to be absent from the manifest (drift,
+or a mistake at pin time), the step does not error — it logs a warning and
+silently reinstalls the tool from **QuickInstall, a third-party rebuild
+service**, not the verified upstream release. This has already happened in
+this repo (see the `cargo-vet` row below). Every other step in this repo
+therefore sets `fallback: none`, which is what actually converts a missing
+version into a hard install failure — with two exceptions, both documented
+as known gaps below: the `cargo-fuzz` SHA predates the `fallback` input
+existing at all (its `action.yml` at that commit only has
+`tool`/`checksum`), so there is no `fallback: none` to set there — the
+cargo-binstall fallback is unconditional and cannot be disabled at that
+pin, meaning a missing version would silently reinstall from QuickInstall
+rather than hard-failing; and `cargo-vet`, whose `fallback` is set
+explicitly to `cargo-binstall` because `none` is not viable there — see the
+"Known gap" callouts below.
+
+| Tool | `tool:` pin | Installed via (`install-action` SHA) | `fallback` | Workflow(s) |
+|---|---|---|---|---|
+| `wasm-pack` | `wasm-pack@0.15.0` | `0751bff5da373f43f04fdc57a72795931a822bd7` | `none` | `acdp-wasm-release.yml`, `bindings.yml` |
+| `cargo-deny` | `cargo-deny@0.19.9` | `0751bff5da373f43f04fdc57a72795931a822bd7` | `none` | `ci.yml`, `bindings.yml` |
+| `cargo-llvm-cov` | `cargo-llvm-cov@0.8.7` | `7c1105379b6217809b9ed26c163a46c65c7a528f` | `none` | `ci.yml` |
+| `cargo-fuzz` | `cargo-fuzz@0.11.2` | `82fc405565b9cf90abfe700ba43b4751ce2fe422` | `cargo-binstall`, unconditional — no `fallback` input exists at this SHA to disable it (known gap, see below) | `fuzz.yml` (build + run jobs) |
+| `cargo-vet` | `cargo-vet@0.10.2` | `c0ae9b92c15529ec87e792a1233f3f4a6c726bfa` | `cargo-binstall` (known gap, see below) | `ci.yml` |
+| `cargo-semver-checks` | `cargo-semver-checks@0.50.0` | `7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c` | `none` | `ci.yml` |
+
+**Known gap — `cargo-vet@0.10.2`:** no `install-action` manifest, at any
+SHA, carries `cargo-vet` 0.10.2 — checked through the latest release,
+v2.87.7: `manifests/cargo-vet.json` there contains only `0.10` / `0.10.0`
+(`latest = 0.10.0`). Upstream has never published a manifest entry for
+0.10.2, so unlike every other tool in this table, **bumping the
+`install-action` SHA cannot close this gap** — there is no SHA to bump to.
+Downgrading the `tool:` pin to `0.10.0` (the version actually in the
+manifest) is not available either: `cargo-vet 0.10.0` cannot parse this
+repo's `supply-chain/imports.lock` (crates.io "trusted publisher" entries,
+e.g. `[[publisher.wit-bindgen]]`, need a schema newer than 0.10.0 supports —
+verified locally: `missing field `user-id``), and regenerating the lockfile
+with 0.10.0 would discard that trusted-publisher data. With both a SHA bump
+and a downgrade ruled out, `fallback: none` (used everywhere else in this
+table) would simply hard-fail a required status check on every run. So this
+one step sets `fallback: cargo-binstall` explicitly instead of relying on
+the (identical) implicit default, to make the behavior visible rather than
+silent: `cargo-vet` 0.10.2 is installed via **cargo-binstall from
+QuickInstall, a third-party rebuild**, not a verified upstream release
+artifact. This is a known, accepted gap, not an oversight — it is the one
+tool in this table not installed from a verified upstream artifact, and it
+happens to be the tool that audits this repo's own supply chain. Tracked
+upstream: [taiki-e/install-action#1997](https://github.com/taiki-e/install-action/issues/1997)
+(requesting a 0.10.2 manifest entry).
+
+**Known gap — `cargo-fuzz@0.11.2`:** the `install-action` SHA pinned above
+(`82fc4055…`) predates the `fallback` input entirely — its `action.yml` at
+that commit defines only `tool`/`checksum`, not `fallback`. That means the
+cargo-binstall fallback that `install-action` applies whenever a pinned
+version is absent from its manifest **is unconditional at this SHA and
+cannot be turned off**: there is no `fallback: none` to set the way every
+other tool in this table can. A future bump of the `cargo-fuzz@0.11.2` pin to a
+version absent from this SHA's manifest would therefore silently reinstall
+from QuickInstall, a third-party rebuild, rather than hard-failing the
+fuzz job. Today this is inert: `cargo-fuzz` 0.11.2 IS present in this SHA's
+manifest and equals its `latest`, so nothing installs from QuickInstall
+right now. Unlike the `cargo-vet` gap above, **bumping the SHA does not
+close this gap — it cannot**: `manifests/cargo-fuzz.json` does not exist
+at all as of `0751bff5` (the SHA this table uses for `wasm-pack` /
+`cargo-deny`) — cargo-fuzz has been dropped from install-action's
+supported tool set entirely (also gone from its `TOOLS.md`), so any newer
+SHA guarantees a permanent manifest miss: silent QuickInstall under the
+default `fallback`, or a hard-failing fuzz job if `fallback: none` were
+added anyway. This is a known, accepted gap, not an oversight: the pinned
+version is verified correct today, and the blast radius is lower than the
+`cargo-vet` gap above — this only gates the fuzz job (weekly schedule +
+its own PR-triggered build check), not a required status check on `main`.
+There is no available upstream fix to track (no manifest exists to
+request).
 
 ### Updating a pinned Action
 

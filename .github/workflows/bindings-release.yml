@@ -78,12 +78,32 @@ jobs:
           version: 0.13.0
       - name: Install dependencies
         run: npm install
+      # Gate the THIRD-PARTY dependency graph against the committed
+      # Cargo.lock *before* the version stamp below touches Cargo.toml.
+      # This must run pre-stamp, not post-stamp, for the same reason as
+      # acdp-wasm-release.yml's identical gate: a `--locked` check placed
+      # *after* the stamp would spuriously fail every release. It's worse
+      # here than for wasm-pack, though — napi build DOES forward --locked
+      # straight through to its own `cargo metadata` call (unlike
+      # wasm-pack, which repairs the lock via an unlocked `cargo metadata`
+      # before ever seeing --locked), so a post-stamp --locked on the `npx
+      # napi build` lines below would fail on the harmless stamped-Cargo.toml
+      # -vs-committed-Cargo.lock version mismatch, not on real drift. Do
+      # NOT add --locked to those lines; this pre-stamp check against the
+      # still-original manifest is the real gate.
+      - name: Verify committed lockfile is up to date (--locked)
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Stamp release version
         run: |
           V="${{ inputs.version }}"; [ -z "$V" ] && V="${GITHUB_REF_NAME#acdp-node-v}"
           echo "stamping version $V"
           jq --arg v "$V" '.version=$v' package.json > package.json.tmp && mv package.json.tmp package.json
           sed -i.bak -E "s/^version[[:space:]]*=.*/version = \"$V\"/" Cargo.toml && rm -f Cargo.toml.bak
+      # No --locked here: napi build forwards it to `cargo metadata`, which
+      # would then choke on the version this job just stamped into
+      # Cargo.toml not matching the committed Cargo.lock — see the gate
+      # step above, which is what actually proves the resolved graph is
+      # frozen.
       - name: Build (native)
         if: ${{ !matrix.zig }}
         run: npx napi build --platform --release --target ${{ matrix.target }}

@@ -79,7 +79,7 @@ jobs:
           python -m pip install 'maturin>=1.5,<2.0' pytest
       - name: Build the wheel (editable)
         working-directory: bindings/acdp-py
-        run: maturin develop --release
+        run: maturin develop --release --locked
       - name: pytest
         working-directory: bindings/acdp-py
         run: pytest tests/ -v
@@ -114,15 +114,30 @@ jobs:
         run: npm install
       - name: Build the native binary
         working-directory: bindings/acdp-node
-        run: npm run build:debug
+        # `napi build` (which this script wraps) has no documented --locked
+        # flag; it does accept arbitrary trailing cargo options via a
+        # Clipanion "rest" argument, but only once it sees its own `--`
+        # separator (Clipanion routes anything after `--` straight through,
+        # not merely any unrecognized flag). `npm run <script> -- X` appends
+        # X directly after the script's own argv with no separator of its
+        # own, so getting one `--` in front of `--locked` on the far side
+        # requires passing TWO here: `-- --` is npm's separator (stop
+        # parsing npm's own flags) followed by the literal `--` napi needs,
+        # then `--locked`. Verified locally: this makes `napi build
+        # --platform --locked` reach cargo (and correctly fails a build
+        # against a deliberately stale lockfile) — a bare `-- --locked`
+        # (single `--`) is rejected by napi's CLI parser as an unknown
+        # option before it ever reaches cargo.
+        run: npm run build:debug -- -- --locked
       # index.js + index.d.ts are napi-generated but git-tracked (see
-      # .gitignore:18-21): the bindings-release publish job does not run
-      # `napi build`, so whatever is committed here is exactly what ships
-      # to npm. Nothing else in CI checks that the committed copies match
-      # what the current source actually generates, so a contributor who
-      # edits the Rust FFI surface without regenerating them would ship a
-      # stale loader/type-defs pair silently. Fail if `npm run build:debug`
-      # (just run above) produced a diff against the committed files.
+      # .gitignore's acdp-node section): the bindings-release publish job
+      # does not run `napi build`, so whatever is committed here is exactly
+      # what ships to npm. Nothing else in CI checks that the committed
+      # copies match what the current source actually generates, so a
+      # contributor who edits the Rust FFI surface without regenerating
+      # them would ship a stale loader/type-defs pair silently. Fail if
+      # `npm run build:debug` (just run above) produced a diff against the
+      # committed files.
       - name: Fail if generated NAPI artifacts are stale
         working-directory: bindings/acdp-node
         run: |
@@ -172,25 +187,40 @@ jobs:
         env:
           ACDP_SPEC_DIR: ${{ github.workspace }}/acdp-spec
           ACDP_REQUIRE_CONFORMANCE: "1"
-        run: cargo test
+        run: cargo test --locked
       # 2. The wasm32-unknown-unknown build itself (verify-first default
       #    feature set — no getrandom draw at runtime, backend wired only
       #    to link). Debug + release so opt-level="s"/LTO also stay green.
       - name: Build wasm32-unknown-unknown (verifier core)
         working-directory: bindings/acdp-wasm
         run: |
-          cargo build --target wasm32-unknown-unknown
-          cargo build --release --target wasm32-unknown-unknown
+          cargo build --locked --target wasm32-unknown-unknown
+          cargo build --locked --release --target wasm32-unknown-unknown
       # 3. Full browser package emit: wasm-pack runs wasm-bindgen + wasm-opt
       #    and produces the .js / .wasm / .d.ts a browser (the console)
       #    imports. Proves the FFI surface links end to end.
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
         with:
-          tool: wasm-pack
+          tool: wasm-pack@0.15.0
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
       - name: wasm-pack build (--target web)
         working-directory: bindings/acdp-wasm
+        # `-- --locked` is forwarded to the underlying `cargo build`, but it
+        # is NOT a gate: wasm-pack's own internal `cargo metadata` call
+        # (used to read the crate name/version) runs unlocked and silently
+        # repairs Cargo.lock before cargo ever sees --locked, so a lockfile
+        # missing an entry gets that entry re-added rather than the build
+        # failing (verified locally by removing an entry from Cargo.lock —
+        # this command succeeds and rewrites the lock). Kept anyway because
+        # it's harmless and correct if wasm-pack's internals ever change,
+        # but the real gates in this job are the two `cargo build --locked`
+        # runs directly above.
         run: |
-          wasm-pack build --target web --out-dir pkg
+          wasm-pack build --target web --out-dir pkg -- --locked
           test -f pkg/acdp_wasm.js
           test -f pkg/acdp_wasm_bg.wasm
           test -f pkg/acdp_wasm.d.ts
@@ -199,7 +229,12 @@ jobs:
       #    not just that it compiles.
       - name: wasm-pack test (--node)
         working-directory: bindings/acdp-wasm
-        run: wasm-pack test --node
+        # `-- --locked` forwarded for consistency with the `wasm-pack build`
+        # step above, but same as there it is NOT a gate: wasm-pack's own
+        # unlocked internal `cargo metadata` call repairs Cargo.lock before
+        # cargo ever sees --locked. The real gates in this job are the two
+        # `cargo build --locked` runs and the `cargo test --locked` above.
+        run: wasm-pack test --node -- --locked
 
   binding-copies-parity:
     name: v030.rs / v040.rs triplicate drift guard
@@ -274,12 +309,14 @@ jobs:
           python -m pip install 'maturin>=1.5,<2.0' pytest
       - name: Build the Python SDK (editable)
         working-directory: bindings/acdp-py
-        run: maturin develop --release
+        run: maturin develop --release --locked
       - name: Build the Node.js SDK
         working-directory: bindings/acdp-node
+        # See the acdp-node job's "Build the native binary" step for why
+        # this needs a doubled `--` to reach napi's cargo passthrough.
         run: |
           npm install
-          npm run build:debug
+          npm run build:debug -- -- --locked
       # Whole dir: cross-language behavioral parity (test_interop.py) AND
       # the API-surface + version drift guards (test_parity.py). Fails the
       # build if the two SDKs ever diverge in surface, behavior, or version.
@@ -304,17 +341,25 @@ jobs:
       # why not EmbarkStudios/cargo-deny-action).
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # cargo-deny
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19.9
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
       # advisories only (not bare `check`): the root deny.toml's
       # [licenses]/[bans]/[sources] policy was never audited against the
       # bindings' transitive graphs, so keep this gate narrowly about
       # vulnerabilities, matching what RS-10 actually asks for. The
-      # lockfiles are gitignored (.gitignore:8-13) — this resolves a fresh
-      # graph from each manifest's version constraints every run, so an
-      # unrelated transitive dependency landing a new RUSTSEC advisory can
-      # turn this red with no code change here; that's expected for a
-      # supply-chain gate, not a flake to silence.
-      - run: cargo deny --manifest-path ${{ matrix.dir }}/Cargo.toml check --config deny.toml advisories
+      # lockfiles are tracked (see .gitignore's bindings section for why),
+      # and every build step above runs `--locked` against them; this
+      # invocation now passes `--locked` too, so it audits that same
+      # pinned graph rather than whatever `cargo metadata` would freshly
+      # resolve here. A new RUSTSEC advisory against an already-pinned
+      # dependency can still turn this red with no code change in this
+      # repo; that's expected for a supply-chain gate, not a flake to
+      # silence.
+      - run: cargo deny --manifest-path ${{ matrix.dir }}/Cargo.toml --locked check --config deny.toml advisories
 
   bindings-npm-audit:
     name: npm audit (acdp-node)
@@ -324,8 +369,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '20'
-      # No committed package-lock.json (.gitignore:23) — `npm install`
-      # resolves fresh, same reproducibility caveat as bindings-deny above.
+      # No committed package-lock.json (see .gitignore's acdp-node
+      # section) — `npm install` resolves fresh, same reproducibility
+      # caveat as bindings-deny above.
       - working-directory: bindings/acdp-node
         run: npm install
       - working-directory: bindings/acdp-node

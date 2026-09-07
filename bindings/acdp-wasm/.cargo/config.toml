@@ -1,9 +1,25 @@
-# getrandom 0.3+ (0.4, pulled by uuid v4 in acdp-primitives) selects its
-# WebAssembly backend via a build cfg, NOT a feature alone: the `wasm_js`
-# feature (set in Cargo.toml) plus this cfg together wire
-# `crypto.getRandomValues`. Without it the wasm32-unknown-unknown build
-# fails with getrandom's "unsupported target" compile_error!. The 0.2
-# major on the crypto path uses the `js` FEATURE instead (no cfg needed).
+# getrandom 0.3+ (0.4, pulled by uuid v4 in acdp-primitives) picks its
+# WebAssembly backend via the `wasm_js` FEATURE (set in Cargo.toml) alone.
+# The 0.2 major on the crypto path uses the `js` feature the same way.
+#
+# NOTE (corrected 2026-09-06, #196c): at getrandom 0.4.3 this cfg is
+# INERT — `getrandom-0.4.3/src/backends.rs` has no `getrandom_backend =
+# "wasm_js"` arm; the wasm backend is chosen at `backends.rs:169-173` by
+# the `wasm_js` feature alone. Proven by counterexample: a build with the
+# remap flags below but no cfg is byte-identical to one with it (same
+# sha256) and passes the smoke test. It's also no longer required for the
+# build to succeed at all — `RUSTFLAGS="" cargo build --target
+# wasm32-unknown-unknown` builds clean, no "unsupported target"
+# compile_error!.
+#
+# Kept anyway as forward-compat defense: getrandom 0.3 *did* honor a
+# `getrandom_backend` cfg, and a future major could bring that back. No
+# check in the release job would catch a dropped cfg today — dropping it
+# changes nothing at 0.4.3, so neither the smoke test nor the determinism
+# gate proves this cfg is doing anything. `acdp-wasm-release.yml`'s
+# composed `RUSTFLAGS` env fully displaces this file's `rustflags` for
+# that job, so it re-includes this exact cfg verbatim for the same
+# forward-compat reason — do not drop it there either.
 #
 # This is scoped to wasm32-unknown-unknown only, so a native `cargo test`
 # (golden-vector parity) is unaffected.

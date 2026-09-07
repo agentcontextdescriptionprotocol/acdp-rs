@@ -27,6 +27,48 @@ failed retroactive-tag run does **not** spuriously trigger a downstream auto-bum
 there. Still, don't rely on "it'll just fail safely" as the plan — pick one of the three
 options below deliberately.
 
+## Reproducibility of the `acdp-wasm` artifact (#196c)
+
+**For releases ≤ `acdp-wasm-v0.8.5`, the trust root is the SLSA attestation, not byte
+reproduction.** Every one of those published `.wasm` modules embeds runner-absolute
+paths — `/home/runner/.cargo/registry/src/index.crates.io-*/<crate>-<ver>/src/*.rs`
+for ~30 dependency crates, plus rustc-sysroot standard-library paths — because no
+`--remap-path-prefix` existed anywhere in this repo until this change. Those paths are
+baked into the already-published bytes and cannot be removed retroactively, so
+attempting to rebuild any of `0.7.0` through `0.8.5` on your own machine and diff the
+result against npm **will not match**, even on an identical toolchain, and that
+mismatch means nothing — it is not evidence of tampering. Do not attempt it. Instead,
+verify provenance the way `docs/supply-chain.md` §1 already documents:
+
+```bash
+gh attestation verify acdp_wasm_bg.wasm --repo agentcontextdistributionprotocol/acdp-rs
+```
+
+**Cross-machine reproduction becomes possible only for releases built *after* this
+change**, and even then only on a matching toolchain: `acdp-wasm-release.yml` now
+composes a `RUSTFLAGS` that remaps the cargo registry root, the workspace checkout, and
+the rustc sysroot to fixed, machine-independent prefixes, and runs a determinism gate
+in-job (a second build into a distinct `CARGO_TARGET_DIR`, `cmp`-checked against the
+first, failing the release on any mismatch). That gate proves same-runner
+reproducibility on every release going forward; it does not by itself prove
+cross-runner (e.g. your laptop vs. `ubuntu-latest`) reproducibility, which additionally
+requires an identical rustc/wasm-pack/wasm-bindgen/walrus toolchain — pin `1.98.0`
+(`acdp-wasm-release.yml`'s `dtolnay/rust-toolchain` step) and `wasm-pack@0.15.0`
+(`docs/supply-chain.md`'s pinned-tool inventory) locally before comparing.
+
+**A byte delta between two releases with no `.rs` change is expected and benign, not a
+red flag.** Crate-version bumps alone perturb fat-LTO codegen — a version string
+embedded in `Cargo.toml`/`CARGO_PKG_VERSION` changes symbol content even when no logic
+changes, and LTO's whole-program optimization can reshuffle codegen decisions as a
+result. The `+3 functions / +481 code bytes / data +0` signature observed between
+`acdp-wasm v0.8.3` and `v0.8.5` is exactly that: both builds provably used identical
+`wasm-pack 0.15.0`, `rustc 1.98.0 (88d9e12ae)`, `walrus 0.26.4`, and `wasm-bindgen
+0.2.127` (see issue #196) — so issue #196's original "unpinned wasm-pack" diagnosis
+for that delta was wrong; the real cause is fat-LTO codegen perturbation from a
+version-string bump, not a tool-version drift. Don't re-open that diagnosis on a
+future delta with the same shape; check the tool versions first, the way this
+investigation eventually did.
+
 ## Automated tag-on-publish (as of 2026-08-30)
 
 `release-plz.yml` has a "Release SDK bindings at the acdp version" step that dispatches

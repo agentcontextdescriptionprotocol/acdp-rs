@@ -56,16 +56,95 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      # Pinned (not `stable`) so a release rebuild resolves the same
+      # compiler every time instead of whatever `stable` happens to be on
+      # the day the tag is pushed. 1.98.0 is the rustc both the v0.8.3 and
+      # v0.8.5 published builds actually used, so this pin is a verifiable
+      # no-op today (see #196).
+      #
+      # This pin is deliberately INDEPENDENT of both the workspace MSRV
+      # (1.86, Cargo.toml's `rust-version` / ci.yml's pinned MSRV job) and
+      # every other job's floating `toolchain: stable` (including this
+      # repo's own `bindings.yml` acdp-wasm CI job) — it exists solely for
+      # reproducibility of the published npm artifact, not for MSRV
+      # compatibility. Nothing enforces it: PR CI floats on `stable`, so a
+      # wasm-crate change that adopts a rustc feature newer than 1.98.0
+      # stays green on every PR and fails ONLY here, on a tag push, with a
+      # compiler-version error from this exact build step. When that
+      # happens: bump this pin to the new rustc version and regenerate
+      # `bindings/acdp-wasm/Cargo.lock` (`cargo update` / rebuild with the
+      # new toolchain). Do not wire a CI job to enforce this pin proactively
+      # — that's a separate, unstarted piece of work.
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          toolchain: 1.98.0
           targets: wasm32-unknown-unknown
+      # #196c: compose the RUSTFLAGS used by EVERY build in this job (the
+      # real publish build below, and the determinism-gate rebuild) into
+      # $GITHUB_ENV so both see an identical value.
+      #
+      # Env RUSTFLAGS fully DISPLACES bindings/acdp-wasm/.cargo/config.toml's
+      # [target.wasm32-unknown-unknown].rustflags (measured: with env
+      # RUSTFLAGS set, `--cfg getrandom_backend` appeared on 0 of 97 rustc
+      # invocations — reverify with `cargo build -v` and grep the `Running
+      # `rustc`` lines) — so it re-includes that cfg verbatim for consistency
+      # with that file. At the current getrandom 0.4.3, the cfg is inert
+      # (see the corrected comment in that config file: the backend is
+      # selected by the `wasm_js` feature alone) and no check in this job
+      # can tell whether it's present — a dropped cfg would not fail the
+      # build, the smoke test, or the determinism gate, because dropping it
+      # changes nothing. It's carried here only as the same forward-compat
+      # defense the config file documents.
+      #
+      # The other three flags are `--remap-path-prefix`, so the published
+      # .wasm stops embedding this runner's absolute paths
+      # (`/home/runner/.cargo/registry/...`, `/home/runner/work/...`),
+      # which made off-runner reproduction of every release through 0.8.5
+      # impossible by construction. Three remaps, not two: the cargo
+      # registry root, the workspace checkout, AND the rustc sysroot — the
+      # sysroot one is required, not optional. Measured (reverify pass):
+      # registry+workspace remapping alone left 19 of 83 `/Users/...`
+      # path strings, all `.../lib/rustlib/src/rust/library/alloc/...`
+      # standard-library paths that come from neither the registry nor the
+      # workspace (reverify: `strings acdp_wasm_bg.wasm | grep -c '/Users/'`
+      # vs the same piped to `grep -c lib/rustlib`). The sysroot is derived
+      # at runtime via `rustc --print sysroot` rather than hardcoded, since
+      # it varies by toolchain install layout.
+      - name: Compose reproducible RUSTFLAGS
+        run: |
+          SYSROOT="$(rustc --print sysroot)"
+          CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+          RF='--cfg getrandom_backend="wasm_js"'
+          RF="$RF --remap-path-prefix=${CARGO_HOME_DIR}/registry=/cargo-registry"
+          RF="$RF --remap-path-prefix=${GITHUB_WORKSPACE}=/src"
+          RF="$RF --remap-path-prefix=${SYSROOT}=/rustc"
+          echo "Composed RUSTFLAGS: $RF"
+          echo "RUSTFLAGS=$RF" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           workspaces: bindings/acdp-wasm
       - uses: taiki-e/install-action@0751bff5da373f43f04fdc57a72795931a822bd7 # wasm-pack
         with:
-          tool: wasm-pack
+          tool: wasm-pack@0.15.0
+          # A version absent from this SHA's manifest must fail the job, not
+          # silently rebuild from QuickInstall (a third-party source) via
+          # install-action's own `fallback` default. See docs/supply-chain.md
+          # "Pinned-tool inventory".
+          fallback: none
+      # Gate the THIRD-PARTY dependency graph against the committed
+      # Cargo.lock *before* the version stamp below touches Cargo.toml.
+      # This must run pre-stamp, not post-stamp: `wasm-pack build`'s own
+      # internal `cargo metadata` call (used to read crate name/version)
+      # does not pass --locked and will happily rewrite Cargo.lock's
+      # self-referential `acdp-wasm` version entry to match a stamped
+      # Cargo.toml — that's an expected, harmless no-op for the local
+      # path package. But it means a `--locked` check placed *after* the
+      # stamp would spuriously fail on every release (stamped version !=
+      # committed lock version) while a real third-party dependency drift
+      # would go unnoticed. Checking here, against the still-original
+      # manifest, is what actually proves the resolved graph is frozen.
+      - name: Verify committed lockfile is up to date (--locked)
+        run: cargo metadata --locked --format-version 1 > /dev/null
       # Stamp the release version (dispatch input, or tag on a tag-push) into
       # Cargo.toml so wasm-pack emits a pkg at the acdp release version.
       - name: Stamp release version
@@ -76,10 +155,22 @@ jobs:
       # `--scope agentcontextdistributionprotocol` makes wasm-pack derive the
       # package name `@agentcontextdistributionprotocol/acdp-wasm` from the
       # crate name — the cleanest supported rename (no manual name edit).
+      # `-- --locked` is forwarded by wasm-pack to the underlying `cargo
+      # build`, but it is NOT a second gate: wasm-pack's own internal
+      # `cargo metadata` call (used to read the crate name/version) runs
+      # unlocked and silently repairs Cargo.lock before cargo ever sees
+      # --locked, so a genuinely drifted lock would be rewritten and
+      # accepted here, not rejected (verified locally by removing an entry
+      # from Cargo.lock — this command succeeds and rewrites the lock).
+      # It's kept because it's harmless and correct if wasm-pack's
+      # internals ever change, but the real gate against third-party drift
+      # is the `cargo metadata --locked` step above, which runs before
+      # wasm-pack ever touches the lock.
       - name: wasm-pack build (--target web, scoped)
         run: |
           wasm-pack build --target web --out-dir pkg \
-            --scope agentcontextdistributionprotocol
+            --scope agentcontextdistributionprotocol \
+            -- --locked
           test -f pkg/acdp_wasm.js
           test -f pkg/acdp_wasm_bg.wasm
           test -f pkg/acdp_wasm.d.ts
@@ -88,6 +179,78 @@ jobs:
       # FFI surface. A broken .wasm fails here, before publish.
       - name: Smoke test (sig-001 golden vector)
         run: node scripts/smoke.mjs
+      # Host-path leak gate (#196c follow-up): the RUSTFLAGS composed above
+      # are what make this artifact reproducible off-runner — but nothing
+      # upstream of this step actually checks that the remaps worked.
+      # `wasm-pack build`'s own success proves nothing here: a renamed env
+      # var, a relocated CARGO_HOME, or a new dependency that embeds paths
+      # some other way (e.g. `file!()` output, an include_str! of a
+      # generated file) would silently put this runner's absolute paths
+      # back in the published .wasm, and every check upstream (build,
+      # the `test -f` file-existence checks, smoke test) would still pass.
+      # This step is the only thing that would notice. Checked against the
+      # actual values used to build RUSTFLAGS above (not hardcoded
+      # literals) so it can't drift out of sync with what was actually
+      # remapped; `/home/runner` is
+      # additionally checked as a literal belt-and-braces catch in case an
+      # env var above were empty/unset. Deliberately does NOT check for
+      # `/rustc/<hash>/...` — those come from rustc's own precompiled std
+      # (pre-remapped at rustc's build time, present in every build
+      # regardless of our flags; verified locally: a remapped build still
+      # has several of these) and are not host paths. Placed here, right
+      # before the (expensive) determinism rebuild, so a broken remap fails
+      # fast rather than burning the ~3-5 minutes below first; and it must
+      # run in dry_run too since dry_run dispatch is this workflow's only
+      # routine exercise.
+      - name: Verify no host-absolute paths leaked into the .wasm
+        run: |
+          WASM=pkg/acdp_wasm_bg.wasm
+          SYSROOT="$(rustc --print sysroot)"
+          CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+          n_home=$(grep -aoF "$HOME" "$WASM" | wc -l)
+          n_workspace=$(grep -aoF "$GITHUB_WORKSPACE" "$WASM" | wc -l)
+          n_cargo=$(grep -aoF "$CARGO_HOME_DIR" "$WASM" | wc -l)
+          n_sysroot=$(grep -aoF "$SYSROOT" "$WASM" | wc -l)
+          n_runner_literal=$(grep -aoF '/home/runner' "$WASM" | wc -l)
+          echo "Host-path occurrence counts (prefixes overlap by construction, e.g. \$CARGO_HOME and \$SYSROOT both live under \$HOME — any nonzero count fails):"
+          echo "  \$HOME              ($HOME): $n_home"
+          echo "  \$GITHUB_WORKSPACE  ($GITHUB_WORKSPACE): $n_workspace"
+          echo "  CARGO_HOME registry ($CARGO_HOME_DIR): $n_cargo"
+          echo "  rustc sysroot       ($SYSROOT): $n_sysroot"
+          echo "  literal /home/runner: $n_runner_literal"
+          if [ "$n_home" -ne 0 ] || [ "$n_workspace" -ne 0 ] || [ "$n_cargo" -ne 0 ] || [ "$n_sysroot" -ne 0 ] || [ "$n_runner_literal" -ne 0 ]; then
+            echo "::error::Host-absolute path(s) found in acdp_wasm_bg.wasm. A --remap-path-prefix stopped working (renamed env var, relocated CARGO_HOME/sysroot, or a new dependency embedding paths another way) — the published artifact is no longer reproducible off this runner. Investigate before retrying; do not publish this build." >&2
+            exit 1
+          fi
+          echo "No host-absolute paths found in acdp_wasm_bg.wasm."
+      # Determinism gate (#196c): rebuild into a SECOND, distinct
+      # CARGO_TARGET_DIR (under $RUNNER_TEMP, not the workspace) with a
+      # different --out-dir, then `cmp` the two acdp_wasm_bg.wasm modules
+      # and fail the job on any mismatch. This is the strongest proof of
+      # reproducibility available and needs no historical artifact to
+      # compare against — but it only proves anything with a genuinely
+      # independent target dir: a second build into the SAME
+      # CARGO_TARGET_DIR is a cache-hit no-op. wasm-pack has no
+      # --target-dir flag of its own, but it resolves the target
+      # directory via `cargo metadata`, which honors CARGO_TARGET_DIR.
+      # Runs after the (cheap) smoke test so a broken module fails fast
+      # before this ~3-5 extra minutes of rebuild, and before publish so
+      # nothing ships if the two builds disagree. Uses the exact same
+      # RUSTFLAGS composed above (env, inherited from $GITHUB_ENV) and the
+      # same --locked flag as the real build, so it exercises the same
+      # inputs.
+      - name: Determinism gate (rebuild into a distinct target dir, cmp)
+        run: |
+          CARGO_TARGET_DIR="$RUNNER_TEMP/acdp-wasm-determinism-target" \
+            wasm-pack build --target web --out-dir pkg2 \
+              --scope agentcontextdistributionprotocol \
+              -- --locked
+          if ! cmp pkg/acdp_wasm_bg.wasm pkg2/acdp_wasm_bg.wasm; then
+            echo "::error::Determinism gate FAILED: rebuilding acdp-wasm into a distinct CARGO_TARGET_DIR produced a different acdp_wasm_bg.wasm. This is a real reproducibility regression, not a flaky check — investigate before retrying." >&2
+            exit 1
+          fi
+          echo "Determinism gate passed: rebuild in a distinct CARGO_TARGET_DIR is byte-identical to pkg/acdp_wasm_bg.wasm."
+          rm -rf pkg2 "$RUNNER_TEMP/acdp-wasm-determinism-target"
       # wasm-pack does not emit `publishConfig`; a scoped package defaults to
       # `restricted`, so add `access: public` (belt-and-suspenders with the
       # `--access public` flag below) plus repository/homepage metadata for
