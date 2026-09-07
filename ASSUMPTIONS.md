@@ -277,7 +277,6 @@
   rather than accepting invalid ones). Fix would be relaxing the comparison at those two
   call sites — a pure behaviour change, no API break, since `ContextIdMismatch` already
   carries both textual forms.
-- **Status:** UNCONFIRMED
 - **Update (2026-09-06, plans/issues-206-208-bindings-registry-release-gate.md Phase 2,
   #206):** the bindings' equivalent check, `acdp_verify::verify_ctx_id_binding`, makes the
   parse-then-compare step explicit rather than relying on the served side having already
@@ -289,6 +288,8 @@
   client's byte-equality choice above — canonical-form-only comparison produces false
   refusals for percent-encoded/path-style forms, never false acceptances — recorded again
   here because it is a second, independent call site making the same choice.
+- **Status:** CONFIRMED (2026-09-06) — see DECISIONS.md. Confirmed as-is, no code change:
+  fail-closed behavior, documented at both call sites (client and bindings) above.
 
 ## `String` (not `CtxId`) fields on `ContextIdMismatch` — corrected rationale
 - **Plan:** plans/issues-189-191-client-binding-hardening.md
@@ -310,7 +311,8 @@
   fixing the rationale, not the type).
 - **Blast radius if wrong:** none — this corrects documentation/reasoning only; the
   shipped field types (`String`) are unchanged.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-06) — see DECISIONS.md. Confirmed as-is: prose-only
+  correction, zero blast radius, no code change.
 
 ## `semver-tool-health` is not a required status check
 - **Plan:** plans/issues-206-208-bindings-registry-release-gate.md (Phase 1)
@@ -329,7 +331,19 @@
   could still merge past it — strictly better than today (silent false-green), strictly worse
   than a hard gate. Reversible: one branch-protection edit, best made after the job has a green
   history.
-- **Status:** UNCONFIRMED
+- **Status:** NEEDS-CHANGE (2026-09-06) — see DECISIONS.md. The stated blocker has
+  expired: `semver-tool-health` (`ci.yml:275-277`) carries no `continue-on-error`, and at
+  least 13 consecutive `ci.yml` runs on `main` — from `34079142407` back through
+  `34013243642` (verified via `gh run list --workflow=ci.yml --branch main --limit 15
+  --json databaseId,conclusion`; the run 8 positions back from `34079142407` is
+  `34048649587`, not `34040888637`) — are all `success`, with the streak breaking only at
+  a `cancelled` run further back. So a green workflow run now implies the job passed, not
+  merely that it never ran red. Add `semver-tool-health` to `main`'s required contexts
+  (10 → 11) via
+  `gh api .../branches/main/protection`. This is a repo-settings change outside this
+  phase's scope and is applied by the orchestrator at Release choreography step 6, after
+  the 0.10.0 release PR (#228) has merged — not before, since adding it while #228 is open
+  would require it green on a PR the advisory `semver` job is deliberately reddening.
 
 ## Unpublished-crate baseline behaviour in cargo-semver-checks is untested
 - **Plan:** plans/issues-206-208-bindings-registry-release-gate.md (Phase 1)
@@ -342,7 +356,11 @@
 - **Blast radius if wrong:** if such a crate exits 101 rather than 0, the `semver-tool-health`
   job hard-reds on the PR that introduces it, with a misleading "tool error" diagnosis. Caught
   immediately (first CI run on that PR), fixed by an exclusion or an exit-code carve-out.
-- **Status:** UNCONFIRMED
+- **Status:** DEFERRED/MOOT (2026-09-06) — see DECISIONS.md. Unreachable today: no phase
+  in any currently-active plan adds a new workspace crate. Self-diagnosing on the first PR
+  that does — the first CI run on that PR either passes cleanly (proving the assumption
+  right) or hard-reds with a "tool error" diagnosis (proving it wrong and identifying
+  exactly which PR needs the exclusion/carve-out). No action needed until then.
 
 ## Binding lockfiles resolve independently of the root Cargo.lock
 - **Plan:** plans/issues-196-199-215-216-followups.md
@@ -366,7 +384,6 @@
   manifests — a dependency bump without regeneration surfaces as cargo's generic "cannot
   update the lock file" rather than an actionable "run `cargo generate-lockfile`". Known
   and accepted for now; no tripwire built in this phase.
-- **Status:** UNCONFIRMED
 - **Update (2026-09-06, plans/issues-196-199-215-216-followups.md Phase 2, #196a):**
   `cargo-deny`'s advisory gate (`bindings-deny` in `.github/workflows/bindings.yml`) now
   runs `--locked`, so it audits the pinned graph that ships rather than a freshly-resolved
@@ -376,6 +393,10 @@
   ship is clean" matters more for a crypto verifier than "what we might ship next is
   clean", and because Dependabot (`.github/dependabot.yml` has cargo entries for all three
   binding dirs) will regenerate the locks and surface it then.
+- **Status:** CONFIRMED (2026-09-06) — see DECISIONS.md. Confirmed as-is: an accepted
+  architectural trade-off (each binding is tested by its own suite against its own
+  resolution), already re-verified once (Phase 2's `--locked` update above). No further
+  action.
 
 ## Two remaining implicit-resolution tool ranges left unpinned (napi-rs, maturin)
 - **Plan:** plans/issues-196-199-215-216-followups.md
@@ -435,7 +456,30 @@
   would look like protection while silently permitting a drifted lock. It would not fail
   loudly; it would just never catch anything. Cheap to fix (reorder two steps), but only if
   someone knows to look.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED-as-safe (2026-09-06, corrected) — see DECISIONS.md.
+
+  **Retraction:** an earlier revision of this entry recorded, as a confirmed real gap,
+  that rust-cache's `restore.js` (the action's `main` step, which runs in place in the
+  job, not in post/cleanup) reaches a `cargo metadata --all-features --format-version 1`
+  call with no `--locked` flag, and that this could silently repair a drifted binding
+  lockfile before the `--locked` gate step ever inspected it — prescribing a step
+  reorder in three workflows plus a follow-up issue. **That was wrong, and is retracted.**
+  The step-ordering premise was true (rust-cache does precede the gate: `bindings.yml:179`
+  before `:190`, `bindings-release.yml:71` before `:94`, `acdp-wasm-release.yml:123` before
+  `:146`), but the call it reaches **does** pass `--no-deps`
+  (`dist/cleanup-BPghO_DY.js:34492`), and `cargo metadata --no-deps` performs no dependency
+  resolution and does not write `Cargo.lock` — proven on a synthetic crate with a
+  deliberately drifted lock: with `--no-deps` the lockfile stayed byte-identical and still
+  drifted; without `--no-deps` it was repaired. The **resolving** variant
+  (`getPackagesOutsideWorkspaceRoot`, no `--no-deps`, `cleanup-BPghO_DY.js:34488`) has
+  **zero call sites in `restore.js`** — its only caller is **`save.js:64`**, the `post:`
+  step, which runs *after* the gate. So the earlier "hopeful reading" — that the resolving
+  `cargo metadata` call lives in the post/cleanup step, which runs after all job steps —
+  was **correct**; this round's contrary finding (that `restore.js` itself reaches an
+  unlocked *resolving* call) was an over-read of which of the two `cargo metadata`
+  invocations `restore.js` actually reaches, and is now retracted. **The existing gate
+  placement in all three workflows is already sound. No workflow reorder is needed and no
+  follow-up issue should be filed.**
 
 ## `cargo-vet` is knowingly installed from QuickInstall, not upstream
 - **Plan:** plans/issues-196-199-215-216-followups.md (Phase 3)
@@ -469,7 +513,11 @@
   `cargo-vet` could produce a false-clean supply-chain audit result (the `vet` job passing
   while auditing with a tampered binary), which is a meaningfully different risk profile
   than every other tool in the table, none of which have this exposure.
-- **Status:** UNCONFIRMED
+- **Status:** DEFERRED (2026-09-06) — see DECISIONS.md. Analysis confirmed accurate; no
+  further local action available (all three alternatives are closed off, as documented).
+  Tracked via the filed upstream issue (`taiki-e/install-action#1997`); revisit once that
+  manifest gains `0.10.2` coverage, at which point this gap closes with no code change
+  needed here.
 
 ## `cargo-fuzz` is knowingly installed with an unconditional, undisableable QuickInstall fallback
 - **Plan:** plans/issues-196-199-215-216-followups.md (Phase 3)
@@ -506,7 +554,9 @@
   no way to make that fail loudly at this SHA. Lower than the `cargo-vet` gap's blast
   radius: the fuzz job is not a required status check on `main` (weekly schedule + a
   PR-triggered build-only check), whereas `cargo-vet` gates every PR.
-- **Status:** UNCONFIRMED
+- **Status:** DEFERRED (2026-09-06) — see DECISIONS.md. Same shape as the `cargo-vet` gap
+  above and equally closed-off locally; lower severity since `fuzz.yml` is not a required
+  check. No action needed unless the `cargo-fuzz` pin or the `install-action` SHA changes.
 
 ## Binding versions are NOT independently versioned in practice (2026-09-06, Phase 8)
 
@@ -536,4 +586,6 @@
   plans/PROGRESS.md.
 - **Blast radius:** version strings only, and only before publish — fully reversible until
   the release PR merges. After publish, npm/PyPI immutability makes it permanent.
-- **Status:** UNCONFIRMED
+- **Status:** CONFIRMED (2026-09-06/07) — see DECISIONS.md. Resolved this session: Fable
+  decided 0.10.0 for the bindings (matching the crate family's cascade-computed bump from
+  PR #227's break), and PR #230 implemented it.
