@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **[BREAKING] `acdp-server`'s `PublishCommit` gained a new field,
+  `predecessor_admission`, wiring the RFC-ACDP-0014 §4 `supersedes` row for
+  `key-revocation` contexts at publish time** ([#216](https://github.com/agentcontextdistributionprotocol/acdp-rs/issues/216)).
+  0.9.1 shipped `PublishValidator`'s §4 shape/§5 step-2 enforcement but
+  explicitly left the `supersedes` row unimplemented ("a revocation context
+  MAY be superseded only by another `key-revocation` context from the same
+  signer class") because checking it needs the superseded context's stored
+  type and signer class, which the registry-agnostic validator cannot see.
+  `RegistryServer::commit_via_store` now builds a
+  `Fn(&Body) -> Result<(), AcdpError>` closure over
+  `check_revocation_supersession` and threads it through
+  `RegistryStore::commit_publish` as `PublishCommit::predecessor_admission` —
+  `Some` iff the registry's `acdp_version` clears the RFC-ACDP-0014 §4 gate
+  (`>= 0.3.0`, fail-closed on a malformed version string) **and** the
+  incoming request carries a `supersedes`; `None` otherwise, so a
+  pre-0.3.0 registry's behavior is unchanged. `InMemoryStore::commit_publish`
+  invokes it immediately after its existing producer-continuity,
+  lineage/version-coherence, and `AlreadySuperseded` checks have all passed
+  — never before them, since checking type/signer-class ahead of ownership
+  would turn the hook into a cross-tenant, non-owner existence-and-type
+  oracle on the predecessor (an attacker could learn "the ctx_id I don't
+  own is a key-revocation" from the shape of the error alone).
+  **Registry-visible behavior change:** a registry advertising
+  `acdp_version >= 0.3.0` now rejects, with `schema_violation`, a publish
+  that supersedes a `key-revocation` context with anything other than
+  another `key-revocation` context from the same signer class
+  (`ProducerSigned` vs. `RegistryAttested`) — previously such a publish
+  was accepted and would silently re-point the lineage head away from the
+  revocation.
+  **For downstream `RegistryStore` implementors:** this is a one-way-door
+  break to a public struct — `PublishCommit` is deliberately **not**
+  `#[non_exhaustive]`, so the compiler forces every implementation to
+  acknowledge the new field rather than silently continuing to build a
+  `PublishCommit` that never enforces this MUST. The fix is one line:
+  destructure (or construct) `predecessor_admission` alongside the
+  existing `receipt_minter` field, and — for a store's own
+  `commit_publish` — call it with the predecessor's stored `Body` at the
+  same point `InMemoryStore` does (after ownership/lineage/version
+  checks, before the insert). A store that adds the field to satisfy the
+  compiler but never calls the closure will compile cleanly and silently
+  fail to enforce the RFC-ACDP-0014 §4 `supersedes` row — the field
+  existing is not itself enforcement. This is **not** expected to be the
+  last breaking change to `PublishCommit`; treat it as a security-hook
+  pattern other stores should expect to see repeated as RFC-ACDP-0014 and
+  similar rows gain registry-side enforcement.
+
 ## [0.9.1](https://github.com/agentcontextdistributionprotocol/acdp-rs/compare/acdp-v0.9.0...acdp-v0.9.1) - 2026-09-06
 
 ### Added

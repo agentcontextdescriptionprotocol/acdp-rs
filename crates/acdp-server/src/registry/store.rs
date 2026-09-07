@@ -290,6 +290,24 @@ pub struct PublishCommit<'a> {
     #[allow(clippy::type_complexity)]
     pub receipt_minter:
         Option<&'a (dyn Fn(&Body) -> Result<serde_json::Value, AcdpError> + Send + Sync)>,
+    /// RFC-ACDP-0014 §4 `supersedes`-row admission hook (key-revocation
+    /// lineages). `Some` iff the registry's RFC-0014 version gate is on
+    /// (`key_revocation_gate_applies`) **and** `req.supersedes` is set;
+    /// otherwise `None`.
+    ///
+    /// Stores MUST invoke it with the predecessor's stored [`Body`],
+    /// inside the same critical section / transaction as their own
+    /// supersession checks, and only **after** producer-continuity and
+    /// tenant scoping have already passed — never before. Calling it
+    /// earlier turns the check into a cross-tenant, non-owner
+    /// existence-and-type oracle: the predecessor's presence and
+    /// `context_type` would leak to a caller who does not own it and is
+    /// not scoped to its tenant. `Err` from the closure MUST abort the
+    /// commit — no insert, no supersession side effect. A store that
+    /// silently ignores a `Some` hook fails to enforce an RFC-ACDP-0014
+    /// §4 MUST.
+    #[allow(clippy::type_complexity)]
+    pub predecessor_admission: Option<&'a (dyn Fn(&Body) -> Result<(), AcdpError> + Send + Sync)>,
 }
 
 /// Idempotency parameters threaded through [`PublishCommit`].
@@ -659,6 +677,7 @@ impl RegistryStore for InMemoryStore {
             // reference/test backend); the durable backends honor this.
             tenant: _,
             receipt_minter,
+            predecessor_admission,
         } = commit;
         let now = chrono::Utc::now();
         let mut g = self.lock();
@@ -749,6 +768,18 @@ impl RegistryStore for InMemoryStore {
                     reason: acdp_primitives::error::SupersessionReason::AlreadySuperseded,
                     message: format!("supersedes target '{prev}' has already been superseded"),
                 });
+            }
+
+            // RFC-ACDP-0014 §4 `supersedes`-row enforcement. Runs AFTER
+            // producer-continuity, lineage/version coherence, and
+            // AlreadySuperseded have all passed — never earlier — so a
+            // non-owner (or wrong-tenant, on multi-tenant stores) probe
+            // is already turned away as `SupersededTarget::NotFound`
+            // above and never reaches this line. Doing this check first
+            // would make it a cross-tenant, non-owner
+            // existence-and-type oracle on the predecessor.
+            if let Some(admission) = predecessor_admission {
+                admission(&prev_full.body)?;
             }
 
             // Derive the v1 ctx_id from the predecessor's lineage —
