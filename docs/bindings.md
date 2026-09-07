@@ -118,6 +118,52 @@ AcdpVerifier.verifyCtxIdBinding(bodyJson, requestedCtxId);  // throws on mismatc
 
 The Node API is the same surface in camelCase.
 
+## Verifying a registry receipt
+
+`verify_receipt` / `verifyReceipt` (RFC-ACDP-0010 §8) checks a registry
+receipt against the body it accompanies. `body_json` is a **required**
+second argument (not optional) — it binds the receipt's `lineage_id`,
+`origin_registry`, and `created_at` to the served body's own fields (§8
+step 3), the sibling check to `verify_ctx_id_binding` on the
+receipt-bearing path.
+
+```python
+# Python
+AcdpVerifier.verify_receipt(
+    receipt_json,            # the `registry_receipt` object, as received
+    body_json,                # the accompanying `body`, from the same retrieval
+    registry_public_key_b64,  # resolved via AcdpDid.web_to_url + httpx
+    expected_ctx_id,          # the ctx_id you actually requested
+    recomputed_body_hash,     # YOUR OWN verify_content_hash result — never
+                               # the body's echoed content_hash field
+    producer_key_fingerprint, # fingerprint of the resolved producer key
+)
+```
+
+```js
+// Node.js
+AcdpVerifier.verifyReceipt(
+  receiptJson,
+  bodyJson,
+  registryPublicKeyB64,
+  expectedCtxId,
+  recomputedBodyHash,
+  producerKeyFingerprint,
+);
+```
+
+Two checks stay the HOST's obligation on every binding, because neither
+needs the body — they need things this binding never sees:
+
+1. **Serving-authority binding** — `receipt.registry_did` must equal
+   `"did:web:" + <authority>` for the authority the response was
+   *actually fetched from*, compared against your HTTP client's request
+   URL, not any field inside the response.
+2. **Recompute, don't trust, the body hash** — `recomputed_body_hash`
+   must be a hash *you* independently recomputed (run
+   `verify_content_hash` on the body first), never the body's echoed
+   `content_hash` field taken on faith.
+
 ## WebAssembly (`acdp-wasm`)
 
 A verification-only core for browsers and edge runtimes. It exposes the
@@ -131,7 +177,7 @@ cd bindings/acdp-wasm && wasm-pack build --target web
 ```
 
 ```js
-import init, { verifyContentHash, verifyCtxIdBinding } from '@agentcontextdistributionprotocol/acdp-wasm';
+import init, { verifyContentHash, verifyCtxIdBinding, verifyReceipt } from '@agentcontextdistributionprotocol/acdp-wasm';
 await init();
 const verdict = JSON.parse(verifyContentHash(bodyJson, storedHash));
 
@@ -141,6 +187,15 @@ const verdict = JSON.parse(verifyContentHash(bodyJson, storedHash));
 // malformed `expectedCtxId` argument throws.
 const binding = JSON.parse(verifyCtxIdBinding(bodyJson, requestedCtxId));
 if (binding.valid) { /* served ctx_id matches what was requested */ }
+
+// verifyReceipt takes bodyJson as its required 2nd argument (RFC-ACDP-0010
+// §8 step 3 body binding). A malformed bodyJson throws (host input); a
+// body/receipt mismatch is a `{"valid": false, ...}` verdict, like any
+// other cross-check failure.
+const rcpt = JSON.parse(verifyReceipt(
+  receiptJson, bodyJson, registryPublicKeyB64,
+  expectedCtxId, recomputedBodyHash, producerKeyFingerprint,
+));
 ```
 
 See `bindings/acdp-wasm/README.md` for the full exported surface.

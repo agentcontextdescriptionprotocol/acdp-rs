@@ -44,7 +44,7 @@ wasm-bindgen exports (camelCase in JS/TypeScript):
 | `verifySignatureEd25519` / `verifySignatureP256` | 0001 §5.8 | signature over the ASCII `"sha256:<hex>"` string |
 | `verifyCtxIdBinding` | 0006 §4.1 step 7 | bind the served `ctx_id` to the one requested — see [Verifying a retrieved body](#verifying-a-retrieved-body) |
 | `verifyBodyOffline` / `verifyPublishRequestOffline` | 0002 | full `did:key` context verify (no resolution) |
-| `fingerprintEd25519` / `verifyReceipt` | 0010 | registry-receipt verification |
+| `fingerprintEd25519` / `verifyReceipt(receiptJson, bodyJson, registryPublicKeyB64, expectedCtxId, recomputedBodyHash, producerKeyFingerprint)` | 0010 | registry-receipt verification — see [Verifying a registry receipt](#verifying-a-registry-receipt) below |
 | `verifyLineageHeadReceipt` | 0011 | lineage-head receipt |
 | `verifyLogCheckpoint` / `verifyLogInclusion` / `verifyLogConsistency` / `buildLogLeaf` / `merkleLeafHash` / `merkleNodeHash` / `merkleRootHash` | 0012 | transparency log |
 | `verifyLifecycleEvent` | 0013 | lifecycle event |
@@ -88,6 +88,28 @@ closes that gap: `bodyJson` carries the *served* identity, `expectedCtxId`
 is what you requested. Like `verifyContentHash`, a malformed *served*
 `ctx_id` is a `{"valid": false, ...}` verdict, not a throw — only a
 malformed `expectedCtxId` argument throws a `JsError`.
+
+### Verifying a registry receipt
+
+`verifyReceipt` (RFC-ACDP-0010 §8) takes the accompanying `bodyJson` as a
+**required** second argument — it binds the receipt's `lineage_id`,
+`origin_registry`, and `created_at` to the served body's own fields (§8
+step 3):
+
+```js
+const verdict = JSON.parse(verifyReceipt(
+  receiptJson, bodyJson, registryPublicKeyB64,
+  expectedCtxId, recomputedBodyHash, producerKeyFingerprint,
+));
+```
+
+A malformed `bodyJson` throws a `JsError` (host input); a body/receipt
+mismatch is a `{"valid": false, ...}` verdict (verification outcome), not
+a throw — same convention as `verifyContentHash` / `verifyCtxIdBinding`.
+Two checks still stay the HOST's obligation, because neither needs the
+body: the serving-authority binding (`receipt.registry_did` must equal
+the authority you actually fetched from) and recomputing (never
+trusting) the body hash you pass in.
 
 The package is built with `wasm-pack --target web`: an ESM module you
 initialize once with `await init()`. This is the target the crate is

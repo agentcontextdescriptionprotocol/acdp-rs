@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "acdp-wasm"
-version = "0.8.4"
+version = "0.10.0"
 dependencies = [
  "acdp",
  "base64",

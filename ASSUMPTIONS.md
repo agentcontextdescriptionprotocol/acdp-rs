@@ -507,3 +507,33 @@
   radius: the fuzz job is not a required status check on `main` (weekly schedule + a
   PR-triggered build-only check), whereas `cargo-vet` gates every PR.
 - **Status:** UNCONFIRMED
+
+## Binding versions are NOT independently versioned in practice (2026-09-06, Phase 8)
+
+- **Context:** the owner's decision "bindings go to 0.9.0 with a migration note" rested on
+  the plan's premise that the bindings, being outside release-plz's `version_group`, are
+  "standalone packages versioned independently", so a breaking binding change is a
+  "0.8.x → 0.9.0 bump on those packages alone".
+- **The first half is true, the conclusion is not.** All three release workflows overwrite
+  the manifest version with the dispatch input before building:
+  `acdp-py-release.yml:83-88` (and again `:128-133`), `bindings-release.yml:96-101`
+  (and `:155`), `acdp-wasm-release.yml:150-154`. `release-plz.yml:92-101` dispatches all
+  three at the *crate's* version, and its own comment at `:88-90` says so outright:
+  "the published artifact version == the acdp version".
+- **Observed, not merely inferred:** PyPI `acdp` is at **0.9.1** while
+  `bindings/acdp-py/Cargo.toml` read **0.8.0** before this phase. The manifest version is
+  dead metadata on the cascade path; the published version tracks the crate family.
+- **Consequence:** with the next release computing 0.10.0 (PR #227's `PublishCommit` break),
+  Phase 8's manifests and CHANGELOG headings saying 0.9.0 would document a release that
+  can never ship via the cascade.
+- **The manifest version DOES matter on one path:** a manual `gh workflow run` with an
+  empty `version` input, or an `acdp-{py,node,wasm}-v*` tag push, falls back to the tag /
+  manifest. So the claim is true-only-under-conditions, and the conditions are not how
+  releases actually happen.
+- **Chose:** referred the call back to Fable, which is exactly the delegation the owner set
+  up ("bindings go to 0.9.0" was the stated default to depart from only for a concrete
+  reason, and this is a concrete reason). Decision and its rationale recorded in
+  plans/PROGRESS.md.
+- **Blast radius:** version strings only, and only before publish — fully reversible until
+  the release PR merges. After publish, npm/PyPI immutability makes it permanent.
+- **Status:** UNCONFIRMED

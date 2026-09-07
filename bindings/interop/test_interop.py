@@ -371,6 +371,145 @@ def test_verify_ctx_id_agrees_across_bindings_on_malformed(node):
     assert "context substitution" not in node_err.lower()
 
 
+# ── verify_receipt (RFC-ACDP-0010 §8 registry receipts) ──────────────────
+#
+# rcpt-001 golden vector: a receipt over the sig-001 content_hash, minted
+# by a registry whose Ed25519 receipt key has seed [0x11]*32, binding the
+# fp-001 producer-key fingerprint. Mirrors the py/node binding suites'
+# own `RCPT001`/`RCPT_001` fixtures exactly.
+
+RCPT_001 = {
+    "registry_did": "did:web:registry.example.com",
+    "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+    "lineage_id": "lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a",
+    "origin_registry": "registry.example.com",
+    "created_at": "2026-04-16T10:30:15.123Z",
+    "content_hash": "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5",
+    "key_fingerprint": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+    "signature": {
+        "algorithm": "ed25519",
+        "key_id": "did:web:registry.example.com#receipt-key-1",
+        "value": "vBgQKmn17pHXXY95C07BBeconmjDIdYIvxN5B+YXrQ7tIzFsDNsh1TglzgxOyPUp8lwTz7zwMNiK+Sn5whveDg==",
+    },
+}
+
+# The sig-001 body `RCPT_001` attests, assembled from sig-001's
+# `producer_content`/`publish_request_body` plus its `registry_assigned`
+# block — `rcpt-001-receipt-golden.json` ships no paired body. `supersedes`
+# is included as `null` (not omitted): `Body` has no `#[serde(default)]`
+# on that field, so the key MUST be present even when null.
+RCPT_BODY = {
+    "ctx_id": RCPT_001["ctx_id"],
+    "lineage_id": RCPT_001["lineage_id"],
+    "origin_registry": RCPT_001["origin_registry"],
+    "created_at": RCPT_001["created_at"],
+    "content_hash": RCPT_001["content_hash"],
+    "signature": {
+        "algorithm": "ed25519",
+        "key_id": KEY_ID,
+        "value": GOLDEN_SIG,
+    },
+    "version": 1,
+    "supersedes": None,
+    "agent_id": AGENT_DID,
+    "contributors": [],
+    "title": "Golden test vector — minimal first version",
+    "type": "data_snapshot",
+    "data_refs": [],
+    "derived_from": [],
+    "visibility": "public",
+}
+
+RCPT_REGISTRY_KEY_B64 = acdp.AcdpProducer.from_seed(
+    bytes([0x11] * 32), "did:web:x", "did:web:x#k"
+).public_key_b64
+
+
+def test_verify_receipt_agrees_across_bindings_on_match(node):
+    """Positive control: py and node both accept the rcpt-001 receipt
+    against its accompanying body."""
+    receipt_json = json.dumps(RCPT_001)
+    body_json = json.dumps(RCPT_BODY)
+    assert acdp.AcdpVerifier.verify_receipt(
+        receipt_json,
+        body_json,
+        RCPT_REGISTRY_KEY_B64,
+        RCPT_001["ctx_id"],
+        RCPT_001["content_hash"],
+        RCPT_001["key_fingerprint"],
+    )
+    assert node.call(
+        "verify_receipt",
+        receipt_json=receipt_json,
+        body_json=body_json,
+        registry_public_key_b64=RCPT_REGISTRY_KEY_B64,
+        expected_ctx_id=RCPT_001["ctx_id"],
+        recomputed_body_hash=RCPT_001["content_hash"],
+        producer_key_fingerprint=RCPT_001["key_fingerprint"],
+    )["ok"]
+
+
+def test_verify_receipt_agrees_across_bindings_on_body_lineage_id_mismatch(node):
+    """py and node both reject a body/receipt `lineage_id` mismatch (RFC-
+    ACDP-0010 §8 step 3) — and, critically, both reject it for the SAME
+    reason (a lineage_id body-binding mismatch), not just "both fail".
+    Mirrors the pattern used for ctx_id binding (and PR #214) above."""
+    receipt_json = json.dumps(RCPT_001)
+    mismatched_body_json = json.dumps(
+        {**RCPT_BODY, "lineage_id": "lin:sha256:" + "b" * 64}
+    )
+    with pytest.raises(Exception, match=r"(?i)lineage_id") as py_exc:
+        acdp.AcdpVerifier.verify_receipt(
+            receipt_json,
+            mismatched_body_json,
+            RCPT_REGISTRY_KEY_B64,
+            RCPT_001["ctx_id"],
+            RCPT_001["content_hash"],
+            RCPT_001["key_fingerprint"],
+        )
+    node_err = node.call_expect_error(
+        "verify_receipt",
+        receipt_json=receipt_json,
+        body_json=mismatched_body_json,
+        registry_public_key_b64=RCPT_REGISTRY_KEY_B64,
+        expected_ctx_id=RCPT_001["ctx_id"],
+        recomputed_body_hash=RCPT_001["content_hash"],
+        producer_key_fingerprint=RCPT_001["key_fingerprint"],
+    )
+    assert "lineage_id" in str(py_exc.value).lower()
+    assert "lineage_id" in node_err.lower()
+
+
+def test_verify_receipt_agrees_across_bindings_on_malformed_body(node):
+    """py and node both reject a malformed body_json as a HOST-input
+    error — distinguishable from a verification/mismatch failure — and
+    for the same reason on both sides."""
+    receipt_json = json.dumps(RCPT_001)
+    with pytest.raises(ValueError, match=r"(?i)body") as py_exc:
+        acdp.AcdpVerifier.verify_receipt(
+            receipt_json,
+            "not json",
+            RCPT_REGISTRY_KEY_B64,
+            RCPT_001["ctx_id"],
+            RCPT_001["content_hash"],
+            RCPT_001["key_fingerprint"],
+        )
+    node_err = node.call_expect_error(
+        "verify_receipt",
+        receipt_json=receipt_json,
+        body_json="not json",
+        registry_public_key_b64=RCPT_REGISTRY_KEY_B64,
+        expected_ctx_id=RCPT_001["ctx_id"],
+        recomputed_body_hash=RCPT_001["content_hash"],
+        producer_key_fingerprint=RCPT_001["key_fingerprint"],
+    )
+    assert "body" in str(py_exc.value).lower()
+    assert "body" in node_err.lower()
+    # And it must NOT be misreported as a lineage_id/mismatch failure.
+    assert "lineage_id" not in str(py_exc.value).lower()
+    assert "lineage_id" not in node_err.lower()
+
+
 def test_sign_challenge_is_deterministic_across_bindings(node):
     """Both bindings sign the same auth-challenge bytes with the same
     seed and MUST produce the same base64 signature.

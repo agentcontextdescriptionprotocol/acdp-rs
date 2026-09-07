@@ -41,8 +41,9 @@ basics, `AcdpVerifier` exposes the full 0.2.0 surface:
   this is a separate call.
 - `verify_body_offline` / `verify_publish_request_offline` — offline
   `did:key` verification (no network).
-- `verify_receipt` / `verify_lineage_head_receipt` — registry receipts
-  (RFC-ACDP-0010/0011).
+- `verify_receipt(receipt_json, body_json, registry_public_key_b64, expected_ctx_id, recomputed_body_hash, producer_key_fingerprint)`
+  / `verify_lineage_head_receipt` — registry receipts (RFC-ACDP-0010/0011);
+  see [Verifying a registry receipt](#verifying-a-registry-receipt) below.
 - `verify_log_checkpoint` / `verify_log_inclusion` /
   `verify_log_consistency` — transparency log (RFC-ACDP-0012).
 - `verify_lifecycle_event` — lifecycle/retraction (RFC-ACDP-0013).
@@ -107,6 +108,32 @@ success and raises on failure (`ValueError` for a malformed `ctx_id` on
 either side, `RuntimeError` for a mismatch) — it never returns `False`, so
 `if acdp.AcdpVerifier.verify_ctx_id_binding(...):` guards a branch that
 can't be reached.
+
+### Verifying a registry receipt
+
+`verify_receipt` (RFC-ACDP-0010 §8) takes the accompanying `body_json` as
+a **required** second argument — it binds the receipt's `lineage_id`,
+`origin_registry`, and `created_at` to the served body's own fields (§8
+step 3):
+
+```python
+acdp.AcdpVerifier.verify_receipt(
+    receipt_json,             # the `registry_receipt` object, as received
+    body_json,                 # the accompanying `body`, same retrieval
+    registry_public_key_b64,   # resolved via AcdpDid.web_to_url + httpx
+    expected_ctx_id,           # the ctx_id you actually requested
+    recomputed_body_hash,      # YOUR OWN verify_content_hash result —
+                                # never the body's echoed content_hash
+    producer_key_fingerprint,  # fingerprint of the resolved producer key
+)
+```
+
+A malformed `body_json` raises `ValueError` (host input); a body/receipt
+mismatch raises `RuntimeError` (verification failure) — the two are
+distinguishable by exception type. Two checks still stay the HOST's
+obligation, because neither needs the body: the serving-authority binding
+(`receipt.registry_did` must equal the authority you actually fetched
+from) and recomputing (never trusting) the body hash you pass in.
 
 ## Design rules
 

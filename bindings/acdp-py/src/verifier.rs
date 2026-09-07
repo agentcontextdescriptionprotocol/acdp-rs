@@ -327,21 +327,18 @@ impl PyAcdpVerifier {
     /// `AcdpDidDocument.key_for_algorithm`, then pass the key here.
     ///
     /// **Two RFC-ACDP-0010 checks remain the HOST's obligation** —
-    /// this binding makes no HTTP calls and never sees the accompanying
-    /// body, so it cannot perform them:
+    /// this binding makes no HTTP calls, so it cannot perform them:
     ///
     /// 1. **Serving-authority binding** — `receipt.registry_did` MUST
     ///    equal `"did:web:" + <authority>` where `<authority>` is the
     ///    authority the response was *actually fetched from*. Compare
     ///    it against your HTTP client's request URL, not against any
     ///    field inside the response.
-    /// 2. **Body bindings** — the receipt's `lineage_id`,
-    ///    `origin_registry`, and `created_at` MUST equal the
-    ///    accompanying body's fields. And `recomputed_body_hash` MUST
-    ///    be the body hash you independently RECOMPUTED (run
-    ///    `AcdpVerifier.verify_content_hash` on the body first and pass
-    ///    that verified hash) — never the body's echoed `content_hash`
-    ///    field taken on faith.
+    /// 2. **Recompute, don't trust, the body hash** —
+    ///    `recomputed_body_hash` MUST be the body hash you
+    ///    independently RECOMPUTED (run `AcdpVerifier.verify_content_hash`
+    ///    on the body first and pass that verified hash) — never the
+    ///    body's echoed `content_hash` field taken on faith.
     ///
     /// * `receipt_json` — the `registry_receipt` object from a
     ///   `FullContext` retrieval, exactly as received on the wire.

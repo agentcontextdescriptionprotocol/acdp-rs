@@ -304,13 +304,18 @@ impl AcdpVerifier {
     /// DID document via `AcdpDid.webToUrl` + `fetch`, extract the key
     /// with `AcdpDidDocument.keyForAlgorithm`).
     ///
-    /// **One check remains the HOST's obligation** — this binding makes
-    /// no HTTP calls, so it cannot perform it:
+    /// **Two checks remain the HOST's obligation** — this binding makes
+    /// no HTTP calls, so it cannot perform them:
     ///
     /// 1. **Serving-authority binding** — `receipt.registry_did` MUST
     ///    equal `"did:web:" + <authority>` where `<authority>` is the
     ///    authority the response was *actually fetched from*, not
     ///    whatever the receipt claims.
+    /// 2. **Recompute, don't trust, the body hash** —
+    ///    `recomputedBodyHash` MUST be the body hash you independently
+    ///    RECOMPUTED (run `AcdpVerifier.verifyContentHash` on the body
+    ///    first and pass that verified hash) — never the body's echoed
+    ///    `content_hash` field taken on faith.
     ///
     /// * `receiptJson` — the `registry_receipt` object from a
     ///   `FullContext` retrieval.

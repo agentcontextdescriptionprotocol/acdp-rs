@@ -1,11 +1,39 @@
 # Changelog — acdp (Python SDK)
 
-Independently versioned from the Rust crates (this package is
-`publish = false` on crates.io and released by its own workflow). Kept
-in lock-step with the Node SDK (`bindings/acdp-node`) — the interop
-suite fails if the two versions or API surfaces drift.
+Released by its own workflow, but versioned in lockstep with the `acdp`
+crate: the release-plz SDK cascade (`release-plz.yml`) stamps the
+crate's release version into this package's manifests at build time.
+Kept in lock-step with the Node SDK (`bindings/acdp-node`) — the
+interop suite fails if the two versions or API surfaces drift.
 
-## Unreleased
+## 0.10.0 — 2026-09-06
+
+### Breaking
+
+- **`AcdpVerifier.verify_receipt` now requires `body_json` as a second
+  positional argument** (RFC-ACDP-0010 §8 step 3): the receipt's
+  `lineage_id`, `origin_registry`, and `created_at` are now bound to the
+  accompanying body's own fields — the sibling check to
+  `verify_ctx_id_binding` on the receipt-bearing path, closing the same
+  gap for receipts that a prior release closed for the receipt-less path.
+  Every existing call must add the body JSON in position 2 (immediately
+  after `receipt_json`). A malformed `body_json` raises `ValueError`
+  (host input), distinguishable from a `RuntimeError` for a genuine
+  mismatch. See [Verifying a registry receipt](README.md#verifying-a-registry-receipt).
+
+  ```python
+  # Before (0.9.x and earlier)
+  acdp.AcdpVerifier.verify_receipt(
+      receipt_json, registry_public_key_b64, expected_ctx_id,
+      recomputed_body_hash, producer_key_fingerprint,
+  )
+
+  # After (0.10.0)
+  acdp.AcdpVerifier.verify_receipt(
+      receipt_json, body_json, registry_public_key_b64, expected_ctx_id,
+      recomputed_body_hash, producer_key_fingerprint,
+  )
+  ```
 
 ### Added
 

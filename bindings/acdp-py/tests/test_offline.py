@@ -282,6 +282,36 @@ RCPT001 = {
     },
 }
 
+# The sig-001 body `RCPT001` attests, assembled from sig-001's
+# `producer_content`/`publish_request_body` plus its
+# `registry_assigned` block (schemas/conformance/sig-001*.json:49-54) —
+# rcpt-001-receipt-golden.json ships no paired body, so `verify_receipt`
+# callers must assemble one. `supersedes` is included as `null` (not
+# omitted): `Body` has no `#[serde(default)]` on that field, so the key
+# MUST be present even when null.
+RCPT_BODY = {
+    "ctx_id": RCPT001["ctx_id"],
+    "lineage_id": RCPT001["lineage_id"],
+    "origin_registry": RCPT001["origin_registry"],
+    "created_at": RCPT001["created_at"],
+    "content_hash": RCPT001["content_hash"],
+    "signature": {
+        "algorithm": "ed25519",
+        "key_id": "did:web:agents.example.com:test-producer#key-1",
+        "value": "ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ==",
+    },
+    "version": 1,
+    "supersedes": None,
+    "agent_id": "did:web:agents.example.com:test-producer",
+    "contributors": [],
+    "title": "Golden test vector — minimal first version",
+    "type": "data_snapshot",
+    "data_refs": [],
+    "derived_from": [],
+    "visibility": "public",
+}
+RCPT_BODY_JSON = json.dumps(RCPT_BODY)
+
 
 def _registry_public_key_b64():
     # The registry's receipt key is the Ed25519 key with seed [0x11]*32.
@@ -295,6 +325,7 @@ def _registry_public_key_b64():
 def test_rcpt001_receipt_verifies():
     assert acdp.AcdpVerifier.verify_receipt(
         json.dumps(RCPT001),
+        RCPT_BODY_JSON,
         _registry_public_key_b64(),
         RCPT001["ctx_id"],
         RCPT001["content_hash"],
@@ -306,6 +337,7 @@ def test_rcpt001_rejects_wrong_producer_fingerprint():
     with pytest.raises(Exception, match=r"(?i)fingerprint"):
         acdp.AcdpVerifier.verify_receipt(
             json.dumps(RCPT001),
+            RCPT_BODY_JSON,
             _registry_public_key_b64(),
             RCPT001["ctx_id"],
             RCPT001["content_hash"],
@@ -315,11 +347,16 @@ def test_rcpt001_rejects_wrong_producer_fingerprint():
 
 def test_rcpt001_rejects_mutated_created_at():
     """Backdating (or any mutation of) `created_at` changes the receipt
-    preimage — the registry signature must no longer verify."""
-    tampered = {**RCPT001, "created_at": "2026-04-16T10:30:15.124Z"}
+    preimage — the registry signature must no longer verify. The body's
+    `created_at` is mutated identically so the §8 step 3 body-binding
+    check (which would otherwise catch the mismatch first) still passes
+    and the test exercises the signature check it names."""
+    tampered_receipt = {**RCPT001, "created_at": "2026-04-16T10:30:15.124Z"}
+    tampered_body = {**RCPT_BODY, "created_at": "2026-04-16T10:30:15.124Z"}
     with pytest.raises(Exception, match=r"(?i)signature"):
         acdp.AcdpVerifier.verify_receipt(
-            json.dumps(tampered),
+            json.dumps(tampered_receipt),
+            json.dumps(tampered_body),
             _registry_public_key_b64(),
             RCPT001["ctx_id"],
             RCPT001["content_hash"],
@@ -334,6 +371,7 @@ def test_rcpt001_rejects_unknown_member():
     with pytest.raises(Exception):
         acdp.AcdpVerifier.verify_receipt(
             json.dumps(extended),
+            RCPT_BODY_JSON,
             _registry_public_key_b64(),
             RCPT001["ctx_id"],
             RCPT001["content_hash"],
@@ -350,6 +388,7 @@ def test_receipt_rejects_non_canonical_created_at_byte_form():
     with pytest.raises(Exception, match=r"(?i)created_at"):
         acdp.AcdpVerifier.verify_receipt(
             json.dumps(tampered),
+            RCPT_BODY_JSON,
             _registry_public_key_b64(),
             RCPT001["ctx_id"],
             RCPT001["content_hash"],
@@ -361,8 +400,70 @@ def test_rcpt001_rejects_wrong_ctx_id():
     with pytest.raises(Exception, match=r"(?i)ctx_id"):
         acdp.AcdpVerifier.verify_receipt(
             json.dumps(RCPT001),
+            RCPT_BODY_JSON,
             _registry_public_key_b64(),
             "acdp://registry.example.com/00000000-0000-4000-8000-000000000000",
+            RCPT001["content_hash"],
+            RCPT001["key_fingerprint"],
+        )
+
+
+def test_rcpt001_rejects_malformed_body_json():
+    """A malformed `body_json` is a HOST-input error (`ValueError`),
+    distinguishable from a verification failure (`RuntimeError`) —
+    the body never gets far enough to be cross-checked."""
+    with pytest.raises(ValueError, match=r"(?i)body"):
+        acdp.AcdpVerifier.verify_receipt(
+            json.dumps(RCPT001),
+            "not json",
+            _registry_public_key_b64(),
+            RCPT001["ctx_id"],
+            RCPT001["content_hash"],
+            RCPT001["key_fingerprint"],
+        )
+
+
+def test_rcpt001_rejects_body_lineage_id_mismatch():
+    """§8 step 3 body binding: the receipt's `lineage_id` MUST equal the
+    accompanying body's `lineage_id` — a mismatch is a verification
+    failure (`RuntimeError`), not a host-input error."""
+    mismatched_body = {**RCPT_BODY, "lineage_id": "lin:sha256:" + "a" * 64}
+    with pytest.raises(RuntimeError, match=r"(?i)lineage_id"):
+        acdp.AcdpVerifier.verify_receipt(
+            json.dumps(RCPT001),
+            json.dumps(mismatched_body),
+            _registry_public_key_b64(),
+            RCPT001["ctx_id"],
+            RCPT001["content_hash"],
+            RCPT001["key_fingerprint"],
+        )
+
+
+def test_rcpt001_rejects_body_origin_registry_mismatch():
+    """§8 step 3 body binding: the receipt's `origin_registry` MUST
+    equal the accompanying body's `origin_registry`."""
+    mismatched_body = {**RCPT_BODY, "origin_registry": "other.example.com"}
+    with pytest.raises(RuntimeError, match=r"(?i)origin_registry"):
+        acdp.AcdpVerifier.verify_receipt(
+            json.dumps(RCPT001),
+            json.dumps(mismatched_body),
+            _registry_public_key_b64(),
+            RCPT001["ctx_id"],
+            RCPT001["content_hash"],
+            RCPT001["key_fingerprint"],
+        )
+
+
+def test_rcpt001_rejects_body_created_at_mismatch():
+    """§8 step 3 body binding: the receipt's `created_at` MUST equal
+    the accompanying body's `created_at`."""
+    mismatched_body = {**RCPT_BODY, "created_at": "2026-04-16T10:30:15.999Z"}
+    with pytest.raises(RuntimeError, match=r"(?i)created_at"):
+        acdp.AcdpVerifier.verify_receipt(
+            json.dumps(RCPT001),
+            json.dumps(mismatched_body),
+            _registry_public_key_b64(),
+            RCPT001["ctx_id"],
             RCPT001["content_hash"],
             RCPT001["key_fingerprint"],
         )

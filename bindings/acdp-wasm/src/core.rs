@@ -251,8 +251,20 @@ pub fn fingerprint_ed25519_b64(public_key_b64: &str) -> Result<String, String> {
 /// mismatch, which is a `{"valid": false, ...}` verdict like any other
 /// receipt cross-check failure.
 ///
-/// The serving-authority binding obligation stays with the HOST/caller
-/// (see the py binding docs). This returns a verdict.
+/// Two checks remain the HOST/caller's obligation — this binding makes
+/// no HTTP calls, so it cannot perform them (see the py binding docs
+/// for the full rationale):
+///
+/// 1. Serving-authority binding — `receipt.registry_did` MUST equal
+///    `"did:web:" + <authority>` where `<authority>` is the authority
+///    the response was *actually fetched from*, not whatever the
+///    receipt claims.
+/// 2. Recompute, don't trust, the body hash — `recomputed_body_hash`
+///    MUST be the body hash independently recomputed (e.g. via
+///    `verify_content_hash_json`), never the body's echoed
+///    `content_hash` field taken on faith.
+///
+/// This returns a verdict.
 pub fn verify_receipt_json(
     receipt_json: &str,
     body_json: &str,

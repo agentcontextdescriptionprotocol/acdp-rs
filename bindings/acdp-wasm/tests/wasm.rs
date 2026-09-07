@@ -173,3 +173,156 @@ fn verify_ctx_id_rejects_malformed_body_json_in_wasm() {
     // Malformed body JSON is malformed HOST input — this one throws.
     assert!(acdp_wasm::verify_ctx_id_binding("not json", CTX).is_err());
 }
+
+// ── verifyReceipt (RFC-ACDP-0010 §8 registry receipts) ───────────────────
+//
+// The real-engine complement to golden.rs's native `verify_receipt_json`
+// coverage: proves the `#[wasm_bindgen(js_name = verifyReceipt)]` export
+// itself links and executes in a genuine wasm engine. rcpt-001 fixture
+// values mirror the py/node `RCPT001`/`RCPT_001` constants exactly.
+
+const RCPT_001_RECEIPT_JSON: &str = r#"{
+  "registry_did": "did:web:registry.example.com",
+  "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+  "lineage_id": "lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a",
+  "origin_registry": "registry.example.com",
+  "created_at": "2026-04-16T10:30:15.123Z",
+  "content_hash": "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5",
+  "key_fingerprint": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "did:web:registry.example.com#receipt-key-1",
+    "value": "vBgQKmn17pHXXY95C07BBeconmjDIdYIvxN5B+YXrQ7tIzFsDNsh1TglzgxOyPUp8lwTz7zwMNiK+Sn5whveDg=="
+  }
+}"#;
+
+const RCPT_001_REGISTRY_KEY_B64: &str = "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=";
+const RCPT_001_CTX_ID: &str = "acdp://registry.example.com/12345678-1234-4321-8123-123456781234";
+const RCPT_001_CONTENT_HASH: &str =
+    "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5";
+const RCPT_001_FINGERPRINT: &str =
+    "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070";
+
+/// The sig-001 body `RCPT_001_RECEIPT_JSON` attests (assembled from
+/// `producer_content` + `registry_assigned`, mirroring golden.rs's
+/// `rcpt_001_body_json`), with `lineage_id`/`origin_registry`/
+/// `created_at` overridable to build a mismatch fixture.
+fn rcpt_001_body_json(lineage_id: &str, origin_registry: &str, created_at: &str) -> String {
+    format!(
+        r#"{{
+  "ctx_id": "acdp://registry.example.com/12345678-1234-4321-8123-123456781234",
+  "lineage_id": "{lineage_id}",
+  "origin_registry": "{origin_registry}",
+  "created_at": "{created_at}",
+  "content_hash": "sha256:f170150ddbf59d99794e7797824591b374d459782084597b644ecc57a41031b5",
+  "signature": {{
+    "algorithm": "ed25519",
+    "key_id": "did:web:agents.example.com:test-producer#key-1",
+    "value": "ErkbV+FUdn49TgF3zJ3RBe3AmyGxLVAQdMjlhabUfM96qendmWwdVodX/SV3O3aKLypbUu6gmb5Npt3O/w7nDQ=="
+  }},
+  "version": 1,
+  "supersedes": null,
+  "agent_id": "did:web:agents.example.com:test-producer",
+  "contributors": [],
+  "title": "Golden test vector — minimal first version",
+  "type": "data_snapshot",
+  "data_refs": [],
+  "derived_from": [],
+  "visibility": "public"
+}}"#
+    )
+}
+
+fn rcpt_001_body() -> String {
+    rcpt_001_body_json(
+        "lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a",
+        "registry.example.com",
+        "2026-04-16T10:30:15.123Z",
+    )
+}
+
+#[wasm_bindgen_test]
+fn rcpt_001_receipt_verifies_in_wasm() {
+    let verdict = acdp_wasm::verify_receipt(
+        RCPT_001_RECEIPT_JSON,
+        &rcpt_001_body(),
+        RCPT_001_REGISTRY_KEY_B64,
+        RCPT_001_CTX_ID,
+        RCPT_001_CONTENT_HASH,
+        RCPT_001_FINGERPRINT,
+    )
+    .expect("verifyReceipt must not throw on golden input");
+    assert!(is_valid(&verdict), "rcpt-001 must verify: {verdict}");
+}
+
+#[wasm_bindgen_test]
+fn rcpt_001_rejects_body_lineage_id_mismatch_in_wasm() {
+    let mismatched_body = rcpt_001_body_json(
+        &format!("lin:sha256:{}", "a".repeat(64)),
+        "registry.example.com",
+        "2026-04-16T10:30:15.123Z",
+    );
+    let verdict = acdp_wasm::verify_receipt(
+        RCPT_001_RECEIPT_JSON,
+        &mismatched_body,
+        RCPT_001_REGISTRY_KEY_B64,
+        RCPT_001_CTX_ID,
+        RCPT_001_CONTENT_HASH,
+        RCPT_001_FINGERPRINT,
+    )
+    .expect("a body-binding mismatch is a verdict, not a throw");
+    assert!(!is_valid(&verdict), "lineage_id mismatch must FAIL");
+}
+
+#[wasm_bindgen_test]
+fn rcpt_001_rejects_body_origin_registry_mismatch_in_wasm() {
+    let mismatched_body = rcpt_001_body_json(
+        "lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a",
+        "other.example.com",
+        "2026-04-16T10:30:15.123Z",
+    );
+    let verdict = acdp_wasm::verify_receipt(
+        RCPT_001_RECEIPT_JSON,
+        &mismatched_body,
+        RCPT_001_REGISTRY_KEY_B64,
+        RCPT_001_CTX_ID,
+        RCPT_001_CONTENT_HASH,
+        RCPT_001_FINGERPRINT,
+    )
+    .expect("a body-binding mismatch is a verdict, not a throw");
+    assert!(!is_valid(&verdict), "origin_registry mismatch must FAIL");
+}
+
+#[wasm_bindgen_test]
+fn rcpt_001_rejects_body_created_at_mismatch_in_wasm() {
+    let mismatched_body = rcpt_001_body_json(
+        "lin:sha256:c7fef01c000f8edaa9cb46122ceb5d7bca38328f002fb0f40e362e3b289bbb2a",
+        "registry.example.com",
+        "2026-04-16T10:30:15.124Z",
+    );
+    let verdict = acdp_wasm::verify_receipt(
+        RCPT_001_RECEIPT_JSON,
+        &mismatched_body,
+        RCPT_001_REGISTRY_KEY_B64,
+        RCPT_001_CTX_ID,
+        RCPT_001_CONTENT_HASH,
+        RCPT_001_FINGERPRINT,
+    )
+    .expect("a body-binding mismatch is a verdict, not a throw");
+    assert!(!is_valid(&verdict), "created_at mismatch must FAIL");
+}
+
+#[wasm_bindgen_test]
+fn rcpt_001_rejects_malformed_body_json_in_wasm() {
+    // A malformed body_json is malformed HOST input — this one throws,
+    // distinct from a cross_check_body mismatch verdict.
+    assert!(acdp_wasm::verify_receipt(
+        RCPT_001_RECEIPT_JSON,
+        "not json",
+        RCPT_001_REGISTRY_KEY_B64,
+        RCPT_001_CTX_ID,
+        RCPT_001_CONTENT_HASH,
+        RCPT_001_FINGERPRINT,
+    )
+    .is_err());
+}

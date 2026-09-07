@@ -12,7 +12,7 @@
 # docs/research/wasm-target.md.
 [package]
 name        = "acdp-wasm"
-version = "0.8.4"
+version = "0.10.0"
 edition     = "2021"
 description = "Agent Context Distribution Protocol — WebAssembly verification core"
 license     = "MIT OR Apache-2.0"
